@@ -19,7 +19,7 @@ or a free-text task description.
 Check the environment variable `OMC_SLUG` (e.g. `echo "$OMC_SLUG"`) and the
 current branch (`git rev-parse --abbrev-ref HEAD`).
 
-- **Prepared path**: `OMC_SLUG` is set and the current branch ends with it —
+- **Prepared path**: `OMC_SLUG` is set to a non-empty value and the current branch ends with it —
   the omc CLI created this worktree and seeded this session. Continue below.
 - **Cold path**: otherwise. STOP and tell the user: work starts from the shell
   with `omc start <ticket-or-description>` — the CLI names the session, sets
