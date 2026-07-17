@@ -1,1 +1,1 @@
-AGENTS.md
+.omc/internal/AGENTS.md

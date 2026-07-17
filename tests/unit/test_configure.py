@@ -64,3 +64,27 @@ def test_interactive_requires_tty(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     assert main(["configure"]) == 2
     assert "TTY" in capsys.readouterr().err
+
+
+def test_configure_in_repo_creates_agents_chain(tmp_path, monkeypatch):
+    import subprocess
+
+    _home(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    assert main(["configure", "--defaults"]) == 0
+    assert (repo / "AGENTS.md").is_symlink()
+    assert (repo / "CLAUDE.md").is_symlink()
+    assert (repo / ".omc" / "internal" / "AGENTS.md").is_file()
+    assert (repo / ".omc" / "config" / "AGENTS.md").is_file()
+
+
+def test_configure_outside_repo_skips_chain(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    outside = tmp_path / "nowhere"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    assert main(["configure", "--defaults"]) == 0
+    assert not (outside / "AGENTS.md").exists()

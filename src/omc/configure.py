@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import sys
 
+from .agentsmd import ensure_agents_chain
 from .config import store
 from .config.schema import Config, ProviderConfig
 from .errors import Refusal
 from .providers.registry import get_provider, provider_names
 from .toolctx import ToolContext
+from .wtconfig import repo_root
 
 _PLUGIN_HINTS = """\
 omc's in-session skills install as a plugin — once per harness you use:
@@ -42,6 +44,7 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
         store.save(ctx.home, cfg)
         label = "Wrote defaults to" if defaults and not sets else "Updated"
         print(f"{label} {store.config_path(ctx.home)}")
+        _ensure_repo_chain(ctx)
         print(_PLUGIN_HINTS)
         return 0
     if not sys.stdin.isatty():
@@ -50,8 +53,17 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
     _walkthrough(cfg)
     store.save(ctx.home, cfg)
     print(f"Saved {store.config_path(ctx.home)}")
+    _ensure_repo_chain(ctx)
     print(_PLUGIN_HINTS)
     return 0
+
+
+def _ensure_repo_chain(ctx: ToolContext) -> None:
+    """In a git repo, verify/create the AGENTS.md control chain; outside one,
+    configure is global-only and the chain is skipped."""
+    root = repo_root(ctx)
+    if root is not None:
+        ensure_agents_chain(ctx, root)
 
 
 def _walkthrough(cfg: Config) -> None:  # pragma: no cover - PTY-driven, E2E territory
