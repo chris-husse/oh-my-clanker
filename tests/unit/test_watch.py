@@ -73,12 +73,31 @@ def _run_once(repo, ctx, *, enable_documentation=False):
         os.chdir(old)
 
 
-def test_tick_up_to_date(tmp_path, capsys):
+def test_loop_tick_up_to_date_does_not_reindex(tmp_path, capsys):
+    from omc.watch import _tick
+
+    _, repo = _repo_with_origin(tmp_path)
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False)
+    assert "up to date" in capsys.readouterr().err
+    assert not calls.exists()  # loop mode: nothing new -> no reindex
+
+
+def test_once_refreshes_index_even_when_up_to_date(tmp_path, capsys):
     _, repo = _repo_with_origin(tmp_path)
     ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
-    assert "up to date" in capsys.readouterr().err
-    assert not calls.exists()  # no new commits -> no reindex
+    err = capsys.readouterr().err
+    assert "up to date" in err
+    assert "analyze --skip-agents-md --skip-skills" in calls.read_text()  # --once = refresh NOW
+
+
+def test_once_with_documentation_refreshes_docs_even_when_up_to_date(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx, enable_documentation=True) == 0
+    recorded = calls.read_text()
+    assert "analyze" in recorded and "wiki --provider claude" in recorded
 
 
 def test_tick_syncs_and_reindexes(tmp_path, capsys):

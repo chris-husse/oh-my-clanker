@@ -37,9 +37,12 @@ def test_watch_once_syncs_and_reindexes_for_real(container):
     assert rc == 0, "ensure_wt_config did not seed the starter"
 
 
-def test_watch_once_up_to_date_is_quiet(container):
+def test_watch_once_up_to_date_still_refreshes_index(container):
     configure_omc(container, "claude")
     repo = make_work_repo(container)
     rc, out = run_in(container, ["omc", "watch", "--once"], cwd=repo, timeout=300)
     assert rc == 0, out
     assert "up to date" in out, out
+    # --once is the refresh-now button: the REAL index is built even with no new commits
+    rc, _ = run_in(container, ["test", "-d", f"{repo}/.gitnexus"])
+    assert rc == 0, f"--once did not force an index refresh:\n{out[:1500]}"

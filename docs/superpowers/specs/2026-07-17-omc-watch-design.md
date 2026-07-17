@@ -30,8 +30,9 @@ Per tick, narrated in start's `→`/`✓` style:
    flag). These are the same operations the /omc:index and /omc:document
    skills prescribe — watch is the automation interface, skills the
    in-session interface.
-4. Nothing new → `· up to date`. Tick failures narrate and skip, never crash
-   the loop.
+4. Nothing new → `· up to date` — in LOOP mode that's the whole tick, but
+   `--once` is the "refresh now" button: index (and docs when enabled) run
+   unconditionally. Tick failures narrate and skip, never crash the loop.
 
 ## wt configuration (`ensure_wt_config`, called by start + watch)
 

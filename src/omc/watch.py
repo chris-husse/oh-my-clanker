@@ -54,7 +54,14 @@ def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentatio
         _say("✓ documentation refreshed → .omc/docs/gitnexus/docs")
 
 
-def _tick(ctx: ToolContext, cfg: Config, root: str, enable_documentation: bool) -> None:
+def _tick(
+    ctx: ToolContext,
+    cfg: Config,
+    root: str,
+    *,
+    enable_documentation: bool,
+    force_refresh: bool,
+) -> None:
     base = cfg.worktree.base_branch
     branch = _out(ctx, [ctx.git_bin, "rev-parse", "--abbrev-ref", "HEAD"], root)
     if branch != base:
@@ -68,6 +75,10 @@ def _tick(ctx: ToolContext, cfg: Config, root: str, enable_documentation: bool) 
     ahead = _out(ctx, [ctx.git_bin, "rev-list", "--count", f"origin/{base}..HEAD"], root)
     if behind in ("", "0"):
         _say("· up to date")
+        if force_refresh:
+            # --once is the "refresh now" button: index (and docs, when enabled)
+            # run unconditionally, not only when new commits arrived.
+            _refresh_index(ctx, cfg, root, enable_documentation)
         return
     if ahead not in ("", "0"):
         _say(f"· {base} has diverged from origin/{base} — resolve manually, skipping")
@@ -121,7 +132,7 @@ def run_watch(
         f"{', documentation enabled' if enable_documentation else ''}) — Ctrl-C stops"
     )
     while True:
-        _tick(ctx, cfg, root, enable_documentation)
+        _tick(ctx, cfg, root, enable_documentation=enable_documentation, force_refresh=once)
         if once:
             return 0
         time.sleep(interval)  # pragma: no cover - the loop shape is trivial
