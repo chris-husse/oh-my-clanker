@@ -8,6 +8,7 @@ the session is created NAMED after the slug (resumable via `claude --resume`).
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -27,11 +28,29 @@ _ONBOARDED = (
 )
 
 
+def _extract_json_array(text: str):
+    """docker exec merges stderr (ANSI-styled wt log lines) into stdout — try every
+    '[' until one parses as the JSON array."""
+    end = text.rindex("]") + 1
+    for m in re.finditer(r"\[", text):
+        try:
+            data = json.loads(text[m.start() : end])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, list):
+            return data
+    raise AssertionError(f"no JSON array in wt output:\n{text[:800]}")
+
+
 def _worktree_for(container, repo, key_prefix):
     rc, wtout = run_in(container, ["wt", "list", "--format=json"], cwd=repo)
     assert rc == 0, wtout
-    data = json.loads(wtout[wtout.index("[") : wtout.rindex("]") + 1])
-    entry = next(w for w in data if str(w.get("branch", "")).startswith(f"feature/{key_prefix}"))
+    data = _extract_json_array(wtout)
+    entry = next(
+        (w for w in data if str(w.get("branch", "")).startswith(f"feature/{key_prefix}")),
+        None,
+    )
+    assert entry, f"no feature/{key_prefix}* worktree found — omc start died early?\n{wtout[:800]}"
     branch = entry["branch"]
     return branch.split("/", 1)[1], entry["path"]  # (slug == session name, worktree path)
 
