@@ -34,6 +34,8 @@ def test_opencode_entry_registers_skills_dir():
 USER_FACING_SKILLS = (
     "slug",
     "start",
+    "plan",
+    "implement",
     "finish",
     "build",
     "verify",
@@ -49,6 +51,7 @@ INTERNAL_SKILLS = (
     "create-mr",
     "get-mr-description",
     "squash",
+    "spec",
     "gitnexus-ensure",
     "gitnexus-index",
     "gitnexus-document",
@@ -123,12 +126,14 @@ def test_start_skill_contract():
     text = (ROOT / "skills" / "start" / "SKILL.md").read_text()
     for needle in (
         "OMC_SLUG",
-        "superpowers:brainstorming",
+        "omc:plan",
         "omc start",
         "$ARGUMENTS",
         "merge-base",
     ):
         assert needle in text, f"start skill missing {needle!r}"
+    # start hands off to plan; plan owns the brainstorming handoff now
+    assert "Invoke `superpowers:brainstorming`" not in text
 
 
 def test_gitnexus_ensure_contract():
@@ -163,6 +168,42 @@ def test_explain_user_facing_contract():
     text = (ROOT / "skills" / "explain" / "SKILL.md").read_text()
     for needle in (".omc/skills/explain-context", "gitnexus-explain", "$ARGUMENTS"):
         assert needle in text, f"explain missing {needle!r}"
+
+
+def test_plan_skill_contract():
+    text = (ROOT / "skills" / "plan" / "SKILL.md").read_text()
+    for needle in (
+        "/omc:explain",
+        "superpowers:brainstorming",
+        "primer",
+        "$ARGUMENTS",
+        "OMC_SLUG",
+        "non-fatal",
+    ):
+        assert needle in text, f"plan skill missing {needle!r}"
+    # composition rule: explain is called as a command, never unpacked
+    assert "never reach into" in text
+
+
+def test_implement_skill_contract():
+    text = (ROOT / "skills" / "implement" / "SKILL.md").read_text()
+    for needle in (
+        "`spec`",
+        "writing-plans",
+        "subagent-driven-development",
+        "finish",
+        "silently resume",
+        "/omc:explain",
+    ):
+        assert needle in text, f"implement skill missing {needle!r}"
+    # phases run strictly spec -> plan -> build -> ship
+    order = [
+        text.index("`spec`"),
+        text.index("writing-plans"),
+        text.index("subagent-driven-development"),
+        text.index("`finish`"),
+    ]
+    assert order == sorted(order), "implement must order spec -> plan -> build -> ship"
 
 
 def test_index_and_document_delegate():
@@ -226,3 +267,18 @@ def test_integrate_skill_contract():
     assert "review" in text.lower() and "fresh" in text.lower()
     assert "zero writes" in text.lower() or "no writes" in text.lower()
     assert "--defaults" in text  # the do-NOT-reset-config warning
+
+
+def test_spec_skill_contract():
+    text = (ROOT / "skills" / "spec" / "SKILL.md").read_text()
+    for needle in (
+        "/omc:explain",
+        "EACH section",
+        "whole-spec",
+        "architectural",
+        "follow-up",
+        "review",
+    ):
+        assert needle in text, f"spec skill missing {needle!r}"
+    # spec-phase emphasis is architecture; implementation choices are plan-phase
+    assert "plan phase" in text
