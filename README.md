@@ -1,0 +1,106 @@
+# Oh My Clanker!
+
+> Turn "I have a ticket" into "I'm in a prepared worktree with an LLM session that already knows the ticket" — for Claude Code, Codex, and OpenCode.
+
+`omc` is one repo, two things. A small, deterministic CLI does what a computer's good at: probing your tools, naming a branch, creating a worktree, launching and naming a session. A skills plugin — installed straight from this repo into your harness — does what only an LLM can: read the ticket, decide if there's enough to go on, kick off a brainstorm. There's no skill-sync step and no copying files into provider config directories; each harness's own plugin manager pulls skills from here directly. ("Clanker": what you call a robot after it's done all of that for you.)
+
+## Install
+
+1. Install the CLI:
+
+   ```bash
+   uv tool install git+https://github.com/chris-husse/oh-my-clanker
+   ```
+
+2. Configure it — pick a default provider and, optionally, a model per provider:
+
+   ```bash
+   omc configure
+   ```
+
+   Non-interactive equivalents exist for scripting: `omc configure --defaults` or `omc configure --set llm.default=claude`.
+
+3. Install the skills plugin for each harness you use:
+
+   | Harness | Install |
+   |---|---|
+   | Claude Code | `/plugin marketplace add chris-husse/oh-my-clanker` then `/plugin install omc@oh-my-clanker` |
+   | Codex | `codex plugin marketplace add chris-husse/oh-my-clanker`, then install `omc` from `/plugins` |
+   | OpenCode | add `"plugin": ["omc@git+https://github.com/chris-husse/oh-my-clanker.git"]` to `opencode.json` |
+
+   `omc`'s session skill hands off to [superpowers](https://github.com/obra/superpowers)'s brainstorming skill, and declares it as a plugin dependency — but install superpowers explicitly yourself for every harness. See the caveat right below for why that matters on Claude Code specifically.
+
+   > **Known issue (Claude Code):** `claude plugin list` may report `omc@oh-my-clanker` as "failed to load", citing a missing `superpowers@oh-my-clanker` dependency. That's a Claude Code limitation, not a step you missed: a bare-name plugin dependency resolves only *within its own declaring marketplace*, and the `oh-my-clanker` marketplace will never carry a `superpowers` entry (superpowers ships from its own marketplace, `obra/superpowers-marketplace`). This is confirmed order-independent — installing superpowers before or after `omc` makes no difference. Install superpowers anyway, since `/omc:start` needs it either way; if `omc`'s skills still aren't being served, load this repo directly for the session instead: `claude --plugin-dir /path/to/oh-my-clanker`. Full write-up: [`docker/PLUGIN-NOTES.md`](docker/PLUGIN-NOTES.md).
+
+## Usage
+
+`omc start` takes exactly one positional argument, in any of three shapes:
+
+```bash
+omc start PROJ-123
+omc start https://yourteam.atlassian.net/browse/PROJ-123
+omc start "add rate limiting to the public API"
+```
+
+A ticket key or URL is resolved through whatever tracker tool your session already has configured (Jira MCP, a GitHub/GitLab MCP or CLI, …); free text is used as-is. Either way, here's what happens end to end:
+
+1. **Gate** — refuses to run until `omc configure` has been done once.
+2. **Probe** — real `--version` calls (never file-exists checks) against `git`, `wt`, and your configured provider CLI. Anything missing fails loud with an install hint, before anything else happens.
+3. **Slug** — one headless call to your provider turns the context into a short branch slug (`proj-123-fix-login-timeout`) — or a precise, actionable refusal if it can't (no tracker tool configured, tracker tool not authenticated, ticket not found, or free text too thin to name work after).
+4. **Worktree** — fetches the base branch and hands the slug to `wt` to create a fresh worktree on `{branch_prefix}{slug}` (`feature/proj-123-fix-login-timeout` by default). Re-running `omc start` for the same ticket re-enters that same worktree instead of erroring.
+5. **Handoff** — sets your terminal tab's title to the slug and launches your provider's interactive session *inside* the worktree, seeded with `/omc:start <context>`. On Claude Code the session is also *named* after the slug (`-n <slug>`), so you can walk away and pick it back up later with `claude --resume <slug>` — Codex and OpenCode have no session-naming flag, so for those the tab title is the only breadcrumb.
+
+From there, `/omc:start` takes over inside the session itself: it gathers the ticket's context (parent/epic, linked docs — each summarized, or reported as "couldn't fetch" rather than failing outright), verifies the base branch is still fresh (rebasing, or stopping cleanly on conflicts — it never brainstorms on a stale base), and then hands off to `superpowers:brainstorming` with that context plus your own seed thinking.
+
+Two flags change the shape of the run: `--dry-run` prints the full plan (branch name, `wt` argv, title sequence, session argv) and stops before touching anything; `--headless` runs the seeded session in the provider's print mode instead of an interactive shell.
+
+## Prerequisites
+
+- `git`
+- [`wt`](https://github.com/worktrunk) (Worktrunk) — creates the worktree
+- [`uv`](https://astral.sh/uv) — installs and updates `omc` itself
+- At least one provider CLI: `claude`, `codex`, or `opencode`
+- The [superpowers](https://github.com/obra/superpowers) plugin, for whichever harness(es) you use — `/omc:start` hands off to it directly
+
+`omc start` probes for `git`, `wt`, and your configured provider before doing anything else, and refuses with an install hint for whatever's missing rather than guessing.
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `omc configure` | Pick your LLM (and worktree branch naming); writes `~/.omc/config.json` |
+| `omc start <context>` | Ticket key, ticket URL, or quoted task description → worktree → seeded session |
+| `omc version` | Print version + install source |
+| `omc install [path]` | (Re)install omc from a local checkout (default `.`) |
+| `omc update` | Update omc from the source it was installed from |
+| `omc uninstall` | Remove omc (binary + `~/.omc`) |
+
+## Development
+
+Fast tier — format check, lint, unit tests; no LLM, no network, no Docker:
+
+```bash
+just build
+```
+
+E2E tier — Dockerized, real provider CLIs, a fresh container per test:
+
+```bash
+just e2e-tests                                # everything
+just e2e-tests tests/e2e/test_e2e_smoke.py    # container-harness smoke test only, no tokens needed
+just e2e-tests -k claude                      # just the claude column of the matrix
+```
+
+Live scenarios need a token per provider, exported in your shell before running:
+
+| Provider | Env var |
+|---|---|
+| `claude` | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `codex` | `OPENAI_API_KEY` |
+| `opencode` | `ANTHROPIC_API_KEY` |
+
+This is by design, not an oversight: a selected test **runs or fails loud — it never skips**. If a provider's token is missing, that provider's live E2E tests fail with the exact command needed to fix it (e.g. `claude setup-token`) instead of silently passing.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
