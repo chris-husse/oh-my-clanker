@@ -8,7 +8,10 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_claude_plugin_manifest():
     data = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
     assert data["name"] == "omc"
-    assert "superpowers" in data["dependencies"]
+    # Marketplace-qualified: a bare name resolves only within the declaring
+    # marketplace (oh-my-clanker), which never carries a superpowers entry —
+    # see docker/PLUGIN-NOTES.md for the confirmed failure mode and fix.
+    assert "superpowers@superpowers-marketplace" in data["dependencies"]
 
 
 def test_claude_marketplace_lists_omc():
