@@ -61,42 +61,59 @@ def _tick(
     *,
     enable_documentation: bool,
     force_refresh: bool,
-) -> None:
+    last: str | None = None,
+) -> str:
+    """One tick; returns an outcome token. Repeatable QUIET outcomes (up to
+    date, off-branch, dirty, diverged, fetch-fail) narrate only when the
+    outcome CHANGED since the last tick — a 30s loop must not spam identical
+    lines. Action outcomes (sync, refresh) always narrate."""
     base = cfg.worktree.base_branch
+
+    def quiet(token: str, msg: str) -> str:
+        if token != last:
+            _say(msg)
+        return token
+
     branch = _out(ctx, [ctx.git_bin, "rev-parse", "--abbrev-ref", "HEAD"], root)
     if branch != base:
-        _say(f"· not on {base} (on {branch!r}) — leaving the checkout alone")
-        return
+        return quiet(
+            f"off-branch:{branch}",
+            f"· not on {base} (on {branch!r}) — leaving the checkout alone",
+        )
     cp = ctx.run([ctx.git_bin, "fetch", "origin", base], cwd=root)
     if cp.returncode != 0:
-        _say(f"✗ fetch failed: {(cp.stderr or '').strip()[:200]}")
-        return
+        return quiet("fetch-failed", f"✗ fetch failed: {(cp.stderr or '').strip()[:200]}")
     behind = _out(ctx, [ctx.git_bin, "rev-list", "--count", f"HEAD..origin/{base}"], root)
     ahead = _out(ctx, [ctx.git_bin, "rev-list", "--count", f"origin/{base}..HEAD"], root)
     if behind in ("", "0"):
-        _say("· up to date")
         if force_refresh:
+            _say("· up to date")
             # --once is the "refresh now" button: index (and docs, when enabled)
             # run unconditionally, not only when new commits arrived.
             _refresh_index(ctx, cfg, root, enable_documentation)
-        return
+            return "refreshed"
+        return quiet(
+            "up-to-date",
+            f"· up to date — waiting for changes on origin/{base}",
+        )
     if ahead not in ("", "0"):
-        _say(f"· {base} has diverged from origin/{base} — resolve manually, skipping")
-        return
+        return quiet(
+            "diverged",
+            f"· {base} has diverged from origin/{base} — resolve manually, skipping",
+        )
     # -uno: only TRACKED modifications endanger an ff-merge (untracked files —
     # e.g. the wt.toml starter ensure_wt_config just seeded — must not block a
     # sync; a genuinely colliding untracked file makes the merge itself refuse).
     if _out(ctx, [ctx.git_bin, "status", "--porcelain", "-uno"], root):
-        _say("· working tree is dirty — skipping sync")
-        return
+        return quiet("dirty", "· working tree is dirty — skipping sync")
     old = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
     cp = ctx.run([ctx.git_bin, "merge", "--ff-only", f"origin/{base}"], cwd=root)
     if cp.returncode != 0:
-        _say(f"✗ ff-merge failed: {(cp.stderr or '').strip()[:200]}")
-        return
+        return quiet("merge-failed", f"✗ ff-merge failed: {(cp.stderr or '').strip()[:200]}")
     new = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
     _say(f"✓ synced {base}: {old}..{new} ({behind} commits)")
     _refresh_index(ctx, cfg, root, enable_documentation)
+    return "synced"
 
 
 def run_watch(
@@ -131,8 +148,20 @@ def run_watch(
         f"→ watching {root} (base {cfg.worktree.base_branch}, every {interval}s"
         f"{', documentation enabled' if enable_documentation else ''}) — Ctrl-C stops"
     )
-    while True:
-        _tick(ctx, cfg, root, enable_documentation=enable_documentation, force_refresh=once)
-        if once:
-            return 0
-        time.sleep(interval)  # pragma: no cover - the loop shape is trivial
+    last: str | None = None
+    try:
+        while True:
+            last = _tick(
+                ctx,
+                cfg,
+                root,
+                enable_documentation=enable_documentation,
+                force_refresh=once,
+                last=last,
+            )
+            if once:
+                return 0
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        _say("· stopped")
+        return 0

@@ -78,7 +78,7 @@ def test_loop_tick_up_to_date_does_not_reindex(tmp_path, capsys):
 
     _, repo = _repo_with_origin(tmp_path)
     ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False)
+    _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False, last=None)
     assert "up to date" in capsys.readouterr().err
     assert not calls.exists()  # loop mode: nothing new -> no reindex
 
@@ -157,3 +157,51 @@ def test_watch_requires_gitnexus_cli(tmp_path, capsys):
         os.chdir(old)
     assert rc == 1
     assert "/omc:index" in capsys.readouterr().err  # points at the installer path
+
+
+def _run_loop(repo, ctx, ticks, between=None):
+    """Run the real loop, faking sleep: `between(i)` runs after tick i; stop after `ticks`."""
+    import omc.watch as watch_mod
+
+    count = {"n": 0}
+
+    def fake_sleep(_seconds):
+        count["n"] += 1
+        if between:
+            between(count["n"])
+        if count["n"] >= ticks:
+            raise KeyboardInterrupt
+
+    old_sleep, watch_mod.time.sleep = watch_mod.time.sleep, fake_sleep
+    old_cwd = os.getcwd()
+    os.chdir(repo)
+    try:
+        return run_watch(ctx, Config(), interval=1, once=False, enable_documentation=False)
+    finally:
+        os.chdir(old_cwd)
+        watch_mod.time.sleep = old_sleep
+
+
+def test_loop_says_up_to_date_once_then_waits_quietly(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    rc = _run_loop(repo, ctx, ticks=3)
+    assert rc == 0  # Ctrl-C is a clean stop, not a crash
+    err = capsys.readouterr().err
+    assert err.count("up to date") == 1, f"quiet ticks must not repeat:\n{err}"
+    assert "waiting for changes on origin/main" in err.lower()
+
+
+def test_quiet_line_reappears_after_a_sync(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+
+    def between(i):
+        if i == 1:  # a teammate pushes between tick 1 and tick 2
+            _push_remote_commit(origin, tmp_path)
+
+    rc = _run_loop(repo, ctx, ticks=3, between=between)  # quiet, synced, quiet-again
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "synced main" in err
+    assert err.count("up to date") == 2, f"suppression must reset after a sync:\n{err}"
