@@ -103,7 +103,7 @@ it automatically for every recipe, so no shell exports are needed:
 
 | Provider | Env var | Where to get it |
 |---|---|---|
-| `claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `claude setup-token` |
+| `claude` | `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` | `claude setup-token` / console.anthropic.com |
 | `codex` | `OPENAI_API_KEY` | platform.openai.com |
 | `opencode` | `ANTHROPIC_API_KEY` | console.anthropic.com |
 

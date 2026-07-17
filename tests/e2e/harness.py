@@ -10,25 +10,32 @@ import shlex
 
 import pytest
 
+# Env vars that can authenticate each provider's CLI, in preference order.
+# claude accepts an Anthropic API key as well as a `claude setup-token` OAuth token.
 TOKEN_ENV = {
-    "claude": "CLAUDE_CODE_OAUTH_TOKEN",
-    "codex": "OPENAI_API_KEY",
-    "opencode": "ANTHROPIC_API_KEY",
+    "claude": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
+    "codex": ("OPENAI_API_KEY",),
+    "opencode": ("ANTHROPIC_API_KEY",),
 }
 
 _TOKEN_GUIDANCE = {
-    "claude": "run `claude setup-token` and put the token in .env (cp env.example .env)",
+    "claude": "put an ANTHROPIC_API_KEY or a `claude setup-token` token in .env",
     "codex": "put an OPENAI_API_KEY (platform.openai.com) in .env (cp env.example .env)",
     "opencode": "put an ANTHROPIC_API_KEY (console.anthropic.com) in .env (cp env.example .env)",
 }
 
 PROVIDERS = list(TOKEN_ENV)
 
+ALL_TOKEN_VARS = tuple(dict.fromkeys(v for vars_ in TOKEN_ENV.values() for v in vars_))
+
 
 def require_token(provider: str) -> None:
-    var = TOKEN_ENV[provider]
-    if not os.environ.get(var):
-        pytest.fail(f"live {provider} E2E needs ${var} — {_TOKEN_GUIDANCE[provider]}; then re-run.")
+    varnames = TOKEN_ENV[provider]
+    if not any(os.environ.get(v) for v in varnames):
+        wanted = " or ".join(f"${v}" for v in varnames)
+        pytest.fail(
+            f"live {provider} E2E needs {wanted} — {_TOKEN_GUIDANCE[provider]}; then re-run."
+        )
 
 
 def run_in(container, argv, *, env=None, cwd=None, timeout=600):

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from .harness import TOKEN_ENV
+from .harness import ALL_TOKEN_VARS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -71,7 +71,7 @@ def container(e2e_image):
     from testcontainers.core.container import DockerContainer
 
     c = DockerContainer(e2e_image).with_command("sleep infinity")
-    for var in TOKEN_ENV.values():
+    for var in ALL_TOKEN_VARS:
         if os.environ.get(var):
             c = c.with_env(var, os.environ[var])
     try:
