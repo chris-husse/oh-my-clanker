@@ -128,7 +128,9 @@ def test_finish_runs_passing_build_stage_then_pushes(container):
         timeout=900,
     )
     assert rc == 0, out
-    assert "OMC_STAGE" in out, f"stage proxy verdict missing from transcript:\n{out[:2000]}"
+    # NOTE: `claude -p --output-format text` prints only the FINAL message, so
+    # mid-session OMC_STAGE verdict lines are not visible here — the on-disk
+    # marker and the pushed origin state below are the real evidence.
 
     rc, _ = run_in(container, ["test", "-f", "/tmp/omc-build-ran"])
     assert rc == 0, "project build stage never executed"
