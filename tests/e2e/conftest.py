@@ -87,3 +87,31 @@ def container(e2e_image):
         yield c
     finally:
         c.stop()
+
+
+@pytest.fixture
+def container_with_artifacts(e2e_image):
+    """A container with tests/e2e/artifacts mounted rw at /artifacts — the
+    permanent-E2E-artifact channel (committed wiki docs sync back out)."""
+    from testcontainers.core.container import DockerContainer
+
+    artifacts = REPO_ROOT / "tests" / "e2e" / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    c = (
+        DockerContainer(e2e_image)
+        .with_command("sleep infinity")
+        .with_volume_mapping(str(artifacts), "/artifacts", "rw")
+    )
+    for var in ALL_TOKEN_VARS:
+        if os.environ.get(var):
+            c = c.with_env(var, os.environ[var])
+    try:
+        c.start()
+        c.get_wrapped_container().exec_run(["bash", "/repo/docker/setup-plugins.sh"])
+        if os.environ.get("OPENAI_API_KEY"):
+            c.get_wrapped_container().exec_run(
+                ["bash", "-c", "printenv OPENAI_API_KEY | codex login --with-api-key"]
+            )
+        yield c
+    finally:
+        c.stop()

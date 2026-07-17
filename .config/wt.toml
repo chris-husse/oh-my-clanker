@@ -1,0 +1,10 @@
+# Worktrunk project config, seeded by omc — faithful worktrees out of the box.
+# Every gitignored file (.env, caches, the .gitnexus/.omc knowledge snapshot)
+# is reflink-copied into new worktrees; refresh a worktree's snapshot later
+# with /omc:rebase-main. Docs: https://worktrunk.dev
+
+# Blocking setup so the worktree is usable the moment you land in it.
+pre-start = "{ ! test -f .gitmodules || git submodule update --init --recursive; } && { ! command -v direnv >/dev/null || direnv allow .; }"
+
+[post-start]
+copy-ignored = "wt step copy-ignored"

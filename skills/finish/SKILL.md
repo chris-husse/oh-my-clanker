@@ -24,11 +24,14 @@ but any feature branch works.
 `git fetch origin <base>`, then count `git rev-list --count origin/<base>..HEAD`.
 Zero commits and a clean tree → "nothing to finish on this branch", stop.
 
-## Step 2 — rebase onto fresh base
+## Step 2 — rebase onto fresh base + refresh the snapshot
 
-`git rebase origin/<base>`. On **conflict**: stop with the rebase paused,
-list the conflicted files, and hand control to the user — never resolve
-conflicts silently, never `--abort` on their behalf.
+Invoke the **`rebase-main`** skill — it runs `omc internal rebase-main`,
+which rebases onto `origin/<base>` AND re-mirrors the knowledge snapshot
+(`.gitnexus`, `.omc/docs`) from the primary checkout. On its **rc 3 bail**
+(conflicts, rebase left paused): hand control to the user per that skill —
+never resolve conflicts silently, never `--abort` on their behalf. Only
+continue to Step 3 once the rebase has completed cleanly.
 
 ## Step 3 — squash to one commit
 

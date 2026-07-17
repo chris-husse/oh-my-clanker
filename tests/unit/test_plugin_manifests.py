@@ -41,6 +41,8 @@ USER_FACING_SKILLS = (
     "index",
     "document",
     "explain",
+    "rebase-main",
+    "check-wt-config",
 )
 INTERNAL_SKILLS = (
     "create-mr",
@@ -76,7 +78,7 @@ def test_finish_skill_contract():
     text = (ROOT / "skills" / "finish" / "SKILL.md").read_text()
     for needle in (
         "merge-base",
-        "git rebase origin/",
+        "rebase-main",  # the inline rebase was replaced by the rebase-main skill
         "create-mr",
         "Close the worktree",
         "review comments",
@@ -176,3 +178,29 @@ def test_dogfood_stage_and_context_skills():
     ):
         text = (ROOT / ".omc" / "skills" / name / "SKILL.md").read_text()
         assert needle in text, f".omc/skills/{name} missing {needle!r}"
+
+
+def test_rebase_main_skill_contract():
+    text = (ROOT / "skills" / "rebase-main" / "SKILL.md").read_text()
+    for needle in ("omc internal rebase-main", "OMC_REBASE_MAIN", "rc 3", "conflict"):
+        assert needle in text, f"rebase-main skill missing {needle!r}"
+    assert "rsync" not in text  # the mirror is Python; the skill never shells rsync
+
+
+def test_check_wt_config_skill_contract():
+    text = (ROOT / "skills" / "check-wt-config" / "SKILL.md").read_text()
+    for needle in ("omc internal wt-template", ".config/wt.toml", "never edit"):
+        assert needle in text, f"check-wt-config skill missing {needle!r}"
+
+
+def test_finish_starts_with_rebase_main():
+    text = (ROOT / "skills" / "finish" / "SKILL.md").read_text()
+    assert "rebase-main" in text
+    order = [text.index("`rebase-main`"), text.index("`squash`"), text.index("`create-mr`")]
+    assert order == sorted(order), "finish must order rebase-main -> squash -> push"
+
+
+def test_gitnexus_explain_prefers_local_snapshot():
+    text = (ROOT / "skills" / "gitnexus-explain" / "SKILL.md").read_text()
+    assert "local" in text.lower() and "snapshot" in text.lower()
+    assert "rebase-main" in text  # points at the refresh path when stale

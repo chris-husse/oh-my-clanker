@@ -24,7 +24,10 @@ packages = ["src/omc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["e2e: dockerized end-to-end tests (opt-in, slow, real LLMs)"]
+markers = [
+    "e2e: dockerized end-to-end tests (opt-in, slow, real LLMs)",
+    "expensive: LLM-heavy E2E (documentation generation) - run only with explicit user agreement",
+]
 
 [tool.ruff]
 line-length = 100

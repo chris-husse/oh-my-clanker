@@ -101,3 +101,37 @@ def test_document_generates_wiki_docs(container):
     assert rc == 0 and listing.strip(), (
         f"no markdown docs landed in .omc/docs/gitnexus/docs:\n{out[:2000]}"
     )
+
+
+def test_explain_the_tool_architecture_judged(container):
+    require_token("claude")
+    configure_omc(container, "claude")
+
+    rc, out = _claude_skill(container, "/omc:index", cwd="/repo")
+    assert rc == 0, out
+
+    question = (
+        "explain the omc tool: what happens end to end when I run omc start, "
+        "and which modules are involved?"
+    )
+    rc, answer = _claude_skill(container, f"/omc:explain {question}", cwd="/repo", timeout=900)
+    assert rc == 0, answer
+    verdict = judge(
+        container,
+        "claude",
+        scenario="/omc:explain was asked to explain omc's own start pipeline using "
+        "the repo's GitNexus graph. Ground truth: cli.py gates config -> start.py "
+        "probes tools (probe.py) and the plugin (plugin.py) -> slug.py runs a "
+        "headless provider call and parses an OMC_SLUG verdict -> worktree.py "
+        "drives wt -> shells/terminals exec the seeded, named session.",
+        rubric=[
+            "the answer describes the real pipeline order (probe/plugin check, "
+            "slug via headless LLM call, worktree creation, seeded session launch)",
+            "it cites at least three real modules or symbols (e.g. start.py, "
+            "slug.py, fetch_slug, providers, worktree.py, ensure_plugin)",
+            "it is a coherent architecture explanation, not an error dump, a "
+            "refusal, or generic filler",
+        ],
+        artifacts=answer,
+    )
+    assert verdict["passed"], verdict["reasons"]
