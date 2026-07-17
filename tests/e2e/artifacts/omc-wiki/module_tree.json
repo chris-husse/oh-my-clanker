@@ -1,0 +1,222 @@
+[
+  {
+    "name": "CLI & Entry Point",
+    "slug": "cli-entry-point",
+    "files": [
+      "src/omc/__init__.py",
+      "src/omc/cli.py"
+    ]
+  },
+  {
+    "name": "Configuration",
+    "slug": "configuration",
+    "files": [
+      "src/omc/config/__init__.py",
+      "src/omc/config/schema.py",
+      "src/omc/config/store.py",
+      "src/omc/configure.py"
+    ]
+  },
+  {
+    "name": "Tool Context & Subprocess Boundary",
+    "slug": "tool-context-subprocess-boundary",
+    "files": [
+      "src/omc/toolctx.py",
+      "src/omc/probe.py",
+      "src/omc/errors.py"
+    ]
+  },
+  {
+    "name": "AI Provider Adapters",
+    "slug": "ai-provider-adapters",
+    "files": [
+      "src/omc/providers/__init__.py",
+      "src/omc/providers/base.py",
+      "src/omc/providers/claude.py",
+      "src/omc/providers/codex.py",
+      "src/omc/providers/opencode.py",
+      "src/omc/providers/registry.py"
+    ]
+  },
+  {
+    "name": "Shell Integration",
+    "slug": "shell-integration",
+    "files": [
+      "src/omc/shells/__init__.py",
+      "src/omc/shells/base.py",
+      "src/omc/shells/bash.py",
+      "src/omc/shells/fish.py",
+      "src/omc/shells/zsh.py",
+      "src/omc/shells/registry.py"
+    ]
+  },
+  {
+    "name": "Terminal Integration",
+    "slug": "terminal-integration",
+    "files": [
+      "src/omc/terminals.py"
+    ]
+  },
+  {
+    "name": "Installation & Source Provenance",
+    "slug": "installation-source-provenance",
+    "files": [
+      "src/omc/installer.py",
+      "src/omc/installsrc.py",
+      "src/omc/skills_source.py"
+    ]
+  },
+  {
+    "name": "Session Start & Worktrees",
+    "slug": "session-start-worktrees",
+    "files": [
+      "src/omc/start.py",
+      "src/omc/worktree.py"
+    ]
+  },
+  {
+    "name": "Slug Generation",
+    "slug": "slug-generation",
+    "files": [
+      "src/omc/slug.py"
+    ]
+  },
+  {
+    "name": "Workflow Skills",
+    "slug": "workflow-skills",
+    "files": [
+      "skills/start/SKILL.md",
+      "skills/slug/SKILL.md",
+      "skills/finish/SKILL.md",
+      "skills/squash/SKILL.md",
+      "skills/create-mr/SKILL.md",
+      "skills/get-mr-description/SKILL.md",
+      "skills/index/SKILL.md",
+      "skills/document/SKILL.md",
+      "skills/explain/SKILL.md",
+      "skills/review/SKILL.md",
+      "skills/verify/SKILL.md"
+    ]
+  },
+  {
+    "name": "GitNexus Knowledge Graph Skills",
+    "slug": "gitnexus-knowledge-graph-skills",
+    "files": [
+      "skills/gitnexus-document/SKILL.md",
+      "skills/gitnexus-ensure/SKILL.md",
+      "skills/gitnexus-explain/SKILL.md",
+      "skills/gitnexus-index/SKILL.md"
+    ]
+  },
+  {
+    "name": "Jira MCP Stub Server",
+    "slug": "jira-mcp-stub-server",
+    "files": [
+      "docker/stub-jira-mcp/server.py",
+      "docker/stub-jira-mcp/tickets.json"
+    ]
+  },
+  {
+    "name": "Other",
+    "slug": "other",
+    "files": [],
+    "children": [
+      {
+        "name": "Other — README.md",
+        "slug": "other-readme-md",
+        "files": [
+          "README.md"
+        ]
+      },
+      {
+        "name": "Other — docker",
+        "slug": "other-docker",
+        "files": [
+          "docker/Dockerfile.e2e",
+          "docker/PLUGIN-NOTES.md",
+          "docker/setup-plugins.sh"
+        ]
+      },
+      {
+        "name": "Other — superpowers",
+        "slug": "other-superpowers",
+        "files": [
+          "docs/superpowers/plans/2026-07-17-omc-v1-plan.md",
+          "docs/superpowers/specs/2026-07-17-omc-finish-design.md",
+          "docs/superpowers/specs/2026-07-17-omc-gitnexus-design.md",
+          "docs/superpowers/specs/2026-07-17-omc-stages-design.md",
+          "docs/superpowers/specs/2026-07-17-omc-v1-design.md"
+        ]
+      },
+      {
+        "name": "Other — env.example",
+        "slug": "other-env-example",
+        "files": [
+          "env.example"
+        ]
+      },
+      {
+        "name": "Other — justfile",
+        "slug": "other-justfile",
+        "files": [
+          "justfile"
+        ]
+      },
+      {
+        "name": "Other — pyproject.toml",
+        "slug": "other-pyproject-toml",
+        "files": [
+          "pyproject.toml"
+        ]
+      },
+      {
+        "name": "Other — tests",
+        "slug": "other-tests",
+        "files": [
+          "tests/__init__.py"
+        ]
+      },
+      {
+        "name": "Other — e2e",
+        "slug": "other-e2e",
+        "files": [
+          "tests/e2e/__init__.py",
+          "tests/e2e/conftest.py",
+          "tests/e2e/harness.py",
+          "tests/e2e/judge.py",
+          "tests/e2e/test_e2e_finish.py",
+          "tests/e2e/test_e2e_gitnexus.py",
+          "tests/e2e/test_e2e_interactive.py",
+          "tests/e2e/test_e2e_slug_matrix.py",
+          "tests/e2e/test_e2e_smoke.py",
+          "tests/e2e/test_e2e_start.py"
+        ]
+      },
+      {
+        "name": "Other — unit",
+        "slug": "other-unit",
+        "files": [
+          "tests/unit/__init__.py",
+          "tests/unit/_stubs.py",
+          "tests/unit/test_cli.py",
+          "tests/unit/test_config_store.py",
+          "tests/unit/test_configure.py",
+          "tests/unit/test_errors.py",
+          "tests/unit/test_installer.py",
+          "tests/unit/test_installsrc.py",
+          "tests/unit/test_plugin_manifests.py",
+          "tests/unit/test_probe.py",
+          "tests/unit/test_providers.py",
+          "tests/unit/test_shells.py",
+          "tests/unit/test_skills_source.py",
+          "tests/unit/test_slug.py",
+          "tests/unit/test_start.py",
+          "tests/unit/test_stub_jira_mcp.py",
+          "tests/unit/test_terminals.py",
+          "tests/unit/test_toolctx.py",
+          "tests/unit/test_worktree.py"
+        ]
+      }
+    ]
+  }
+]

@@ -57,13 +57,15 @@ A ticket key or URL is resolved through whatever tracker tool your session alrea
 
 From there, `/omc:start` takes over inside the session itself: it gathers the ticket's context (parent/epic, linked docs — each summarized, or reported as "couldn't fetch" rather than failing outright), verifies the base branch is still fresh (rebasing, or stopping cleanly on conflicts — it never brainstorms on a stale base), and then hands off to `superpowers:brainstorming` with that context plus your own seed thinking.
 
-When the work is done, run `/omc:finish` inside the session: it rebases onto a fresh base, squashes the branch to a single commit whose message *is* the MR/PR description (generated from the real diff), pushes with `--force-with-lease`, and prints where to open the MR — it never creates one for you. If the repo defines project stages (`.omc/skills/{build,verify,review}/SKILL.md` — each a skill saying what that stage means for *this* project), finish runs them in that order between squash and push, stopping before the push if one fails; `/omc:build`, `/omc:verify`, and `/omc:review` run them standalone and are no-ops when unconfigured. It ends by offering to close the worktree (`wt remove` — the branch survives until merged), iterate on review comments (amend + re-push), or just talk through the change.
+When the work is done, run `/omc:finish` inside the session: it rebases onto a fresh base, squashes the branch to a single commit whose message *is* the MR/PR description (generated from the real diff), pushes with `--force-with-lease`, and prints where to open the MR — it never creates one for you. Worktrees are snapshots of main — code AND knowledge: `wt` copies every gitignored file (`.env`, caches, the `.gitnexus`/`.omc/docs` graph+docs) into new worktrees, and `/omc:rebase-main` refreshes both later (rebase onto the fresh base + a deterministic Python re-mirror of the knowledge dirs; it is also `/omc:finish`'s first step). omc seeds a starter `.config/wt.toml` when a project has none, and `/omc:check-wt-config` reviews an existing one against the faithful-worktree expectations.
+
+If the repo defines project stages (`.omc/skills/{build,verify,review}/SKILL.md` — each a skill saying what that stage means for *this* project), finish runs them in that order between squash and push, stopping before the push if one fails; `/omc:build`, `/omc:verify`, and `/omc:review` run them standalone and are no-ops when unconfigured. It ends by offering to close the worktree (`wt remove` — the branch survives until merged), iterate on review comments (amend + re-push), or just talk through the change.
 
 Two flags change the shape of the run: `--dry-run` prints the full plan (branch name, `wt` argv, title sequence, session argv) and stops before touching anything; `--headless` runs the seeded session in the provider's print mode instead of an interactive shell.
 
 ## Understanding a codebase
 
-`/omc:index` builds (incrementally refreshes) a [GitNexus](https://github.com/chris-husse/GitNexus) knowledge graph of the repo; `/omc:document` generates LLM-written architecture docs from that graph into `.omc/docs/gitnexus/docs/`; `/omc:explain <question>` answers "how does X work / what breaks if I change Y" with file-and-symbol citations, grounded in the graph, the generated docs, and — if the project defines one — its own `.omc/skills/explain-context` skill (where the project says where its truth lives). GitNexus installs itself on first use into `~/.omc/dependencies/gitnexus`, cloned only from its approved source. The cadence: run `index` + `document` in the main checkout as the base branch moves; `explain` from any worktree reads the primary checkout's graph, so it stays current.
+`/omc:index` builds (incrementally refreshes) a [GitNexus](https://github.com/chris-husse/GitNexus) knowledge graph of the repo; `/omc:document` generates LLM-written architecture docs from that graph into `.omc/docs/gitnexus/docs/`; `/omc:explain <question>` answers "how does X work / what breaks if I change Y" with file-and-symbol citations, grounded in the graph, the generated docs, and — if the project defines one — its own `.omc/skills/explain-context` skill (where the project says where its truth lives). GitNexus installs itself on first use into `~/.omc/dependencies/gitnexus`, cloned only from its approved source. `omc watch` automates the cadence: run it in the main checkout (foreground; `--interval`, `--once` for external schedulers) and it ff-syncs the base branch as commits land, refreshing the index directly (no LLM cost) — add `--enable-documentation` to also regenerate the docs (LLM-heavy, so it's opt-in). Manually, that cadence is: run `index` + `document` in the main checkout as the base branch moves; `explain` from any worktree reads the primary checkout's graph, so it stays current.
 
 ## Prerequisites
 
@@ -81,6 +83,7 @@ Two flags change the shape of the run: `--dry-run` prints the full plan (branch 
 |---|---|
 | `omc configure` | Pick your LLM (and worktree branch naming); writes `~/.omc/config.json` |
 | `omc start <context>` | Ticket key, ticket URL, or quoted task description → worktree → seeded session |
+| `omc watch` | Keep the main checkout's base branch + knowledge graph fresh (`--once`, `--interval`, `--enable-documentation`) |
 | `omc version` | Print version + install source |
 | `omc install [path]` | (Re)install omc from a local checkout (default `.`) |
 | `omc update` | Update omc from the source it was installed from |
@@ -100,6 +103,7 @@ E2E tier — Dockerized, real provider CLIs, a fresh container per test:
 just e2e-tests                                # everything
 just e2e-tests tests/e2e/test_e2e_smoke.py    # container-harness smoke test only, no tokens needed
 just e2e-tests -k claude                      # just the claude column of the matrix
+just expensive-e2e-tests                      # LLM-heavy docs-generation tests - real money, run deliberately
 ```
 
 Live scenarios need a token per provider. Put them in a `.env` file at the repo

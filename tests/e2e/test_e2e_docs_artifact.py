@@ -90,14 +90,19 @@ def test_document_updates_artifact_and_docs_are_judged(container_with_artifacts)
 
     pages = sorted(ARTIFACTS.glob("*.md"))
     assert pages, "artifact has no markdown pages after sync-back"
-    sample = "\n\n---PAGE---\n\n".join(p.read_text()[:4000] for p in pages[:3])
+    # Deliberately truncated excerpts — the judge is told so, and judges
+    # topicality/depth, never completeness of the excerpt itself.
+    sample = "\n\n---PAGE (excerpt)---\n\n".join(p.read_text()[:4000] for p in pages[:3])
 
     verdict = judge(
         container,
         "claude",
         scenario="GitNexus generated architecture documentation for the omc repo "
         "(a Python CLI + multi-harness skills plugin: start/slug/finish skills, "
-        "provider adapters, ToolContext subprocess boundary, Docker E2E harness).",
+        "provider adapters, ToolContext subprocess boundary, Docker E2E harness). "
+        f"You are shown TRUNCATED EXCERPTS of the first 3 of {len(pages)} pages — "
+        "mid-sentence cutoffs are the sampling, NOT a documentation defect; judge "
+        "topicality and depth only.",
         rubric=[
             "the documentation is specifically about the omc codebase — it names "
             "real modules, skills, or flows (e.g. start/slug/providers/toolctx/"
