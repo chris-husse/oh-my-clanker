@@ -33,8 +33,12 @@ def test_claude_session():
 
 def test_codex_argv():
     p = get_provider("codex")
-    assert p.headless_argv("x", model="m") == ["codex", "exec", "-m", "m", "x"]
-    assert p.headless_argv("x", model="", allowed_tools=["a"]) == ["codex", "exec", "x"]
+    assert p.headless_argv("x", model="m") == [
+        "codex", "exec", "--skip-git-repo-check", "-m", "m", "x",
+    ]  # fmt: skip
+    assert p.headless_argv("x", model="", allowed_tools=["a"]) == [
+        "codex", "exec", "--skip-git-repo-check", "x",
+    ]  # fmt: skip
     # no session-name flag exists; seed is the trailing positional
     assert p.session_argv(session_name="n", model="", seed="s") == ["codex", "s"]
     assert p.title_env() == {}

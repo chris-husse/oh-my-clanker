@@ -12,7 +12,10 @@ class CodexProvider(Provider):
     def headless_argv(self, prompt, *, model, allowed_tools=None):
         # `codex exec` is the non-interactive entry point; prompt is the trailing
         # positional; -m is the model flag. allowed_tools has no codex equivalent.
-        argv = ["codex", "exec"]
+        # --skip-git-repo-check: verified against codex 0.144 — without it, exec
+        # refuses to run in a directory the user hasn't interactively trusted,
+        # which a headless one-shot call can never satisfy.
+        argv = ["codex", "exec", "--skip-git-repo-check"]
         if model:
             argv += ["-m", model]
         argv.append(prompt)

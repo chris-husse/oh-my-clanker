@@ -78,6 +78,12 @@ def container(e2e_image):
         c.start()
         # finish plugin registration (needs network; baked layer may have been offline)
         c.get_wrapped_container().exec_run(["bash", "/repo/docker/setup-plugins.sh"])
+        # codex >=0.144 doesn't use a bare OPENAI_API_KEY env — it needs an explicit
+        # stdin login that writes ~/.codex/auth.json (real users run this themselves).
+        if os.environ.get("OPENAI_API_KEY"):
+            c.get_wrapped_container().exec_run(
+                ["bash", "-c", "printenv OPENAI_API_KEY | codex login --with-api-key"]
+            )
         yield c
     finally:
         c.stop()
