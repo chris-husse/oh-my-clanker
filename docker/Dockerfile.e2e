@@ -57,7 +57,11 @@ RUN set -eux; \
 # `COPY . /repo` so the layer caches across repo changes. gitnexus-shared is a
 # plain sibling (not a workspace): its deps must install FIRST or the main
 # build dies looking for its tsc — same order gitnexus-ensure prescribes.
+# GITNEXUS_SKIP_OPTIONAL_GRAMMARS: optional tree-sitter grammars source-build
+# with node-gyp (needs make/g++, absent from the slim image). The chicken's E2E
+# used the same skip; production installs on dev machines build the full set.
 RUN set -eux; \
+    export GITNEXUS_SKIP_OPTIONAL_GRAMMARS=1; \
     git clone --depth 1 https://github.com/chris-husse/GitNexus.git /root/.omc/dependencies/gitnexus; \
     cd /root/.omc/dependencies/gitnexus/gitnexus-shared && npm install --no-audit --no-fund; \
     cd /root/.omc/dependencies/gitnexus/gitnexus && npm ci --no-audit --no-fund && npm run build; \
