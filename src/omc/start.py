@@ -32,7 +32,9 @@ def _run_headless(ctx: ToolContext, cfg: Config, seed: str, cwd: str, slug: str)
     provider = get_provider(name)
     pcfg = cfg.llm.providers.get(name)
     model = pcfg.model if pcfg else ""
-    argv = provider.headless_argv(seed, model=model)
+    # Name the headless session after the slug too (where the CLI supports it),
+    # so seeded sessions are resumable by name exactly like interactive ones.
+    argv = provider.headless_argv(seed, model=model, session_name=slug)
     try:
         cp = ctx.run(argv, cwd=cwd, extra_env={**provider.title_env(), "OMC_SLUG": slug})
     except OSError as exc:

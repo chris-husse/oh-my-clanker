@@ -9,7 +9,7 @@ class OpencodeProvider(Provider):
     def models(self):
         return []  # free-text `provider/model` entry
 
-    def headless_argv(self, prompt, *, model, allowed_tools=None):
+    def headless_argv(self, prompt, *, model, allowed_tools=None, session_name=""):
         argv = ["opencode", "run"]
         if model:
             argv += ["-m", model]

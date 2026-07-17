@@ -61,3 +61,12 @@ def test_opencode_argv():
 def test_install_hints():
     for name in provider_names():
         assert "npm install -g" in get_provider(name).install_hint()
+
+
+def test_headless_session_name():
+    # claude names headless sessions (-n works with -p; resumable by name —
+    # verified live); codex/opencode have no naming flag and ignore it.
+    c = get_provider("claude").headless_argv("x", model="", session_name="s-1")
+    assert c[: c.index("-n") + 2] == ["claude", "-p", "x", "--output-format", "text", "-n", "s-1"]
+    assert "-n" not in get_provider("codex").headless_argv("x", model="", session_name="s-1")
+    assert "-n" not in get_provider("opencode").headless_argv("x", model="", session_name="s-1")

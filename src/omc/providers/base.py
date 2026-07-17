@@ -14,9 +14,19 @@ class Provider(ABC):
 
     @abstractmethod
     def headless_argv(
-        self, prompt: str, *, model: str, allowed_tools: list[str] | None = None
+        self,
+        prompt: str,
+        *,
+        model: str,
+        allowed_tools: list[str] | None = None,
+        session_name: str = "",
     ) -> list[str]:
-        """One-shot print-mode run against the user's system config."""
+        """One-shot print-mode run against the user's system config.
+
+        ``session_name`` names the resulting session where the CLI supports it
+        (claude: ``-n``, resumable via ``--resume <name>`` — verified live);
+        providers without session naming ignore it.
+        """
 
     @abstractmethod
     def session_argv(self, *, session_name: str, model: str, seed: str) -> list[str]:

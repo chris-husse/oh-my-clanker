@@ -9,7 +9,7 @@ class CodexProvider(Provider):
     def models(self):
         return []  # free-text entry; codex model ids move fast
 
-    def headless_argv(self, prompt, *, model, allowed_tools=None):
+    def headless_argv(self, prompt, *, model, allowed_tools=None, session_name=""):
         # `codex exec` is the non-interactive entry point; prompt is the trailing
         # positional; -m is the model flag. allowed_tools has no codex equivalent.
         # --skip-git-repo-check: verified against codex 0.144 — without it, exec

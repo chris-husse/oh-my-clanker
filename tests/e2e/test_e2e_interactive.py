@@ -1,8 +1,15 @@
-"""The interactive handoff, live: omc start (no --headless) under a real PTY.
+"""Launch-time properties, live: terminal title and session naming.
 
-This is the only tier that can verify the two launch-time properties omc exists
-for: the terminal title is emitted BEFORE the session takes the terminal, and
-the session is created NAMED after the slug (resumable via `claude --resume`).
+The interactive handoff can't be fully automated (a real TUI needs a real
+terminal), but its two load-bearing properties can:
+
+- TITLE: `omc start` (no --headless) is driven TTY-less. bash `-i` still
+  sources the generated rcfile, so the REAL execvp handoff runs and the OSC 0
+  title bytes for the slug land in captured output — emitted before the
+  session command, per the shell adapters' ordering contract.
+- SESSION NAME: omc names seeded sessions after the slug (interactive AND
+  headless). A headless `omc start` run is followed by `claude --resume
+  <slug>`, which only succeeds if a session with exactly that name exists.
 """
 
 from __future__ import annotations
@@ -15,17 +22,6 @@ import pytest
 from .harness import configure_omc, make_work_repo, require_token, run_in, wire_mcp
 
 pytestmark = pytest.mark.e2e
-
-_ONBOARDED = (
-    "python3 - << 'PYEOF'\n"
-    "import json, pathlib\n"
-    "p = pathlib.Path.home() / '.claude.json'\n"
-    "data = json.loads(p.read_text()) if p.exists() else {}\n"
-    "data.setdefault('hasCompletedOnboarding', True)\n"
-    "data.setdefault('theme', 'dark')\n"
-    "p.write_text(json.dumps(data))\n"
-    "PYEOF"
-)
 
 
 def _extract_json_array(text: str):
@@ -55,42 +51,41 @@ def _worktree_for(container, repo, key_prefix):
     return branch.split("/", 1)[1], entry["path"]  # (slug == session name, worktree path)
 
 
-def test_interactive_start_sets_title_and_names_session(container):
+def test_interactive_exec_emits_title_before_session(container):
     require_token("claude")
     configure_omc(container, "claude")
     wire_mcp(container, "claude", "ok")
-    # Interactive claude in a fresh HOME would stall on first-run onboarding;
-    # mark it complete the way a real logged-in machine already has.
-    rc, out = run_in(container, ["bash", "-c", _ONBOARDED])
-    assert rc == 0, out
     repo = make_work_repo(container)
 
-    # Drive the REAL handoff under a PTY: probes -> live slug -> wt worktree ->
-    # exec bash rc (title, cd) -> interactive `claude -n <slug> "/omc:start ..."`.
-    # `timeout` ends the session after it has started; artifacts are asserted after.
+    # The REAL interactive path: probes -> live slug -> wt worktree -> execvp
+    # bash --rcfile (title, cd, seeded claude). Without a TTY the claude TUI
+    # exits/errs after the rc runs — the title bytes are already out by then.
+    # `timeout` caps the run either way; assertions are on artifacts, not rc.
     rc, out = run_in(
         container,
-        [
-            "script",
-            "-q",
-            "/tmp/typescript",
-            "-c",
-            "export SHELL=/bin/bash; timeout 90 omc start PROJ-1",
-        ],
+        ["timeout", "90", "omc", "start", "PROJ-1"],
+        env={"SHELL": "/bin/bash"},
         cwd=repo,
-        timeout=300,
+        timeout=240,
     )
 
+    slug, _ = _worktree_for(container, repo, "proj-1")
+    assert f"\x1b]0;{slug}\x07" in out, (
+        f"OSC title for {slug!r} not emitted by the exec handoff:\n{out[:1500]}"
+    )
+
+
+def test_seeded_session_is_named_after_slug(container):
+    require_token("claude")
+    configure_omc(container, "claude")
+    wire_mcp(container, "claude", "ok")
+    repo = make_work_repo(container)
+
+    rc, out = run_in(container, ["omc", "start", "PROJ-1", "--headless"], cwd=repo, timeout=900)
+    assert rc == 0, out
+
     slug, wt_path = _worktree_for(container, repo, "proj-1")
-
-    # 1) Terminal title: the OSC 0 sequence for the slug hit the terminal stream
-    #    (emitted by the shell rc BEFORE the session took the terminal).
-    rc, ts = run_in(container, ["cat", "/tmp/typescript"])
-    assert rc == 0
-    assert f"\x1b]0;{slug}\x07" in ts, f"OSC title for {slug!r} not in PTY stream:\n{ts[:1500]}"
-
-    # 2) Session naming: a session NAMED after the slug exists and is resumable —
-    #    launch-time `-n <slug>` is the only way it could have gotten that name.
+    # Resume-by-name only works if the seeded session was created NAMED <slug>.
     rc, res = run_in(
         container,
         [
