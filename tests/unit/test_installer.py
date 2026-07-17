@@ -1,0 +1,57 @@
+from omc.installer import run_install, run_uninstall, run_update, validate_checkout
+from omc.toolctx import ToolContext
+
+from ._stubs import make_stub, stub_env
+
+
+def _checkout(tmp_path):
+    root = tmp_path / "co"
+    (root / ".git").mkdir(parents=True)
+    (root / "src" / "omc").mkdir(parents=True)
+    (root / "src" / "omc" / "__init__.py").write_text("")
+    return root
+
+
+def test_validate_checkout(tmp_path):
+    assert validate_checkout(str(tmp_path)) is not None  # not a checkout
+    assert validate_checkout(str(_checkout(tmp_path))) is None
+
+
+def test_install_bad_path_no_uv_call(tmp_path, capsys):
+    bindir = tmp_path / "bin"
+    calls_file = bindir / "uv.calls"
+    make_stub(bindir, "uv")
+    ctx = ToolContext.from_env(stub_env(bindir))
+    assert run_install(ctx, str(tmp_path / "nope")) == 1
+    assert not calls_file.exists()
+
+
+def test_install_good_path_calls_uv(tmp_path):
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "uv", stdout="ok")
+    ctx = ToolContext.from_env(stub_env(bindir))
+    assert run_install(ctx, str(_checkout(tmp_path))) == 0
+
+
+def test_update_calls_uv_upgrade(tmp_path):
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "uv", stdout="ok")
+    ctx = ToolContext.from_env(stub_env(bindir))
+    assert run_update(ctx) == 0
+
+
+def test_uninstall_removes_home_but_refuses_unsafe(tmp_path, capsys):
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "uv", stdout="ok")
+    home = tmp_path / "omchome"
+    home.mkdir()
+    (home / "config.json").write_text("{}")
+    env = stub_env(bindir, OMC_HOME=str(home))
+    assert run_uninstall(ToolContext.from_env(env)) == 0
+    assert not home.exists()
+    # unsafe home ($HOME itself) is refused but uninstall still proceeds
+    env2 = stub_env(bindir, OMC_HOME=str(tmp_path))
+    env2["HOME"] = str(tmp_path)
+    assert run_uninstall(ToolContext.from_env(env2)) == 0
+    assert tmp_path.exists()
+    assert "refuse" in capsys.readouterr().err
