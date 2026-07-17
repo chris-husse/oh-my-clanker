@@ -42,3 +42,12 @@ def test_require_tools_lists_all_misses(tmp_path):
     assert "wt" in msg and "worktrunk" in msg
     assert "claude" in msg and "npm install -g @anthropic-ai/claude-code" in msg
     assert "  git:" not in msg  # present tools are not listed as missing
+
+
+def test_make_stub_reproduces_shell_metacharacters(tmp_path):
+    bindir = tmp_path / "bin"
+    payload = 'OMC_SLUG {"ok": true, "slug": "a-b"} `id` $(echo NOPE) $HOME'
+    make_stub(bindir, "meta", stdout=payload)
+    ctx = ToolContext.from_env(stub_env(bindir))
+    cp = ctx.run(["meta"])
+    assert cp.stdout.strip() == payload
