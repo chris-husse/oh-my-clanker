@@ -71,3 +71,25 @@ def test_auth_error_mode():
         assert "401" in text and "auth" in text.lower()
     finally:
         proc.terminate()
+
+
+def test_unknown_method_gets_error():
+    proc = _start()
+    try:
+        _rpc(proc, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}})
+        r = _rpc(proc, "resources/list", id_=2)
+        assert r["error"]["code"] == -32601
+        assert "result" not in r
+    finally:
+        proc.terminate()
+
+
+def test_ping_returns_empty_result():
+    proc = _start()
+    try:
+        _rpc(proc, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}})
+        r = _rpc(proc, "ping", id_=2)
+        assert r["result"] == {}
+        assert "error" not in r
+    finally:
+        proc.terminate()

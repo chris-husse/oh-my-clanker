@@ -51,6 +51,8 @@ def handle(msg: dict) -> dict | None:
                 is_error=True,
             )
         params = msg.get("params", {})
+        if not isinstance(params, dict):
+            return tool_result("invalid params", is_error=True)
         if params.get("name") != "getIssue":
             return tool_result(f"unknown tool {params.get('name')!r}", is_error=True)
         key = str(params.get("arguments", {}).get("key", "")).upper()
@@ -58,6 +60,8 @@ def handle(msg: dict) -> dict | None:
         if ticket is None:
             return tool_result(f"Issue {key} not found (404).", is_error=True)
         return tool_result(json.dumps({"key": key, "fields": ticket}, indent=2))
+    if method == "ping":
+        return {}
     return None  # notifications etc.
 
 
@@ -74,7 +78,13 @@ def main() -> None:
         if msg.get("id") is None:
             continue  # notification: no response
         reply = {"jsonrpc": "2.0", "id": msg["id"]}
-        reply["result"] = result if result is not None else {}
+        if result is not None:
+            reply["result"] = result
+        else:
+            reply["error"] = {
+                "code": -32601,
+                "message": f"Method not found: {msg.get('method', '')}",
+            }
         sys.stdout.write(json.dumps(reply) + "\n")
         sys.stdout.flush()
 
