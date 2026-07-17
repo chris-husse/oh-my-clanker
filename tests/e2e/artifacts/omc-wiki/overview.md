@@ -2,82 +2,87 @@
 
 # Oh My Clanker!
 
-Welcome. `omc` turns *"I have a ticket"* into *"I'm in a prepared worktree with an LLM session that already knows the ticket"* — for Claude Code, Codex, and OpenCode alike. Instead of manually cutting a branch, opening an editor, and pasting a ticket into a fresh chat, you run one command and land in an isolated git worktree with an agentic session already open and seeded with your task.
+**Turn "I have a ticket" into "I'm in a prepared worktree with an LLM session that already knows the ticket."**
 
-The project is **one repo, two halves**:
+`omc` gets you from a task description — a Jira URL, a ticket key, or a sentence like *"fix the login redirect"* — to a ready-to-work environment: an isolated git worktree cut from fresh upstream, a sensibly named branch, and an interactive LLM session already open inside it and seeded with the context of your ticket. It works across Claude Code, Codex, and OpenCode.
 
-- A small, **deterministic Python CLI** (`src/omc/`) that does what computers are good at — probing your tools, naming a branch, creating a worktree, launching and titling a session.
-- A **skills plugin** (`skills/`) that does what only an LLM can — reading the ticket, judging whether there's enough to start, kicking off a brainstorm. Your harness's own plugin manager pulls these skills straight from this repo, so there's no sync step and nothing copied into provider config directories.
+Welcome. This page is the map; every module name below links to its own page.
+
+## The core idea: one repo, two halves
+
+`omc` is deliberately split along the line of *what a computer is good at* versus *what only a language model is good at*.
+
+- **A small, deterministic Python CLI** does the mechanical work: probing your installed tools, naming a branch, creating a worktree, launching and titling a session. This is fast, predictable, and testable — no model required.
+- **A skills plugin** does the judgment work: reading the ticket, deciding whether there's enough to go on, kicking off a brainstorm. These skills are installed straight from this repo into your harness's own plugin manager — there's no sync step and no copying files into provider config directories.
+
+The magic word "start the session for me" is really the CLI and the skills handing off to each other at exactly the right moment.
 
 ## Architecture at a glance
 
 ```mermaid
 graph TD
-    CLI[CLI & Entry Point]
-    CFG[Configuration]
-    START[Session Start & Worktrees]
-    SLUG[Slug Generation]
-    PROV[AI Provider Adapters]
-    SHELL[Shell Integration]
-    INSTALL[Installation & Provenance]
-    SKILLS[Workflow Skills]
-    CTX[Tool Context / Subprocess Boundary]
+    CLI["CLI & Entry Point"]
+    Start["Session Start & Worktrees"]
+    Slug["Slug Generation"]
+    Config["Configuration"]
+    Providers["AI Provider Adapters"]
+    Ctx["Tool Context<br/>(subprocess boundary)"]
+    ShellTerm["Shell & Terminal Integration"]
+    Install["Installation & Provenance"]
+    Skills["Workflow Skills (plugin)"]
+    GitNexus["GitNexus Graph Skills"]
 
-    CLI --> CFG
-    CLI --> START
-    CLI --> INSTALL
-    START --> SLUG
-    START --> PROV
-    START --> SHELL
-    SLUG --> PROV
-    CFG --> PROV
-    START --> CTX
-    PROV -.seeds.-> SKILLS
-    CTX -.spawns.-> PROV
+    CLI --> Start
+    CLI --> Config
+    CLI --> Install
+    Start --> Slug
+    Start --> Providers
+    Start --> ShellTerm
+    Slug --> Providers
+    Config --> Providers
+    Start --> Ctx
+    Providers -.builds argv.-> Ctx
+    Skills --> GitNexus
 ```
 
-Everything a user types arrives first at the [CLI & Entry Point](cli-entry-point.md), which parses arguments, dispatches to a subcommand, and owns the process exit contract (`0` ok, `1` error, `2` refusal). The one non-obvious rule that shapes the whole codebase: **every crossing into the outside world goes through the [Tool Context & Subprocess Boundary](tool-context-subprocess-boundary.md).** Nothing else spawns a subprocess or reads omc's home directory — `git`, `wt`, `uv`, and provider CLIs are all launched through a single `ToolContext.run`. That single choke point is why the code is easy to reason about and test.
+Two design invariants hold the whole thing together, and they're worth internalizing early:
 
-## The main flow: `omc start`
+- **Everything that touches the outside world goes through one door.** [Tool Context & Subprocess Boundary](tool-context-subprocess-boundary.md) is the *only* place that spawns a subprocess (`git`, `wt`, `uv`, or a provider CLI) or reads omc's home directory. Nothing else imports `subprocess`. If you need to shell out, you take a `ToolContext`.
+- **Provider knowledge is pure and isolated.** The [AI Provider Adapters](ai-provider-adapters.md) know the exact `argv` and environment each CLI expects, but they compute data and never perform I/O — they hand their argv lists to `ToolContext` to actually run. That's why every provider quirk lives as a comment at the code site that depends on it.
 
-The heart of omc is [Session Start & Worktrees](session-start-worktrees.md), which orchestrates `omc start <context>` from a free-form task description all the way to an open, ready-to-work session. It walks a sequence of phases, each narrating its progress on stderr so there's never a silent minute:
+## The end-to-end flow
 
-1. **Slug** — the context (a ticket key, a URL, or a sentence) goes to [Slug Generation](slug-generation.md), which inlines the packaged `slug` skill into a headless provider call and parses back a short, git-safe branch name. The Python holds almost no domain logic; the skill decides how to read a tracker.
-2. **Worktree** — a named git worktree is cut from fresh upstream via the `wt` CLI wrapper.
-3. **Handoff** — an interactive LLM session is launched inside the worktree through [AI Provider Adapters](ai-provider-adapters.md), seeded with the `/omc:start` skill, its terminal titled and shell landed in the right directory via [Shell Integration](shell-integration.md) and [Terminal Integration](terminal-integration.md).
+The headline command is `omc start <context>`. Following it end to end is the fastest way to understand the system:
 
-The provider adapters are the layer that knows the exact `argv` and environment each CLI expects — and they're kept **pure** (they compute argv, they never spawn), so the boundary stays the only place I/O happens.
+1. **Dispatch.** You type a command; [CLI & Entry Point](cli-entry-point.md) parses it, dispatches, and owns the process exit contract (0 ok, 1 error, 2 refusal).
+2. **Probe & name.** [Session Start & Worktrees](session-start-worktrees.md) orchestrates every phase, narrating progress on stderr as it goes. It asks [Slug Generation](slug-generation.md) for a git-safe branch name — which inlines the packaged `slug` skill into a headless provider call and parses the result, so *all* the intelligence about reading tickets lives in the skill, not the Python.
+3. **Create the worktree.** Still in Session Start, a defensive wrapper around the `wt` CLI cuts an isolated worktree from fresh upstream.
+4. **Launch & seed.** [Shell Integration](shell-integration.md) builds the invocation that drops you into the worktree in your own login shell, [Terminal Integration](terminal-integration.md) relabels the terminal tab, and an [AI Provider Adapter](ai-provider-adapters.md) opens the interactive session seeded with the `/omc:start` skill.
 
-## The session-side half: skills
+From there you're in your harness, and the **session-side half** takes over. The [Workflow Skills](workflow-skills.md) — prompt-driven `SKILL.md` files your harness loads — read the ticket, reason about the diff, run the project's own build/verify/review stages, and hand off to design tools. A second family, the [GitNexus Knowledge Graph Skills](gitnexus-knowledge-graph-skills.md), builds and queries a code-knowledge graph so commands like `/omc:explain` can answer "how does X work" or "what breaks if I change Y" with more than grep.
 
-Once you're in the seeded session, the [Workflow Skills](workflow-skills.md) take over. These prompt-driven `SKILL.md` files are the agent's playbook: read tickets, reason about a diff, run the project's own build/verify/review stages, hand off to design tools. A notable subsystem here is the [GitNexus Knowledge Graph Skills](gitnexus-knowledge-graph-skills.md), which build and query a code-knowledge graph so commands like `/omc:explain` can answer *"how does X work"* or *"what breaks if I change Y"* with more than grep.
-
-## Supporting modules
-
-omc manages its own lifecycle through [Installation & Source Provenance](installation-source-provenance.md) — thin wrappers over `uv tool` that install, upgrade, remove, and report *where this omc came from*. What omc actually does is shaped by [Configuration](configuration.md), which owns the on-disk settings file and backs the `omc configure` command (both interactive and scripted). For proving ticket-fetching flows end-to-end without a live Jira, the [Jira MCP Stub Server](jira-mcp-stub-server.md) impersonates a real MCP tracker over stdio with deterministic fixtures. Repo scaffolding — the README, build tooling, and testing doctrine — lives under [Other](other.md).
+Alongside all of this, [Configuration](configuration.md) manages the on-disk settings (`omc configure` picks your default provider and per-provider models), and [Installation & Source Provenance](installation-source-provenance.md) manages omc's own lifecycle — install, upgrade, uninstall, and reporting exactly where a given omc came from — all delegated to `uv`.
 
 ## Setup
 
-Install the CLI:
+Install the CLI and configure a default provider:
 
 ```bash
 uv tool install git+https://github.com/chris-husse/oh-my-clanker
-```
-
-Then pick a default provider (and optionally a model per provider):
-
-```bash
 omc configure
 ```
 
-Requires Python ≥ 3.12. Once configured, you're ready:
+Then start working:
 
 ```bash
-omc start "fix the login redirect"
+omc start "PROJ-123"        # a ticket key
+omc start "fix the login redirect"   # or a free-form task
 ```
 
 ## Working in this repo
 
-The testing policy is strict and worth knowing before you contribute: every change lands **red → green** (write the failing test first), tests never skip (a missing prerequisite is a loud failure naming the fix), and assertions target **artifacts** — files, git state, exit codes — not transcripts. Run `just build` as the default gate after every change; run `just e2e-tests` for the Docker-per-test tier that drives real LLMs and CLIs. Design records live in `docs/superpowers/specs/`.
+If you're here to contribute, a few things are worth knowing. The project is a uv-installed Python package (`src/omc/`) plus the skills plugin (`skills/`). `just build` is the fast default gate (ruff + unit tests, no network); `just e2e-tests` runs the Docker-per-test tier against real LLMs, gated on tokens in `.env`.
 
-Welcome aboard — pick a module above and dive in.
+The testing doctrine is strict and non-negotiable: **red → green for every change**, no skipped tests, and assertions on artifacts (files, git state, exit codes) rather than transcripts. External integrations always keep at least one E2E driving the *real* tool — which is why this repo ships a hermetic [Jira MCP Stub Server](jira-mcp-stub-server.md), a stdlib-only server that speaks the real MCP wire protocol so ticket-fetching flows can be tested without network or credentials.
+
+The remaining scaffolding — README, build tooling, specs, and the testing policy itself — is documented under [Other](other.md).
