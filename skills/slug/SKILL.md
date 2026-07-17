@@ -41,6 +41,8 @@ $ARGUMENTS
 
 ## Verdict (REQUIRED, last line, exactly one)
 
+Plain text on its own line — do NOT wrap it in backticks or a code fence.
+
 Success: `OMC_SLUG {"ok": true, "slug": "proj-123-fix-login-timeout"}`
 
 Failure: `OMC_SLUG {"ok": false, "reason": "mcp-missing" | "mcp-unauthenticated" | "ticket-not-found" | "context-insufficient", "message": "<one actionable sentence>"}`

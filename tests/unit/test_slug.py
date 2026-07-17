@@ -75,3 +75,9 @@ def test_mcp_tool_patterns_are_server_scoped():
     assert MCP_TOOL_PATTERNS
     for pat in MCP_TOOL_PATTERNS:
         assert pat.startswith("mcp__") and "*" not in pat
+
+
+def test_parse_verdict_tolerates_markdown_backticks():
+    # Observed live: models wrap the verdict line in backticks despite instructions.
+    v = parse_verdict('resolved the ticket\n\n`OMC_SLUG {"ok": true, "slug": "a-b"}`')
+    assert v is not None and v.ok and v.slug == "a-b"

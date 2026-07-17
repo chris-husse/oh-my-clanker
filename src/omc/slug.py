@@ -44,10 +44,15 @@ def sanitize_slug(s: str) -> str:
 
 
 def parse_verdict(text: str) -> Verdict | None:
-    """Last parseable OMC_SLUG line wins; None when none parses."""
+    """Last parseable OMC_SLUG line wins; None when none parses.
+
+    Tolerates markdown wrapping: models routinely emit the verdict as
+    `` `OMC_SLUG {...}` `` despite instructions (observed live) — surrounding
+    backticks are stripped before matching; the JSON itself never contains one.
+    """
     verdict = None
     for line in text.splitlines():
-        line = line.strip()
+        line = line.strip().strip("`").strip()
         if not line.startswith(_VERDICT_PREFIX):
             continue
         try:
