@@ -18,11 +18,16 @@ _SLUG_MAX = 50
 _VERDICT_PREFIX = "OMC_SLUG "
 _FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 
-# Permission pattern for the headless call's MCP read tools (claude only; other
-# providers ignore allowed_tools). If glob patterns turn out unsupported, replace
-# with conventional server wildcards ["mcp__jira", "mcp__linear", "mcp__github",
-# "mcp__gitlab"] and update the E2E matrix — see spec §10.2.
-MCP_TOOL_PATTERNS = ["mcp__*"]
+# Server-scoped MCP grants for the headless call (claude only; other providers
+# ignore allowed_tools). Verified live 2026-07-17 (spec §10.2 contingency fired):
+# claude honors server-scoped grants — `mcp__<server>` covers all of that
+# server's tools — but NOT a global `mcp__*` glob. Scoping to conventional
+# tracker server names is also deliberately narrower: ticket text is untrusted
+# input, and this keeps non-tracker tools (mail, chat, ...) out of the call's
+# reach. A tracker under a nonconventional server name surfaces as the skill's
+# `mcp-unauthenticated` diagnostic; a config knob for extra names is a tracked
+# hardening/UX item.
+MCP_TOOL_PATTERNS = ["mcp__jira", "mcp__atlassian", "mcp__linear", "mcp__github", "mcp__gitlab"]
 
 
 @dataclass(frozen=True)

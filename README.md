@@ -111,7 +111,7 @@ This is by design, not an oversight: a selected test **runs or fails loud — it
 
 ## Security note
 
-The Slug step runs your configured provider headlessly, with whatever MCP tools you've configured, while it reads the ticket's title and description — text written by whoever filed the ticket, not by you. Treat tickets from untrusted or external reporters accordingly; a crafted ticket title is untrusted input to that headless call, the same as any other prompt-injection surface. A per-MCP-server allowlist for the headless call is a tracked hardening item, not yet implemented.
+The Slug step runs your configured provider headlessly while it reads the ticket's title and description. On Claude Code the call is granted only conventional tracker MCP servers (`jira`, `atlassian`, `linear`, `github`, `gitlab`) — never your other MCP tools; on Codex and OpenCode no per-call tool scoping exists, so the session's own tool config applies. Either way the ticket text is — text written by whoever filed the ticket, not by you. Treat tickets from untrusted or external reporters accordingly; a crafted ticket title is untrusted input to that headless call, the same as any other prompt-injection surface. A per-MCP-server allowlist for the headless call is a tracked hardening item, not yet implemented.
 
 ## License
 

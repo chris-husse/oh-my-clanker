@@ -15,9 +15,9 @@ def test_unknown_provider():
 
 def test_claude_headless_tools_last():
     p = get_provider("claude")
-    argv = p.headless_argv("do it", model="m1", allowed_tools=["mcp__*"])
+    argv = p.headless_argv("do it", model="m1", allowed_tools=["mcp__jira"])
     assert argv[:3] == ["claude", "-p", "do it"]
-    assert argv[-2:] == ["--allowed-tools", "mcp__*"]  # variadic flag stays LAST
+    assert argv[-2:] == ["--allowed-tools", "mcp__jira"]  # variadic flag stays LAST
     assert "--model" in argv and argv[argv.index("--model") + 1] == "m1"
     # no allowed_tools -> flag omitted entirely (empty value parses as a bogus tool)
     assert "--allowed-tools" not in p.headless_argv("x", model="")

@@ -65,3 +65,13 @@ def test_fetch_slug_empty_slug_is_error(tmp_path):
     ctx = _ctx_with_claude_stub(tmp_path, 'OMC_SLUG {"ok": true, "slug": "!!!"}')
     with pytest.raises(OmcError, match="empty slug"):
         fetch_slug(ctx, Config(), "PROJ-1")
+
+
+def test_mcp_tool_patterns_are_server_scoped():
+    # Verified live (spec §10.2): claude -p honors server-scoped grants like
+    # `mcp__jira`, but NOT a global `mcp__*` glob — keep patterns glob-free.
+    from omc.slug import MCP_TOOL_PATTERNS
+
+    assert MCP_TOOL_PATTERNS
+    for pat in MCP_TOOL_PATTERNS:
+        assert pat.startswith("mcp__") and "*" not in pat
