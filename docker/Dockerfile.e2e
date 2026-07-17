@@ -52,6 +52,17 @@ RUN set -eux; \
     install -m 0755 "/tmp/worktrunk-${WT_TARGET}/wt" /usr/local/bin/wt; \
     rm -rf /tmp/wt.tar.xz "/tmp/worktrunk-${WT_TARGET}"
 
+# Pre-bake the GitNexus dependency (approved source only) into ~/.omc so the
+# gitnexus E2E tests don't pay the clone+npm+tsc build per test. Placed BEFORE
+# `COPY . /repo` so the layer caches across repo changes. gitnexus-shared is a
+# plain sibling (not a workspace): its deps must install FIRST or the main
+# build dies looking for its tsc — same order gitnexus-ensure prescribes.
+RUN set -eux; \
+    git clone --depth 1 https://github.com/chris-husse/GitNexus.git /root/.omc/dependencies/gitnexus; \
+    cd /root/.omc/dependencies/gitnexus/gitnexus-shared && npm install --no-audit --no-fund; \
+    cd /root/.omc/dependencies/gitnexus/gitnexus && npm ci --no-audit --no-fund && npm run build; \
+    node /root/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js --version
+
 # the repo under test + omc installed from it
 COPY . /repo
 ENV UV_TOOL_BIN_DIR=/usr/local/bin

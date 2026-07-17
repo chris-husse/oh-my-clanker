@@ -61,6 +61,10 @@ When the work is done, run `/omc:finish` inside the session: it rebases onto a f
 
 Two flags change the shape of the run: `--dry-run` prints the full plan (branch name, `wt` argv, title sequence, session argv) and stops before touching anything; `--headless` runs the seeded session in the provider's print mode instead of an interactive shell.
 
+## Understanding a codebase
+
+`/omc:index` builds (incrementally refreshes) a [GitNexus](https://github.com/chris-husse/GitNexus) knowledge graph of the repo; `/omc:document` generates LLM-written architecture docs from that graph into `.omc/docs/gitnexus/docs/`; `/omc:explain <question>` answers "how does X work / what breaks if I change Y" with file-and-symbol citations, grounded in the graph, the generated docs, and — if the project defines one — its own `.omc/skills/explain-context` skill (where the project says where its truth lives). GitNexus installs itself on first use into `~/.omc/dependencies/gitnexus`, cloned only from its approved source. The cadence: run `index` + `document` in the main checkout as the base branch moves; `explain` from any worktree reads the primary checkout's graph, so it stays current.
+
 ## Prerequisites
 
 - `git`

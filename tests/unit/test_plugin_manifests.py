@@ -31,8 +31,26 @@ def test_opencode_entry_registers_skills_dir():
     assert "skills" in js and "config" in js
 
 
-USER_FACING_SKILLS = ("slug", "start", "finish", "build", "verify", "review")
-INTERNAL_SKILLS = ("create-mr", "get-mr-description", "squash")
+USER_FACING_SKILLS = (
+    "slug",
+    "start",
+    "finish",
+    "build",
+    "verify",
+    "review",
+    "index",
+    "document",
+    "explain",
+)
+INTERNAL_SKILLS = (
+    "create-mr",
+    "get-mr-description",
+    "squash",
+    "gitnexus-ensure",
+    "gitnexus-index",
+    "gitnexus-document",
+    "gitnexus-explain",
+)
 
 
 def test_skills_have_frontmatter():
@@ -108,3 +126,53 @@ def test_start_skill_contract():
         "merge-base",
     ):
         assert needle in text, f"start skill missing {needle!r}"
+
+
+def test_gitnexus_ensure_contract():
+    text = (ROOT / "skills" / "gitnexus-ensure" / "SKILL.md").read_text()
+    assert "https://github.com/chris-husse/GitNexus.git" in text  # the ONLY source
+    assert "REFUSE" in text  # unapproved origins are refused, never re-pointed
+    assert text.index("gitnexus-shared") < text.index("npm ci"), (
+        "shared sibling deps must install before the main build"
+    )
+
+
+def test_gitnexus_index_contract():
+    text = (ROOT / "skills" / "gitnexus-index" / "SKILL.md").read_text()
+    for needle in ("--skip-agents-md", "--skip-skills", "git worktree list", "primary"):
+        assert needle in text, f"gitnexus-index missing {needle!r}"
+
+
+def test_gitnexus_document_contract():
+    text = (ROOT / "skills" / "gitnexus-document" / "SKILL.md").read_text()
+    for needle in ("--provider", ".omc/docs/gitnexus/docs", ".gitnexus/wiki"):
+        assert needle in text, f"gitnexus-document missing {needle!r}"
+    assert "openai" in text and "default" in text  # never fall through to it
+
+
+def test_gitnexus_explain_contract():
+    text = (ROOT / "skills" / "gitnexus-explain" / "SKILL.md").read_text()
+    for needle in ("query", "context", "impact", "cypher", "/omc:index"):
+        assert needle in text, f"gitnexus-explain missing {needle!r}"
+
+
+def test_explain_user_facing_contract():
+    text = (ROOT / "skills" / "explain" / "SKILL.md").read_text()
+    for needle in (".omc/skills/explain-context", "gitnexus-explain", "$ARGUMENTS"):
+        assert needle in text, f"explain missing {needle!r}"
+
+
+def test_index_and_document_delegate():
+    assert "gitnexus-index" in (ROOT / "skills" / "index" / "SKILL.md").read_text()
+    assert "gitnexus-document" in (ROOT / "skills" / "document" / "SKILL.md").read_text()
+
+
+def test_dogfood_stage_and_context_skills():
+    for name, needle in (
+        ("build", "just build"),
+        ("verify", "test_e2e_smoke"),
+        ("review", "ToolContext"),
+        ("explain-context", "docs/superpowers/specs"),
+    ):
+        text = (ROOT / ".omc" / "skills" / name / "SKILL.md").read_text()
+        assert needle in text, f".omc/skills/{name} missing {needle!r}"
