@@ -49,3 +49,14 @@ def test_sh_fallback_runs_startup():
     assert argv[:2] == ["sh", "-c"]
     assert shlex.join(ARGS["startup_argv"]) in argv[2]
     assert files == {}
+
+
+def test_zsh_and_bash_emit_title_before_startup():
+    # The prompt hooks (precmd / PROMPT_COMMAND) only fire after the startup
+    # session exits; the rc file must ALSO emit the title before the session.
+    for shell_env in ({"SHELL": "zsh"}, {"SHELL": "bash"}):
+        _, files = detect_shell(shell_env).build_invocation(**ARGS)
+        rc = next(iter(files.values()))
+        printf_at = rc.index("printf '%s' " + shlex.quote(ARGS["title_seq"]))
+        startup_at = rc.index(shlex.join(ARGS["startup_argv"]))
+        assert printf_at < startup_at, f"title must precede startup in:\n{rc}"

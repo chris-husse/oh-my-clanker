@@ -22,6 +22,9 @@ class BashShell(Shell):
             '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"',
             f"PROMPT_COMMAND={shlex.quote(f'printf %s {shlex.quote(title_seq)}')}",
             f"cd {shlex.quote(cwd)}",
+            # PROMPT_COMMAND only fires at the first prompt — AFTER the startup
+            # session exits — so emit the title once, up front, before it runs.
+            f"printf '%s' {shlex.quote(title_seq)}",
         ]
         startup = joined_startup(startup_argv)
         if startup:

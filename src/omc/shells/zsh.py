@@ -19,6 +19,9 @@ class ZshShell(Shell):
             '[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"',
             f"precmd() {{ printf '%s' {shlex.quote(title_seq)} }}",
             f"cd {shlex.quote(cwd)}",
+            # precmd only fires at the first prompt — AFTER the startup session
+            # exits — so emit the title once, up front, before the session runs.
+            f"printf '%s' {shlex.quote(title_seq)}",
         ]
         startup = joined_startup(startup_argv)
         if startup:
