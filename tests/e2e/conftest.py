@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -25,15 +26,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # config for this test session so it never shells out for creds it doesn't need.
 # Respects an operator-supplied DOCKER_CONFIG (e.g. CI with real private-registry
 # needs) by only filling in when unset.
-def _isolate_docker_config() -> None:
+def _isolate_docker_config() -> str | None:
     if os.environ.get("DOCKER_CONFIG"):
-        return
+        return None
     cfg_dir = Path(tempfile.mkdtemp(prefix="omc-e2e-dockercfg-"))
     (cfg_dir / "config.json").write_text(json.dumps({"auths": {}}))
     os.environ["DOCKER_CONFIG"] = str(cfg_dir)
+    return str(cfg_dir)
 
-
-_isolate_docker_config()
 
 # docker-py's images.build() also goes through the classic (non-BuildKit) Engine
 # API, which — unlike `docker build`/buildx — does NOT auto-populate the implicit
@@ -50,15 +50,20 @@ def _target_arch() -> str:
 
 @pytest.fixture(scope="session")
 def e2e_image():
+    cfg_dir = _isolate_docker_config()
     from testcontainers.core.image import DockerImage
 
-    with DockerImage(
-        path=str(REPO_ROOT),
-        dockerfile_path="docker/Dockerfile.e2e",
-        tag="omc-e2e:test",
-        buildargs={"TARGETARCH": _target_arch()},
-    ) as image:
-        yield str(image)
+    try:
+        with DockerImage(
+            path=str(REPO_ROOT),
+            dockerfile_path="docker/Dockerfile.e2e",
+            tag="omc-e2e:test",
+            buildargs={"TARGETARCH": _target_arch()},
+        ) as image:
+            yield str(image)
+    finally:
+        if cfg_dir is not None:
+            shutil.rmtree(cfg_dir, ignore_errors=True)
 
 
 @pytest.fixture
@@ -69,10 +74,10 @@ def container(e2e_image):
     for var in TOKEN_ENV.values():
         if os.environ.get(var):
             c = c.with_env(var, os.environ[var])
-    c.start()
-    # finish plugin registration (needs network; baked layer may have been offline)
-    c.get_wrapped_container().exec_run(["bash", "/repo/docker/setup-plugins.sh"])
     try:
+        c.start()
+        # finish plugin registration (needs network; baked layer may have been offline)
+        c.get_wrapped_container().exec_run(["bash", "/repo/docker/setup-plugins.sh"])
         yield c
     finally:
         c.stop()
