@@ -9,6 +9,7 @@ import sys
 from . import worktree
 from .config.schema import Config
 from .errors import OmcError
+from .plugin import ensure_plugin
 from .probe import require_tools
 from .providers.registry import get_provider
 from .shells.registry import detect_shell
@@ -47,6 +48,11 @@ def _run_headless(ctx: ToolContext, cfg: Config, seed: str, cwd: str, slug: str)
     return cp.returncode
 
 
+def _say(msg: str) -> None:
+    """One progress line per phase, on stderr — a silent minute is a bug."""
+    print(msg, file=sys.stderr, flush=True)
+
+
 def run_start(
     ctx: ToolContext,
     cfg: Config,
@@ -55,13 +61,18 @@ def run_start(
     dry_run: bool = False,
     headless: bool = False,
 ) -> int:
+    name = cfg.llm.default
+    _say(f"→ probing tools (git, wt, {name})")
     require_tools(ctx, cfg)
+    plugin_status = ensure_plugin(ctx, cfg, check_only=dry_run)
+    _say(f"→ omc plugin for {name}: {plugin_status}")
 
+    _say(f"→ generating slug via {name} (LLM call, typically 15–60s)…")
     slug = fetch_slug(ctx, cfg, context)  # raises Refusal with the skill's message
+    _say(f"✓ slug: {slug}")
     branch = f"{cfg.worktree.branch_prefix}{slug}"
     base = cfg.worktree.base_branch
 
-    name = cfg.llm.default
     provider = get_provider(name)
     pcfg = cfg.llm.providers.get(name)
     model = pcfg.model if pcfg else ""
@@ -81,13 +92,17 @@ def run_start(
         _print_plan(branch, base, wt_argv, title_seq, session_argv, shell_argv)
         return 0
 
+    _say(f"→ creating worktree {branch} (base origin/{base})")
     worktree.sync_base(ctx, base)
     path = worktree.create_worktree(ctx, branch, base=f"origin/{base}")
     if path is None:
         raise OmcError(f"could not create or switch to the worktree for {branch}")
+    _say(f"✓ worktree: {path}")
 
     if headless:
+        _say(f"→ running headless {name} session seeded with /omc:start")
         return _run_headless(ctx, cfg, seed, path, slug)
+    _say(f'→ launching {name} session "{slug}" seeded with /omc:start')
 
     os.environ.update({**provider.title_env(), "OMC_SLUG": slug})  # pragma: no cover
     shell = detect_shell(ctx.env)  # pragma: no cover

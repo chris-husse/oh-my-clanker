@@ -15,6 +15,7 @@ def test_start_headless_creates_worktree_and_seeds(container, provider):
 
     rc, out = run_in(container, ["omc", "start", "PROJ-1", "--headless"], cwd=repo, timeout=900)
     assert rc == 0, out
+    assert "Unknown command" not in out, f"seeded /omc:start did not resolve:\n{out[:2000]}"
 
     # worktree exists on disk with an omc-shaped branch
     rc2, wtout = run_in(container, ["wt", "list", "--format=json"], cwd=repo)

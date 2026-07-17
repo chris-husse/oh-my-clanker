@@ -15,9 +15,28 @@ OK_VERDICT = 'OMC_SLUG {"ok": true, "slug": "proj-1-fix-login"}'
 def full_env(tmp_path, *, verdict=OK_VERDICT, wt_json=None):
     bindir = tmp_path / "bin"
     make_stub(bindir, "git", stdout="git version 2.99")
-    make_stub(bindir, "claude", stdout=verdict)
+    # The static stub answers EVERY claude invocation with the same stdout, so
+    # prepend an "omc@" line: ensure_plugin's `plugin list` probe sees the
+    # plugin as installed, and parse_verdict ignores non-OMC_SLUG lines.
+    make_stub(bindir, "claude", stdout=f"omc@oh-my-clanker\n{verdict}")
     make_stub(bindir, "wt", stdout=json.dumps(wt_json or {"path": str(tmp_path / "wtree")}))
     return ToolContext.from_env(stub_env(bindir, SHELL="/bin/bash"))
+
+
+def test_progress_lines_narrate_phases(tmp_path, capsys):
+    ctx = full_env(tmp_path)
+    (tmp_path / "wtree").mkdir()
+    rc = run_start(ctx, Config(), "PROJ-1", headless=True)
+    assert rc == 0
+    err = capsys.readouterr().err
+    probe_at = err.index("→ probing tools (git, wt, claude)")
+    plugin_at = err.index("→ omc plugin for claude: ok")
+    slug_start_at = err.index("→ generating slug via claude")
+    slug_done_at = err.index("✓ slug: proj-1-fix-login")
+    wt_at = err.index("→ creating worktree feature/proj-1-fix-login")
+    launch_at = err.index("→ running headless claude session seeded with /omc:start")
+    order = [probe_at, plugin_at, slug_start_at, slug_done_at, wt_at, launch_at]
+    assert order == sorted(order), f"phase lines out of order:\n{err}"
 
 
 def test_dry_run_prints_plan(tmp_path, capsys):
