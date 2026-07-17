@@ -28,9 +28,14 @@
    | Codex | `codex plugin marketplace add chris-husse/oh-my-clanker`, then install `omc` from `/plugins` |
    | OpenCode | add `"plugin": ["omc@git+https://github.com/chris-husse/oh-my-clanker.git"]` to `opencode.json` |
 
-   `omc`'s session skill hands off to [superpowers](https://github.com/obra/superpowers)'s brainstorming skill, and declares it as a plugin dependency — but install superpowers explicitly yourself for every harness. See the caveat right below for why that matters on Claude Code specifically.
+   `omc`'s session skill hands off to [superpowers](https://github.com/obra/superpowers)'s brainstorming skill, and declares it as a marketplace-qualified plugin dependency (`superpowers@superpowers-marketplace`) — but install superpowers explicitly yourself for every harness; Claude Code resolves the dependency once you have, it doesn't fetch it for you.
 
-   > **Known issue (Claude Code):** `claude plugin list` may report `omc@oh-my-clanker` as "failed to load", citing a missing `superpowers@oh-my-clanker` dependency. That's a Claude Code limitation, not a step you missed: a bare-name plugin dependency resolves only *within its own declaring marketplace*, and the `oh-my-clanker` marketplace will never carry a `superpowers` entry (superpowers ships from its own marketplace, `obra/superpowers-marketplace`). This is confirmed order-independent — installing superpowers before or after `omc` makes no difference. Install superpowers anyway, since `/omc:start` needs it either way; if `omc`'s skills still aren't being served, load this repo directly for the session instead: `claude --plugin-dir /path/to/oh-my-clanker`. Full write-up: [`docker/PLUGIN-NOTES.md`](docker/PLUGIN-NOTES.md).
+   | Harness | Install superpowers |
+   |---|---|
+   | Claude Code | `/plugin marketplace add obra/superpowers-marketplace` then `/plugin install superpowers@superpowers-marketplace` |
+   | Codex / OpenCode | Install from [obra/superpowers](https://github.com/obra/superpowers) |
+
+   Full write-up (including the cross-marketplace dependency pitfall this manifest shape avoids): [`docker/PLUGIN-NOTES.md`](docker/PLUGIN-NOTES.md).
 
 ## Usage
 
@@ -100,6 +105,10 @@ Live scenarios need a token per provider, exported in your shell before running:
 | `opencode` | `ANTHROPIC_API_KEY` |
 
 This is by design, not an oversight: a selected test **runs or fails loud — it never skips**. If a provider's token is missing, that provider's live E2E tests fail with the exact command needed to fix it (e.g. `claude setup-token`) instead of silently passing.
+
+## Security note
+
+The Slug step runs your configured provider headlessly, with whatever MCP tools you've configured, while it reads the ticket's title and description — text written by whoever filed the ticket, not by you. Treat tickets from untrusted or external reporters accordingly; a crafted ticket title is untrusted input to that headless call, the same as any other prompt-injection surface. A per-MCP-server allowlist for the headless call is a tracked hardening item, not yet implemented.
 
 ## License
 
