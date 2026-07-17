@@ -4,3 +4,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 dist/
+
+# local credentials (E2E tokens)
+.env
+.env.*
+*.swp

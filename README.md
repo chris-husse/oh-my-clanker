@@ -96,13 +96,16 @@ just e2e-tests tests/e2e/test_e2e_smoke.py    # container-harness smoke test onl
 just e2e-tests -k claude                      # just the claude column of the matrix
 ```
 
-Live scenarios need a token per provider, exported in your shell before running:
+Live scenarios need a token per provider. Put them in a `.env` file at the repo
+root — `cp env.example .env` and fill in what you have. `.env` is gitignored and
+dockerignored (tokens never land in a commit or an image layer), and `just` loads
+it automatically for every recipe, so no shell exports are needed:
 
-| Provider | Env var |
-|---|---|
-| `claude` | `CLAUDE_CODE_OAUTH_TOKEN` |
-| `codex` | `OPENAI_API_KEY` |
-| `opencode` | `ANTHROPIC_API_KEY` |
+| Provider | Env var | Where to get it |
+|---|---|---|
+| `claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `claude setup-token` |
+| `codex` | `OPENAI_API_KEY` | platform.openai.com |
+| `opencode` | `ANTHROPIC_API_KEY` | console.anthropic.com |
 
 This is by design, not an oversight: a selected test **runs or fails loud — it never skips**. If a provider's token is missing, that provider's live E2E tests fail with the exact command needed to fix it (e.g. `claude setup-token`) instead of silently passing.
 

@@ -17,9 +17,9 @@ TOKEN_ENV = {
 }
 
 _TOKEN_GUIDANCE = {
-    "claude": "run `claude setup-token` and export CLAUDE_CODE_OAUTH_TOKEN",
-    "codex": "export OPENAI_API_KEY (platform.openai.com)",
-    "opencode": "export ANTHROPIC_API_KEY (console.anthropic.com)",
+    "claude": "run `claude setup-token` and put the token in .env (cp env.example .env)",
+    "codex": "put an OPENAI_API_KEY (platform.openai.com) in .env (cp env.example .env)",
+    "opencode": "put an ANTHROPIC_API_KEY (console.anthropic.com) in .env (cp env.example .env)",
 }
 
 PROVIDERS = list(TOKEN_ENV)

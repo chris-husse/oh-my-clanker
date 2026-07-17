@@ -1,3 +1,6 @@
+# Load E2E provider tokens from .env (gitignored + dockerignored; see env.example).
+set dotenv-load
+
 # Fast gate: lint + format check + unit tests. No LLM, no network, no Docker.
 build:
     uvx ruff format --check .
