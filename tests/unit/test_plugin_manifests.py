@@ -1,0 +1,178 @@
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_claude_plugin_manifest():
+    data = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
+    assert data["name"] == "omc"
+    # Marketplace-qualified: a bare name resolves only within the declaring
+    # marketplace (oh-my-clanker), which never carries a superpowers entry —
+    # see docker/PLUGIN-NOTES.md for the confirmed failure mode and fix.
+    assert "superpowers@superpowers-marketplace" in data["dependencies"]
+
+
+def test_claude_marketplace_lists_omc():
+    data = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
+    assert data["name"] == "oh-my-clanker"
+    assert any(p["name"] == "omc" for p in data["plugins"])
+
+
+def test_codex_plugin_manifest():
+    data = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text())
+    assert data["name"] == "omc"
+    assert data["skills"] == "./skills/"
+
+
+def test_opencode_entry_registers_skills_dir():
+    js = (ROOT / ".opencode" / "plugins" / "omc.js").read_text()
+    assert "skills" in js and "config" in js
+
+
+USER_FACING_SKILLS = (
+    "slug",
+    "start",
+    "finish",
+    "build",
+    "verify",
+    "review",
+    "index",
+    "document",
+    "explain",
+)
+INTERNAL_SKILLS = (
+    "create-mr",
+    "get-mr-description",
+    "squash",
+    "gitnexus-ensure",
+    "gitnexus-index",
+    "gitnexus-document",
+    "gitnexus-explain",
+)
+
+
+def test_skills_have_frontmatter():
+    for name in USER_FACING_SKILLS + INTERNAL_SKILLS:
+        text = (ROOT / "skills" / name / "SKILL.md").read_text()
+        m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+        assert m, f"{name}: missing frontmatter"
+        assert f"name: {name}" in m.group(1)
+        assert "description:" in m.group(1)
+
+
+def test_internal_skills_marked_internal():
+    # The layering convention: internal skills say so in their description so
+    # they stay out of user-facing muscle memory (plugins can't hide skills).
+    for name in INTERNAL_SKILLS:
+        text = (ROOT / "skills" / name / "SKILL.md").read_text()
+        m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+        assert "Internal" in m.group(1), f"{name}: not marked Internal"
+        assert "not meant for direct invocation" in m.group(1)
+
+
+def test_finish_skill_contract():
+    text = (ROOT / "skills" / "finish" / "SKILL.md").read_text()
+    for needle in (
+        "merge-base",
+        "git rebase origin/",
+        "create-mr",
+        "Close the worktree",
+        "review comments",
+        "Chat about this",
+    ):
+        assert needle in text, f"finish skill missing {needle!r}"
+    assert "gh pr create" not in text  # never creates the MR/PR
+    # squash is delegated, then stages run build -> verify -> review, then push
+    order = [text.index("`squash`"), text.index("`build`"), text.index("`verify`")]
+    order += [text.index("`review`"), text.index("`create-mr`")]
+    assert order == sorted(order), "finish must order squash -> build -> verify -> review -> push"
+
+
+def test_stage_proxy_contract():
+    for stage in ("build", "verify", "review"):
+        text = (ROOT / "skills" / stage / "SKILL.md").read_text()
+        for needle in (f".omc/skills/{stage}", "OMC_STAGE", '"configured"'):
+            assert needle in text, f"{stage} proxy missing {needle!r}"
+        assert "nothing to do" in text  # unconfigured is a pass, not a failure
+
+
+def test_squash_skill_contract():
+    text = (ROOT / "skills" / "squash" / "SKILL.md").read_text()
+    for needle in ("reset --soft", "OMC_SQUASH", "rev-list --count"):
+        assert needle in text, f"squash skill missing {needle!r}"
+
+
+def test_dogfood_build_stage():
+    text = (ROOT / ".omc" / "skills" / "build" / "SKILL.md").read_text()
+    assert "just build" in text
+
+
+def test_create_mr_skill_contract():
+    text = (ROOT / "skills" / "create-mr" / "SKILL.md").read_text()
+    for needle in ("get-mr-description", "--force-with-lease", "--amend"):
+        assert needle in text, f"create-mr skill missing {needle!r}"
+    assert "Do not create the MR/PR" in text
+
+
+def test_start_skill_contract():
+    text = (ROOT / "skills" / "start" / "SKILL.md").read_text()
+    for needle in (
+        "OMC_SLUG",
+        "superpowers:brainstorming",
+        "omc start",
+        "$ARGUMENTS",
+        "merge-base",
+    ):
+        assert needle in text, f"start skill missing {needle!r}"
+
+
+def test_gitnexus_ensure_contract():
+    text = (ROOT / "skills" / "gitnexus-ensure" / "SKILL.md").read_text()
+    assert "https://github.com/chris-husse/GitNexus.git" in text  # the ONLY source
+    assert "REFUSE" in text  # unapproved origins are refused, never re-pointed
+    assert text.index("gitnexus-shared") < text.index("npm ci"), (
+        "shared sibling deps must install before the main build"
+    )
+
+
+def test_gitnexus_index_contract():
+    text = (ROOT / "skills" / "gitnexus-index" / "SKILL.md").read_text()
+    for needle in ("--skip-agents-md", "--skip-skills", "git worktree list", "primary"):
+        assert needle in text, f"gitnexus-index missing {needle!r}"
+
+
+def test_gitnexus_document_contract():
+    text = (ROOT / "skills" / "gitnexus-document" / "SKILL.md").read_text()
+    for needle in ("--provider", ".omc/docs/gitnexus/docs", ".gitnexus/wiki"):
+        assert needle in text, f"gitnexus-document missing {needle!r}"
+    assert "openai" in text and "default" in text  # never fall through to it
+
+
+def test_gitnexus_explain_contract():
+    text = (ROOT / "skills" / "gitnexus-explain" / "SKILL.md").read_text()
+    for needle in ("query", "context", "impact", "cypher", "/omc:index"):
+        assert needle in text, f"gitnexus-explain missing {needle!r}"
+
+
+def test_explain_user_facing_contract():
+    text = (ROOT / "skills" / "explain" / "SKILL.md").read_text()
+    for needle in (".omc/skills/explain-context", "gitnexus-explain", "$ARGUMENTS"):
+        assert needle in text, f"explain missing {needle!r}"
+
+
+def test_index_and_document_delegate():
+    assert "gitnexus-index" in (ROOT / "skills" / "index" / "SKILL.md").read_text()
+    assert "gitnexus-document" in (ROOT / "skills" / "document" / "SKILL.md").read_text()
+
+
+def test_dogfood_stage_and_context_skills():
+    for name, needle in (
+        ("build", "just build"),
+        ("verify", "test_e2e_smoke"),
+        ("review", "ToolContext"),
+        ("explain-context", "docs/superpowers/specs"),
+    ):
+        text = (ROOT / ".omc" / "skills" / name / "SKILL.md").read_text()
+        assert needle in text, f".omc/skills/{name} missing {needle!r}"

@@ -1,0 +1,14 @@
+{
+  "name": "oh-my-clanker",
+  "description": "Marketplace for the omc plugin",
+  "owner": { "name": "Chris Husse" },
+  "plugins": [
+    {
+      "name": "omc",
+      "description": "In-session skills for the omc CLI: /omc:start and /omc:slug",
+      "version": "0.1.0",
+      "source": "./",
+      "author": { "name": "Chris Husse" }
+    }
+  ]
+}

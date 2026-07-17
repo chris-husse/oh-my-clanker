@@ -1,0 +1,8 @@
+{
+  "PROJ-1": {
+    "summary": "Fix login timeout in auth service",
+    "description": "Users are logged out after 5 minutes. Investigate session TTL handling in the auth service and extend it to the configured 24h.",
+    "status": "To Do",
+    "issuetype": "Bug"
+  }
+}

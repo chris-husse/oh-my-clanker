@@ -1,0 +1,12 @@
+{
+  "name": "omc",
+  "displayName": "Oh My Clanker!",
+  "version": "0.1.0",
+  "description": "Turn a ticket into a prepared worktree with a seeded, brainstorm-ready LLM session. In-session skills for the omc CLI.",
+  "author": { "name": "Chris Husse" },
+  "homepage": "https://github.com/chris-husse/oh-my-clanker",
+  "repository": "https://github.com/chris-husse/oh-my-clanker",
+  "license": "MIT",
+  "keywords": ["workflow", "worktree", "jira", "brainstorming", "skills"],
+  "dependencies": ["superpowers@superpowers-marketplace"]
+}
