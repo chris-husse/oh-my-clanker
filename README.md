@@ -57,6 +57,8 @@ A ticket key or URL is resolved through whatever tracker tool your session alrea
 
 From there, `/omc:start` takes over inside the session itself: it gathers the ticket's context (parent/epic, linked docs — each summarized, or reported as "couldn't fetch" rather than failing outright), verifies the base branch is still fresh (rebasing, or stopping cleanly on conflicts — it never brainstorms on a stale base), and then hands off to `superpowers:brainstorming` with that context plus your own seed thinking.
 
+When the work is done, run `/omc:finish` inside the session: it rebases onto a fresh base, squashes the branch to a single commit whose message *is* the MR/PR description (generated from the real diff), pushes with `--force-with-lease`, and prints where to open the MR — it never creates one for you. It ends by offering to close the worktree (`wt remove` — the branch survives until merged), iterate on review comments (amend + re-push), or just talk through the change.
+
 Two flags change the shape of the run: `--dry-run` prints the full plan (branch name, `wt` argv, title sequence, session argv) and stops before touching anything; `--headless` runs the seeded session in the provider's print mode instead of an interactive shell.
 
 ## Prerequisites
