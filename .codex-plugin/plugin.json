@@ -1,0 +1,15 @@
+{
+  "name": "omc",
+  "version": "0.1.0",
+  "description": "Turn a ticket into a prepared worktree with a seeded, brainstorm-ready LLM session.",
+  "author": { "name": "Chris Husse", "url": "https://github.com/chris-husse" },
+  "homepage": "https://github.com/chris-husse/oh-my-clanker",
+  "repository": "https://github.com/chris-husse/oh-my-clanker",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Oh My Clanker!",
+    "shortDescription": "Ticket -> prepared worktree -> brainstorm-ready session",
+    "category": "Developer Tools"
+  }
+}
