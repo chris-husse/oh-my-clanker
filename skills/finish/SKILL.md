@@ -46,9 +46,9 @@ Each is a proxy for the project's own `.omc/skills/<stage>/SKILL.md`:
 - A stage that changed TRACKED files (formatters, autofixes) → amend those
   changes into the squashed commit (`git add -u && git commit --amend
   --no-edit`); leave untracked artifacts alone.
-- A stage that FAILED (`"passed": false`) → **stop before pushing**: report
-  which stage failed and why, and leave the branch squashed so the user can
-  fix and re-run `finish`.
+- A stage that FAILED (`"passed": false`) → **stop at that stage** (do not run
+  the remaining stages, do not push): report which stage failed and why, and
+  leave the branch squashed so the user can fix and re-run `finish`.
 
 ## Step 5 — describe and push
 
