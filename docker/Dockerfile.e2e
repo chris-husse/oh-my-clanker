@@ -1,0 +1,70 @@
+# E2E image: every test gets a fresh container of this. The container IS the
+# sandbox — no host state, auth enters as env tokens at `docker run` time.
+#
+# --- Task 14 / Step 1: worktrunk distribution (recorded findings) ---
+# `cargo search worktrunk` hits crates.io directly:
+#   worktrunk = "0.68.0"   # A CLI for Git worktree management, designed for
+#                          # parallel AI agent workflows
+# Upstream is https://github.com/max-sixty/worktrunk. Its GitHub Releases
+# (confirmed via `gh`/API against the `v0.68.0` tag) ship prebuilt *static*
+# (musl) Linux binaries per version, each with a sibling `.sha256`:
+#   worktrunk-x86_64-unknown-linux-musl.tar.xz
+#   worktrunk-aarch64-unknown-linux-musl.tar.xz
+# Both were downloaded and their sha256 verified locally against the
+# published `.sha256` files during Task 14 research. A static-binary
+# curl+tar install needs no Rust toolchain and no compilation, so it
+# replaces the `rust:1-slim` / `cargo install worktrunk --locked` fallback
+# stage from the original task brief — materially faster and simpler for an
+# image every test rebuilds/pulls. That fallback still works if this ever
+# needs reverting: add back a `FROM rust:1-slim AS wtbuild` stage running
+# `cargo install worktrunk --locked` and `COPY --from=wtbuild
+# /usr/local/cargo/bin/wt /usr/local/bin/wt`.
+# Checksums below are pinned to v0.68.0 — bump WORKTRUNK_VERSION and both
+# sha256 values together when upgrading.
+
+FROM node:22-bookworm-slim
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git python3 curl ca-certificates xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# the three provider CLIs
+RUN npm install -g @anthropic-ai/claude-code @openai/codex opencode-ai
+
+# wt (worktrunk) — prebuilt static musl release binary (see note above)
+ARG WORKTRUNK_VERSION=0.68.0
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) WT_TARGET=x86_64-unknown-linux-musl; \
+             WT_SHA256=3378ee6a63ca438ac60687c5e6204e06ce694fed41ad57ef6aa54451b10231ed ;; \
+      arm64) WT_TARGET=aarch64-unknown-linux-musl; \
+             WT_SHA256=c03c58053a0b68849a9238fcc50271804c63e885d1ef1b3f539b2be44be26cdb ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -LsSf -o /tmp/wt.tar.xz \
+      "https://github.com/max-sixty/worktrunk/releases/download/v${WORKTRUNK_VERSION}/worktrunk-${WT_TARGET}.tar.xz"; \
+    echo "${WT_SHA256}  /tmp/wt.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/wt.tar.xz -C /tmp; \
+    install -m 0755 "/tmp/worktrunk-${WT_TARGET}/wt" /usr/local/bin/wt; \
+    rm -rf /tmp/wt.tar.xz "/tmp/worktrunk-${WT_TARGET}"
+
+# the repo under test + omc installed from it
+COPY . /repo
+ENV UV_TOOL_BIN_DIR=/usr/local/bin
+RUN uv tool install /repo
+
+# plugins for Claude Code (omc from the local repo-marketplace + superpowers);
+# best-effort at build time, finished by docker/setup-plugins.sh at test time.
+RUN bash /repo/docker/setup-plugins.sh || echo "plugin setup deferred to test time"
+
+# git identity for worktree/commit operations inside scenarios
+RUN git config --global user.email "e2e@omc.invalid" && \
+    git config --global user.name "omc e2e" && \
+    git config --global init.defaultBranch main
+
+WORKDIR /work
+CMD ["sleep", "infinity"]
