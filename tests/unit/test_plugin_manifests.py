@@ -43,6 +43,7 @@ USER_FACING_SKILLS = (
     "explain",
     "rebase-main",
     "check-wt-config",
+    "integrate",
 )
 INTERNAL_SKILLS = (
     "create-mr",
@@ -204,3 +205,24 @@ def test_gitnexus_explain_prefers_local_snapshot():
     text = (ROOT / "skills" / "gitnexus-explain" / "SKILL.md").read_text()
     assert "local" in text.lower() and "snapshot" in text.lower()
     assert "rebase-main" in text  # points at the refresh path when stale
+
+
+def test_integrate_skill_contract():
+    text = (ROOT / "skills" / "integrate" / "SKILL.md").read_text()
+    for needle in (
+        ".omc/skills/build",
+        ".omc/skills/verify",
+        ".omc/skills/review",
+        ".omc/skills/explain-context",
+        ".omc/config/AGENTS.md",
+        ".config/wt.toml",
+        "check-wt-config",
+        "omc configure",
+        "/omc:index",
+        "explicit approval",
+    ):
+        assert needle in text, f"integrate skill missing {needle!r}"
+    # both modes + headless discipline
+    assert "review" in text.lower() and "fresh" in text.lower()
+    assert "zero writes" in text.lower() or "no writes" in text.lower()
+    assert "--defaults" in text  # the do-NOT-reset-config warning

@@ -20,7 +20,7 @@
 
    Non-interactive equivalents exist for scripting: `omc configure --defaults` or `omc configure --set llm.default=claude`. Run inside a repo, configure also establishes the **AGENTS.md control chain**: root `AGENTS.md` and `CLAUDE.md` become symlinks to omc's generated behavior layer (`.omc/internal/AGENTS.md`), which defers to the project's own instructions in `.omc/config/AGENTS.md` (yours — seeded once, never touched; existing regular files are never replaced, you get migration steps instead). Commit all three.
 
-3. Install the skills plugin for each harness you use:
+3. Install the skills plugin for each harness you use (then, inside your project, run `/omc:integrate` in a session — it inventories every omc surface and brainstorms your project's build/verify/review/explain-context skills with you, grounded in your actual codebase; re-run it after omc updates or whenever the integration feels off):
 
    | Harness | Install |
    |---|---|
