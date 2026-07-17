@@ -63,9 +63,20 @@ def _hydrate(cls: type, data: dict, path: str):
     kwargs = {}
     for name, value in data.items():
         f = field_map[name]
-        if cls is LLMConfig and name == "providers" and isinstance(value, dict):
-            kwargs[name] = {k: _hydrate(ProviderConfig, v, path) for k, v in value.items()}
-        elif is_dataclass(f.type) and isinstance(value, dict):
+        if cls is LLMConfig and name == "providers":
+            if not isinstance(value, dict):
+                raise ConfigError(f"invalid value for {name!r} in {path}: expected an object")
+            providers = {}
+            for k, v in value.items():
+                if not isinstance(v, dict):
+                    raise ConfigError(
+                        f"invalid value for llm.providers[{k!r}] in {path}: expected an object"
+                    )
+                providers[k] = _hydrate(ProviderConfig, v, path)
+            kwargs[name] = providers
+        elif is_dataclass(f.type):
+            if not isinstance(value, dict):
+                raise ConfigError(f"invalid value for {name!r} in {path}: expected an object")
             kwargs[name] = _hydrate(f.type, value, path)
         else:
             kwargs[name] = value

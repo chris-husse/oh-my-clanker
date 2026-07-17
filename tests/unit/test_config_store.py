@@ -56,3 +56,15 @@ def test_set_key_rejects_unknown_and_sections():
         store.set_key(cfg, "llm", "x")
     with pytest.raises(ConfigError):
         store.set_key(cfg, "schema_version", "9")
+
+
+def test_section_must_be_object(tmp_path):
+    (tmp_path / "config.json").write_text('{"schema_version": 1, "llm": "oops"}')
+    with pytest.raises(ConfigError, match="llm"):
+        store.load(tmp_path)
+
+
+def test_provider_entry_must_be_object(tmp_path):
+    (tmp_path / "config.json").write_text('{"llm": {"providers": {"claude": 5}}}')
+    with pytest.raises(ConfigError, match="claude"):
+        store.load(tmp_path)
