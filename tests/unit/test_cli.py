@@ -18,3 +18,18 @@ def test_version_runs(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("OMC_HOME", str(tmp_path))
     assert main(["version"]) == 0
     assert "omc" in capsys.readouterr().out
+
+
+def test_internal_is_hidden_and_intercepted(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("OMC_HOME", str(tmp_path))
+    assert main(["internal", "wt-template"]) == 0
+    captured = capsys.readouterr()
+    assert "copy-ignored" in captured.out
+    assert "Oh My Clanker" not in captured.err  # no banner on internal
+
+
+def test_watch_without_config_bails(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "empty"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["watch", "--once"]) == 2
+    assert "omc configure" in capsys.readouterr().err

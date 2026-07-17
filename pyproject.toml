@@ -32,3 +32,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# wtconfig embeds the wt.toml starter verbatim; its shell one-liner exceeds 100 cols.
+"src/omc/wtconfig.py" = ["E501"]

@@ -1,0 +1,122 @@
+import json
+import os
+import subprocess
+
+from omc.internal import run_internal
+
+
+def _git(*args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _setup_primary_with_origin(tmp_path):
+    """A real primary clone with a bare origin holding main."""
+    origin = tmp_path / "origin.git"
+    origin.mkdir()
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    # bare HEAD -> main so later clones check out main (init.defaultBranch-proof)
+    subprocess.run(
+        ["git", "-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/main"], check=True
+    )
+    primary = tmp_path / "primary"
+    subprocess.run(["git", "clone", "-q", str(origin), str(primary)], check=True)
+    _git("config", "user.email", "t@t", cwd=primary)
+    _git("config", "user.name", "t", cwd=primary)
+    (primary / "f.txt").write_text("one\n")
+    _git("add", ".", cwd=primary)
+    _git("commit", "-qm", "c1", cwd=primary)
+    _git("branch", "-M", "main", cwd=primary)  # independent of init.defaultBranch
+    _git("push", "-q", "-u", "origin", "main", cwd=primary)
+    return origin, primary
+
+
+def _add_worktree(primary, tmp_path, branch="feature/x"):
+    wt = tmp_path / "wt"
+    _git("worktree", "add", "-q", "-b", branch, str(wt), cwd=primary)
+    _git("config", "user.email", "t@t", cwd=wt)
+    _git("config", "user.name", "t", cwd=wt)
+    return wt
+
+
+def _advance_main(primary, content="two\n"):
+    (primary / "f2.txt").write_text(content)
+    _git("add", ".", cwd=primary)
+    _git("commit", "-qm", "advance", cwd=primary)
+    _git("push", "-q", "origin", "main", cwd=primary)
+
+
+def _run(args, cwd, tmp_path, capsys):
+    old = os.getcwd()
+    os.chdir(cwd)
+    try:
+        env_home = tmp_path / "omchome"
+        os.environ["OMC_HOME"] = str(env_home)
+        rc = run_internal(args)
+    finally:
+        os.chdir(old)
+        os.environ.pop("OMC_HOME", None)
+    out = capsys.readouterr().out
+    verdict_line = next((ln for ln in out.splitlines() if ln.startswith("OMC_REBASE_MAIN ")), None)
+    verdict = json.loads(verdict_line.split(" ", 1)[1]) if verdict_line else None
+    return rc, verdict, out
+
+
+def test_wt_template_prints_template(capsys):
+    rc = run_internal(["wt-template"])
+    assert rc == 0
+    assert "copy-ignored" in capsys.readouterr().out
+
+
+def test_unknown_internal_subcommand(capsys):
+    assert run_internal(["nope"]) == 2
+
+
+def test_rebase_main_in_primary_is_noop(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    rc, verdict, _ = _run(["rebase-main", "--base", "main"], primary, tmp_path, capsys)
+    assert rc == 0
+    assert verdict["ok"] is True and "primary" in verdict["note"]
+
+
+def test_rebase_main_rebases_and_mirrors_snapshot(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    (wt / "mine.txt").write_text("work\n")
+    _git("add", ".", cwd=wt)
+    _git("commit", "-qm", "my work", cwd=wt)
+    _advance_main(primary)
+    # primary carries a fresher snapshot than the worktree copy
+    (primary / ".gitnexus").mkdir()
+    (primary / ".gitnexus" / "graph.db").write_text("fresh")
+    (wt / ".gitnexus").mkdir()
+    (wt / ".gitnexus" / "graph.db").write_text("stale")
+    (wt / ".gitnexus" / "extraneous").write_text("x")
+
+    rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
+
+    assert rc == 0 and verdict["ok"] is True
+    assert ".gitnexus" in verdict["synced"]
+    assert verdict["rebased"]  # old..new range recorded
+    assert (wt / "f2.txt").exists()  # main's commit arrived under our work
+    assert (wt / "mine.txt").exists()
+    assert (wt / ".gitnexus" / "graph.db").read_text() == "fresh"
+    assert not (wt / ".gitnexus" / "extraneous").exists()
+
+
+def test_rebase_main_conflict_bails_rc3_and_leaves_rebase_paused(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    (wt / "f.txt").write_text("worktree version\n")
+    _git("add", ".", cwd=wt)
+    _git("commit", "-qm", "conflicting", cwd=wt)
+    (primary / "f.txt").write_text("main version\n")
+    _git("add", ".", cwd=primary)
+    _git("commit", "-qm", "main change", cwd=primary)
+    _git("push", "-q", "origin", "main", cwd=primary)
+
+    rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
+
+    assert rc == 3
+    assert verdict["ok"] is False and "f.txt" in verdict["conflicts"]
+    cp = subprocess.run(["git", "status"], cwd=wt, capture_output=True, text=True)
+    assert "rebase" in cp.stdout.lower()  # paused, not aborted

@@ -34,6 +34,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--dry-run", action="store_true", help="Print the plan, change nothing")
     p_start.add_argument("--headless", action="store_true", help="Print-mode session (no exec)")
 
+    p_watch = sub.add_parser(
+        "watch", help="Keep the primary checkout's base branch + knowledge graph fresh"
+    )
+    p_watch.add_argument("--interval", type=int, default=300, help="Seconds between ticks")
+    p_watch.add_argument("--once", action="store_true", help="Run a single tick and exit")
+    p_watch.add_argument(
+        "--enable-documentation",
+        action="store_true",
+        help="Also regenerate the LLM documentation on changes (costly)",
+    )
+
     p_install = sub.add_parser("install", help="(Re)install omc from a local checkout")
     p_install.add_argument("path", nargs="?", default=".", help="Checkout path (default: .)")
 
@@ -52,7 +63,14 @@ def _load_cfg_or_bail(ctx: ToolContext):
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw = sys.argv[1:] if argv is None else argv
+    # `internal` is hidden skill<->CLI plumbing: intercepted before argparse so it
+    # never appears in --help; machine-readable stdout, no banner.
+    if raw and raw[0] == "internal":
+        from .internal import run_internal
+
+        return run_internal(raw[1:])
+    args = build_parser().parse_args(raw)
     if not args.command:
         build_parser().print_help(sys.stderr)
         return 2
@@ -77,6 +95,19 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
         if cfg is None:
             return 2
         return run_start(ctx, cfg, args.context, dry_run=args.dry_run, headless=args.headless)
+    if args.command == "watch":
+        cfg = _load_cfg_or_bail(ctx)
+        if cfg is None:
+            return 2
+        from .watch import run_watch
+
+        return run_watch(
+            ctx,
+            cfg,
+            interval=args.interval,
+            once=args.once,
+            enable_documentation=args.enable_documentation,
+        )
     if args.command == "configure":
         from .configure import run_configure
 
