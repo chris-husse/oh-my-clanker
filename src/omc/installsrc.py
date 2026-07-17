@@ -34,7 +34,15 @@ def install_source(env: Mapping[str, str]) -> tuple[str, bool]:
         data = tomllib.loads(receipt.read_text())
         reqs = data["tool"]["requirements"]
         req = next((r for r in reqs if r.get("name") == "omc"), None) or reqs[0]
-    except (OSError, tomllib.TOMLDecodeError, KeyError, IndexError, TypeError):
+    except (
+        OSError,
+        tomllib.TOMLDecodeError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+        AttributeError,
+    ):
         return "unknown", False
     if "directory" in req:
         return str(req["directory"]), False

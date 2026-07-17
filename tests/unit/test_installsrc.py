@@ -32,3 +32,16 @@ def test_source_unknown(tmp_path):
 def test_version_string(tmp_path):
     assert version_string({"HOME": str(tmp_path)}).startswith("omc ")
     assert "from unknown" in version_string({"HOME": str(tmp_path)})
+
+
+def test_source_non_utf8_receipt_is_unknown(tmp_path):
+    d = tmp_path / "uvt" / "omc"
+    d.mkdir(parents=True)
+    (d / "uv-receipt.toml").write_bytes(b"\xff\xfe\x00broken")
+    env = {"UV_TOOL_DIR": str(tmp_path / "uvt"), "HOME": str(tmp_path)}
+    assert install_source(env) == ("unknown", False)
+
+
+def test_source_malformed_requirements_is_unknown(tmp_path):
+    env = _receipt_env(tmp_path, '[tool]\nrequirements = "abc"\n')
+    assert install_source(env) == ("unknown", False)
