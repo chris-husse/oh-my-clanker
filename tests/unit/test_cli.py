@@ -33,3 +33,10 @@ def test_watch_without_config_bails(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     assert main(["watch", "--once"]) == 2
     assert "omc configure" in capsys.readouterr().err
+
+
+def test_watch_default_interval_is_30s():
+    from omc.cli import build_parser
+
+    args = build_parser().parse_args(["watch"])
+    assert args.interval == 30

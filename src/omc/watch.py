@@ -103,7 +103,7 @@ def run_watch(
     ctx: ToolContext,
     cfg: Config,
     *,
-    interval: int = 300,
+    interval: int = 30,
     once: bool = False,
     enable_documentation: bool = False,
 ) -> int:

@@ -13,7 +13,7 @@ Approved 2026-07-17 across four design rounds. The worktree knowledge model:
 
 ## `omc watch [--interval SECONDS] [--once] [--enable-documentation]`
 
-Foreground polling loop (default 300s; Ctrl-C stops; `--once` = single tick
+Foreground polling loop (default 30s; Ctrl-C stops; `--once` = single tick
 for external schedulers — omc never creates daemons/launchd/cron itself).
 
 Gate: config; cwd inside the PRIMARY worktree; GitNexus CLI present (else

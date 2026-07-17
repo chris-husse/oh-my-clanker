@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch = sub.add_parser(
         "watch", help="Keep the primary checkout's base branch + knowledge graph fresh"
     )
-    p_watch.add_argument("--interval", type=int, default=300, help="Seconds between ticks")
+    p_watch.add_argument("--interval", type=int, default=30, help="Seconds between ticks")
     p_watch.add_argument("--once", action="store_true", help="Run a single tick and exit")
     p_watch.add_argument(
         "--enable-documentation",
