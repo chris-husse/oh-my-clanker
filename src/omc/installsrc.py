@@ -27,6 +27,11 @@ def _uv_tool_dir(env: Mapping[str, str]) -> Path:
     return Path(env.get("HOME", "~")).expanduser() / ".local" / "share" / "uv" / "tools"
 
 
+def _redact(source: str) -> str:
+    """Strip embedded credentials (e.g. git+https://oauth2:TOKEN@host) before display."""
+    return re.sub(r"://[^/@]+@", "://[REDACTED]@", source)
+
+
 def install_source(env: Mapping[str, str]) -> tuple[str, bool]:
     """(display_source, is_remote_git) from uv's receipt; ("unknown", False) on any problem."""
     receipt = _uv_tool_dir(env) / "omc" / "uv-receipt.toml"
@@ -36,7 +41,6 @@ def install_source(env: Mapping[str, str]) -> tuple[str, bool]:
         req = next((r for r in reqs if r.get("name") == "omc"), None) or reqs[0]
     except (
         OSError,
-        tomllib.TOMLDecodeError,
         KeyError,
         IndexError,
         TypeError,
@@ -45,15 +49,15 @@ def install_source(env: Mapping[str, str]) -> tuple[str, bool]:
     ):
         return "unknown", False
     if "directory" in req:
-        return str(req["directory"]), False
+        return _redact(str(req["directory"])), False
     if "editable" in req:
-        return str(req["editable"]), False
+        return _redact(str(req["editable"])), False
     if "git" in req:
-        return str(req["git"]), True
+        return _redact(str(req["git"])), True
     if "url" in req:
         url = str(req["url"])
-        return url, _is_remote_git(url)
-    return f"{req.get('name', 'omc')} (PyPI)", False
+        return _redact(url), _is_remote_git(url)
+    return _redact(f"{req.get('name', 'omc')} (PyPI)"), False
 
 
 def version_string(env: Mapping[str, str]) -> str:

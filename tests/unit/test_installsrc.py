@@ -45,3 +45,15 @@ def test_source_non_utf8_receipt_is_unknown(tmp_path):
 def test_source_malformed_requirements_is_unknown(tmp_path):
     env = _receipt_env(tmp_path, '[tool]\nrequirements = "abc"\n')
     assert install_source(env) == ("unknown", False)
+
+
+def test_source_git_redacts_credentials(tmp_path):
+    env = _receipt_env(
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "omc", '
+        'git = "https://oauth2:glpat-abc123@gitlab.example.com/x/omc" }]\n',
+    )
+    src, remote = install_source(env)
+    assert remote
+    assert "glpat-abc123" not in src
+    assert src == "https://[REDACTED]@gitlab.example.com/x/omc"
