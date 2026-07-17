@@ -68,24 +68,31 @@ def wire_mcp(container, provider: str, mode: str) -> None:
         return
     stub_env = f"STUB_JIRA_MODE={mode}"
     if provider == "claude":
-        spec = {
-            "mcpServers": {
-                "jira": {
-                    "type": "stdio",
-                    "command": "python3",
-                    "args": ["/repo/docker/stub-jira-mcp/server.py"],
-                    "env": {"STUB_JIRA_MODE": mode},
-                }
-            }
+        jira_spec = {
+            "type": "stdio",
+            "command": "python3",
+            "args": ["/repo/docker/stub-jira-mcp/server.py"],
+            "env": {"STUB_JIRA_MODE": mode},
         }
-        rc, out = run_in(
-            container,
-            [
-                "bash",
-                "-c",
-                f"mkdir -p ~/.claude && cat > ~/.claude.json <<'EOF'\n{json.dumps(spec)}\nEOF",
-            ],
-        )
+        # Merge into ~/.claude.json rather than clobbering it — the file may
+        # already carry other harness/session state we must not destroy.
+        merge_script = f"""\
+import json, os
+
+path = os.path.expanduser("~/.claude.json")
+os.makedirs(os.path.expanduser("~/.claude"), exist_ok=True)
+try:
+    with open(path) as f:
+        data = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    data = {{}}
+if not isinstance(data, dict):
+    data = {{}}
+data.setdefault("mcpServers", {{}})["jira"] = {json.dumps(jira_spec)}
+with open(path, "w") as f:
+    json.dump(data, f)
+"""
+        rc, out = run_in(container, ["python3", "-c", merge_script])
     elif provider == "codex":
         toml = (
             "[mcp_servers.jira]\n"
