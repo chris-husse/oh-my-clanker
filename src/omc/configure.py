@@ -20,27 +20,28 @@ omc's in-session skills install as a plugin — once per harness you use:
   OpenCode:     add to opencode.json:
                 "plugin": ["omc@git+https://github.com/chris-husse/oh-my-clanker.git"]
 
-omc's start skill hands off to superpowers — install it too (Claude Code
-auto-installs it as a dependency; on Codex/OpenCode install it from
-https://github.com/obra/superpowers).
+omc's start skill hands off to superpowers — install it too:
+
+  Claude Code:  /plugin marketplace add obra/superpowers-marketplace
+                /plugin install superpowers@superpowers-marketplace
+  Codex/OpenCode: install it from https://github.com/obra/superpowers
 """
 
 
 def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
-    if defaults:
-        store.save(ctx.home, Config())
-        print(f"Wrote defaults to {store.config_path(ctx.home)}")
-        print(_PLUGIN_HINTS)
-        return 0
-    if sets:
-        cfg = store.load(ctx.home) or Config()
+    if defaults or sets:
+        # --defaults establishes the starting point (fresh Config() rather than
+        # whatever's on disk); --set pairs, if any, are then applied on top of
+        # it. Passing both together must not silently drop --set.
+        cfg = Config() if defaults else (store.load(ctx.home) or Config())
         for pair in sets:
             key, sep, value = pair.partition("=")
             if not sep:
                 raise Refusal(f"--set expects KEY=VALUE, got {pair!r}")
             store.set_key(cfg, key, value)
         store.save(ctx.home, cfg)
-        print(f"Updated {store.config_path(ctx.home)}")
+        label = "Wrote defaults to" if defaults and not sets else "Updated"
+        print(f"{label} {store.config_path(ctx.home)}")
         print(_PLUGIN_HINTS)
         return 0
     if not sys.stdin.isatty():

@@ -40,6 +40,14 @@ def test_configure_set(tmp_path, monkeypatch):
     assert cfg.worktree.base_branch == "master"
 
 
+def test_configure_defaults_and_set_combined(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    rc = main(["configure", "--defaults", "--set", "llm.default=codex"])
+    assert rc == 0
+    cfg = store.load(home)
+    assert cfg.llm.default == "codex"
+
+
 def test_configure_set_bad_key(tmp_path, monkeypatch, capsys):
     _home(tmp_path, monkeypatch)
     assert main(["configure", "--set", "nope=1"]) == 1
