@@ -1,6 +1,6 @@
 ---
 name: finish
-description: Finish the current feature branch - rebase onto the base, squash to one commit whose message is the MR description, push, then offer to close the worktree, address review comments, or discuss. Use when work on a ticket is done and ready for review.
+description: Finish the current feature branch - rebase onto the base, squash to one commit whose message is the MR description, run the project's build/verify/review stages, push, then offer to close the worktree, address review comments, or discuss. Use when work on a ticket is done and ready for review.
 ---
 
 # omc finish
@@ -32,22 +32,35 @@ conflicts silently, never `--abort` on their behalf.
 
 ## Step 3 — squash to one commit
 
-- Uncommitted changes exist → tell the user they'll be folded into the squash,
-  then stage them (`git add -A`).
-- `git reset --soft origin/<base>` followed by one `git commit` with a
-  temporary message (e.g. `wip: squash of <branch>`). After this,
-  `origin/<base>..HEAD` is exactly one commit containing all the work.
+Invoke the internal **`squash`** skill with the base — it folds uncommitted
+changes (with notice), does the `reset --soft`, and leaves exactly one
+temp-message commit on `origin/<base>..HEAD`. An `OMC_SQUASH {"ok": false}`
+outcome → surface its message and stop.
 
-## Step 4 — describe and push
+## Step 4 — project stages: build → verify → review
+
+Invoke the **`build`**, **`verify`**, and **`review`** skills, in that order.
+Each is a proxy for the project's own `.omc/skills/<stage>/SKILL.md`:
+
+- Unconfigured (`"configured": false`) → note it was skipped and move on.
+- A stage that changed TRACKED files (formatters, autofixes) → amend those
+  changes into the squashed commit (`git add -u && git commit --amend
+  --no-edit`); leave untracked artifacts alone.
+- A stage that FAILED (`"passed": false`) → **stop before pushing**: report
+  which stage failed and why, and leave the branch squashed so the user can
+  fix and re-run `finish`.
+
+## Step 5 — describe and push
 
 Invoke **`create-mr`** — it generates the MR description
 (via `get-mr-description`), amends it into the squashed commit, and pushes
 with `--force-with-lease`. The user creates the actual MR/PR from the forge;
 the commit carries the full description.
 
-## Step 5 — offer follow-ups
+## Step 6 — offer follow-ups
 
-Report what happened (rebased onto `<base>`, squashed N→1, pushed, title),
+Report what happened (rebased onto `<base>`, squashed N→1, stage outcomes,
+pushed, title),
 then offer exactly these three options (interactively where the harness
 supports it; in a non-interactive/headless run, list them and end):
 

@@ -31,8 +31,8 @@ def test_opencode_entry_registers_skills_dir():
     assert "skills" in js and "config" in js
 
 
-USER_FACING_SKILLS = ("slug", "start", "finish")
-INTERNAL_SKILLS = ("create-mr", "get-mr-description")
+USER_FACING_SKILLS = ("slug", "start", "finish", "build", "verify", "review")
+INTERNAL_SKILLS = ("create-mr", "get-mr-description", "squash")
 
 
 def test_skills_have_frontmatter():
@@ -59,7 +59,6 @@ def test_finish_skill_contract():
     for needle in (
         "merge-base",
         "git rebase origin/",
-        "reset --soft",
         "create-mr",
         "Close the worktree",
         "review comments",
@@ -67,6 +66,29 @@ def test_finish_skill_contract():
     ):
         assert needle in text, f"finish skill missing {needle!r}"
     assert "gh pr create" not in text  # never creates the MR/PR
+    # squash is delegated, then stages run build -> verify -> review, then push
+    order = [text.index("`squash`"), text.index("`build`"), text.index("`verify`")]
+    order += [text.index("`review`"), text.index("`create-mr`")]
+    assert order == sorted(order), "finish must order squash -> build -> verify -> review -> push"
+
+
+def test_stage_proxy_contract():
+    for stage in ("build", "verify", "review"):
+        text = (ROOT / "skills" / stage / "SKILL.md").read_text()
+        for needle in (f".omc/skills/{stage}", "OMC_STAGE", '"configured"'):
+            assert needle in text, f"{stage} proxy missing {needle!r}"
+        assert "nothing to do" in text  # unconfigured is a pass, not a failure
+
+
+def test_squash_skill_contract():
+    text = (ROOT / "skills" / "squash" / "SKILL.md").read_text()
+    for needle in ("reset --soft", "OMC_SQUASH", "rev-list --count"):
+        assert needle in text, f"squash skill missing {needle!r}"
+
+
+def test_dogfood_build_stage():
+    text = (ROOT / ".omc" / "skills" / "build" / "SKILL.md").read_text()
+    assert "just build" in text
 
 
 def test_create_mr_skill_contract():
