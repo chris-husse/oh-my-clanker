@@ -12,6 +12,11 @@ harness (Claude Code, Codex, OpenCode) gets the same ground rules:
   bypass a failing stage.
 - **Ask the graph, not grep**: `/omc:explain <question>` answers from the
   project's GitNexus knowledge graph and docs.
+- **Model selection**: the main session runs the model chosen in
+  `omc configure` — never second-guess it. When dispatching subagents,
+  assess each task and pick the model that fits: the heavyweight model for
+  planning/design, reviews, and judging subagent output; efficient models
+  for well-specified execution work.
 - **Machine contracts are sacred**: single-line `OMC_SLUG` / `OMC_STAGE` /
   `OMC_SQUASH` / `OMC_REBASE_MAIN` verdicts are parsed by tools — emit them
   exactly as their skills specify, never wrapped in markdown.

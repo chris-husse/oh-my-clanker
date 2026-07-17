@@ -20,6 +20,8 @@ def test_chain_created_from_nothing(tmp_path, capsys):
     text = internal.read_text()
     assert ".omc/config/AGENTS.md" in text  # fans out to the project layer
     assert "rebase-main" in text and "OMC_" in text
+    assert "omc configure" in text and "subagent" in text.lower()  # model doctrine
+    assert "efficient" in text  # execution tier named
     assert (root / ".omc" / "config" / "AGENTS.md").is_file()  # starter seeded
     for name in ("AGENTS.md", "CLAUDE.md"):
         link = root / name

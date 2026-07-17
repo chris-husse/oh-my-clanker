@@ -1,6 +1,6 @@
 ---
 name: start
-description: Session-side half of `omc start` - gather ticket context, verify base freshness, and hand off to superpowers:brainstorming. Seeded automatically by the omc CLI; invoked cold it redirects to the shell command.
+description: Session-side half of `omc start` - gather ticket context, verify base freshness, and hand off to omc:plan. Seeded automatically by the omc CLI; invoked cold it redirects to the shell command.
 ---
 
 # omc start (session side)
@@ -61,15 +61,12 @@ default. Then:
    - not an ancestor → `git rebase origin/<base>`. Dirty tree or conflicts →
      STOP and surface; never force it. Never brainstorm on a stale base.
 
-## Step 4 — hand off to brainstorming
+## Step 4 — hand off to plan
 
-1. Print a compact summary: ticket (key, title, 2–3 sentences), surroundings,
-   doc list, and the workspace (branch + worktree path).
-2. Ask the user for their initial thinking / seed for this work.
-3. Invoke `superpowers:brainstorming` with: the user's seed, the gathered
-   context recap, and this doc-naming directive: "Use the topic slug
-   `$OMC_SLUG` so the design doc lands at
-   `docs/superpowers/specs/YYYY-MM-DD-$OMC_SLUG-design.md` and the plan at
-   `docs/superpowers/plans/YYYY-MM-DD-$OMC_SLUG-plan.md`."
+1. Print a compact summary: ticket (key, title, 2–3 sentences),
+   surroundings, doc list, and the workspace (branch + worktree path).
+2. Invoke the `omc:plan` skill with the gathered context recap. `plan`
+   runs the explain pass, asks the user for their seed, and starts the
+   primed brainstorm.
 
 This skill prepares and hands off — it never designs or writes code itself.
