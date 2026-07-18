@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from .harness import configure_omc, make_work_repo, run_in
@@ -24,6 +26,9 @@ def test_configure_and_gate(container):
     configure_omc(container, "claude")
     rc, out = run_in(container, ["omc", "version"])
     assert rc == 0 and "/repo" in out  # uv receipt: installed from /repo
+    # version line shape: provenance optional (a worktree build context has a .git
+    # POINTER file whose target doesn't exist in-container -> probes fail soft)
+    assert re.search(r"omc \S+ (\(\S+@\S+\) )?from /repo", out)
 
 
 def test_install_reroot(container):

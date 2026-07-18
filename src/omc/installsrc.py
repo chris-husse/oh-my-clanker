@@ -7,7 +7,7 @@ import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
-from . import __version__
+from . import __version__, _buildinfo
 
 _REMOTE_SCHEME = ("ssh://", "https://", "http://", "git+", "git://")
 _SCP_FORM = re.compile(r"^[^/@]+@[^/:]+:")
@@ -44,6 +44,20 @@ def package_root() -> Path:
     return Path(str(resources.files("omc")))
 
 
+def provenance() -> dict[str, str]:
+    """Build provenance as a fresh dict: ``{branch, commit, source}``.
+
+    All ``"unknown"`` for a source install where the build hook never fired
+    (the checked-in ``_buildinfo`` fallback). A new dict each call so callers
+    can mutate without affecting later reads.
+    """
+    return {
+        "branch": _buildinfo.BRANCH,
+        "commit": _buildinfo.COMMIT,
+        "source": _buildinfo.SOURCE,
+    }
+
+
 def install_source(env: Mapping[str, str]) -> tuple[str, bool]:
     """(display_source, is_remote_git) from uv's receipt; ("unknown", False) on any problem."""
     receipt = _uv_tool_dir(env) / "omc" / "uv-receipt.toml"
@@ -73,5 +87,20 @@ def install_source(env: Mapping[str, str]) -> tuple[str, bool]:
 
 
 def version_string(env: Mapping[str, str]) -> str:
-    source, _ = install_source(env)
-    return f"omc {__version__} from {source}"
+    """``omc <v> [(branch@commit)] from <source> [(origin <remote>)]``.
+
+    ``(branch@commit)`` is build provenance — what the binary IS; omitted for
+    source installs where the hook never fired. ``from <source>`` is uv's
+    receipt — where it was installed from. ``(origin <remote>)`` names the
+    checkout's remote for directory installs; a remote-git install's from-URL
+    already IS the remote, so the suffix would be noise there.
+    """
+    source, is_remote = install_source(env)
+    prov = provenance()
+    parts = [f"omc {__version__}"]
+    if not (prov["branch"] == "unknown" and prov["commit"] == "unknown"):
+        parts.append(f"({prov['branch']}@{prov['commit']})")
+    parts.append(f"from {source}")
+    if not is_remote and _is_remote_git(prov["source"]):
+        parts.append(f"(origin {_redact(prov['source'])})")
+    return " ".join(parts)

@@ -1,3 +1,4 @@
+from omc import _buildinfo, installsrc
 from omc.installsrc import install_source, version_string
 
 
@@ -66,3 +67,61 @@ def test_package_root_is_the_omc_package_dir():
     assert root.is_dir()
     assert (root / "__init__.py").is_file()
     assert root.name == "omc"
+
+
+def test_provenance_fallback_is_unknown():
+    prov = installsrc.provenance()
+    assert set(prov) == {"branch", "commit", "source"}
+    # the checked-in fallback ships all-unknown; a stamped build overwrites it
+    assert prov["branch"] == "unknown"
+    assert prov["commit"] == "unknown"
+    assert prov["source"] == "unknown"
+    prov["branch"] = "mutated"
+    assert installsrc.provenance()["branch"] == "unknown"  # fresh dict per call
+
+
+def _prov(monkeypatch, branch="unknown", commit="unknown", source="unknown"):
+    monkeypatch.setattr(_buildinfo, "BRANCH", branch)
+    monkeypatch.setattr(_buildinfo, "COMMIT", commit)
+    monkeypatch.setattr(_buildinfo, "SOURCE", source)
+
+
+def test_version_plain_when_provenance_unknown(tmp_path, monkeypatch):
+    _prov(monkeypatch)
+    out = version_string({"HOME": str(tmp_path)})
+    assert "(" not in out and out.endswith("from unknown")
+
+
+def test_version_with_provenance_directory_install(tmp_path, monkeypatch):
+    _prov(monkeypatch, "main", "abc1234", "git@github.com:x/omc.git")
+    env = _receipt_env(
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "omc", directory = "/checkout/omc" }]\n',
+    )
+    out = version_string(env)
+    assert "(main@abc1234)" in out
+    assert "from /checkout/omc" in out
+    assert out.endswith("(origin git@github.com:x/omc.git)")
+
+
+def test_version_remote_git_install_omits_origin(tmp_path, monkeypatch):
+    _prov(monkeypatch, "main", "abc1234", "https://github.com/x/omc")
+    env = _receipt_env(
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "omc", git = "https://github.com/x/omc" }]\n',
+    )
+    out = version_string(env)
+    assert "(main@abc1234)" in out
+    assert "origin" not in out  # from-URL already IS the remote
+
+
+def test_version_origin_is_redacted(tmp_path, monkeypatch):
+    # belt+braces: display-side redaction even if a credentialed URL reached _buildinfo
+    _prov(monkeypatch, "main", "abc1234", "https://oauth2:tok@gitlab.example.com/x/omc")
+    env = _receipt_env(
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "omc", directory = "/checkout/omc" }]\n',
+    )
+    out = version_string(env)
+    assert "tok" not in out
+    assert "(origin https://[REDACTED]@gitlab.example.com/x/omc)" in out

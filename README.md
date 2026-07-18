@@ -104,7 +104,7 @@ already-wired worktrees included.
 | `omc configure` | Pick your LLM (and worktree branch naming); writes `~/.omc/config.json` |
 | `omc start <context>` | Ticket key, ticket URL, or quoted task description → worktree → seeded session |
 | `omc watch` | Keep the main checkout's base branch + knowledge graph fresh (`--once`, `--interval`, `--enable-documentation`) |
-| `omc version` | Print version + install source |
+| `omc version` | Print version + build provenance + install source |
 | `omc install [path]` | (Re)install omc from a local checkout (default `.`) |
 | `omc update` | Update omc from the source it was installed from |
 | `omc uninstall` | Remove omc (binary + `~/.omc`) |
