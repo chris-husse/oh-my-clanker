@@ -85,9 +85,12 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
     analyze writes to .gitnexus/branches/<branch>/ — an unscoped query silently
     reads the frozen default store. So: always run from the PRIMARY root and
     always pin --repo (registry may hold several repos) and --branch (the
-    configured base). gitnexus 1.6.x resolves --branch <base> against the
-    branch store when one exists and falls back to the default store when the
-    base branch IS the originally-indexed one — verify on a gitnexus upgrade.
+    configured base). --repo is the primary root's PATH, not its basename:
+    GitNexus registers repos under remote-URL-derived names that need not match
+    the directory name, and its resolver also matches canonicalized paths.
+    gitnexus 1.6.x resolves --branch <base> against the branch store when one
+    exists and falls back to the default store when the base branch IS the
+    originally-indexed one — verify on a gitnexus upgrade.
     """
     if not rest or rest[0] not in _GITNEXUS_VERBS:
         print(_USAGE, file=sys.stderr)
@@ -104,7 +107,7 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
         return 2
     cfg = store.load(ctx.home)
     base = cfg.worktree.base_branch if cfg else "main"
-    argv = gitnexus_argv(ctx, *rest, "--repo", Path(primary).name, "--branch", base)
+    argv = gitnexus_argv(ctx, *rest, "--repo", primary, "--branch", base)
     cp = ctx.run(argv, cwd=primary, capture=False)  # stream JSON straight through
     return cp.returncode
 
