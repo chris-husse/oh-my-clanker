@@ -120,3 +120,17 @@ def test_rebase_main_conflict_bails_rc3_and_leaves_rebase_paused(tmp_path, capsy
     assert verdict["ok"] is False and "f.txt" in verdict["conflicts"]
     cp = subprocess.run(["git", "status"], cwd=wt, capture_output=True, text=True)
     assert "rebase" in cp.stdout.lower()  # paused, not aborted
+
+
+def test_notify_usage_errors(capsys):
+    assert run_internal(["notify"]) == 2  # --provider is required
+    assert run_internal(["notify", "--provider", "cursor"]) == 2  # unknown provider
+    assert "usage:" in capsys.readouterr().err
+
+
+def test_notify_dispatches(tmp_path, monkeypatch):
+    # the RED test: before the notify branch exists this hits the usage
+    # fallthrough (exit 2); afterwards run_notify returns 0 (no config ->
+    # silent no-op, stdin never read)
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "home"))
+    assert run_internal(["notify", "--provider", "claude"]) == 0

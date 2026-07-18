@@ -67,6 +67,26 @@ Two flags change the shape of the run: `--dry-run` prints the full plan (branch 
 
 `/omc:index` builds (incrementally refreshes) a [GitNexus](https://github.com/chris-husse/GitNexus) knowledge graph of the repo; `/omc:document` generates LLM-written architecture docs from that graph into `.omc/docs/gitnexus/docs/`; `/omc:explain <question>` answers "how does X work / what breaks if I change Y" with file-and-symbol citations, grounded in the graph, the generated docs, and — if the project defines one — its own `.omc/skills/explain-context` skill (where the project says where its truth lives). GitNexus installs itself on first use into `~/.omc/dependencies/gitnexus`, cloned only from its approved source. `omc watch` automates the cadence: run it in the main checkout (foreground; `--interval`; `--once` runs a single tick AND forces an index/docs refresh even with nothing new — the "refresh now" button) and it ff-syncs the base branch as commits land, refreshing the index directly (no LLM cost) — add `--enable-documentation` to also regenerate the docs (LLM-heavy, so it's opt-in). Manually, that cadence is: run `index` + `document` in the main checkout as the base branch moves; `explain` from any worktree reads the primary checkout's graph, so it stays current.
 
+## Notifications
+
+Opt in during `omc configure` (or `omc configure --set notifications.enabled=true`)
+and every omc-launched session pings you the moment it needs attention — a
+question, a permission prompt, a finished turn — instead of idling unseen in
+its tab. Delivery is per-harness under the hood (Claude Code hooks, codex's
+`notify` program, an OpenCode plugin), all funneling into
+`omc internal notify`.
+
+Two backends (`notifications.backend`):
+
+- `macos` (default) — native notification via `osascript`; silently does
+  nothing on other platforms.
+- `file:///absolute/path.log` — appends one tab-separated line per event
+  (`time  slug  provider  event  message`), handy headless or over ssh:
+  `tail -f` it in a spare terminal to see which sessions are ready.
+
+Disabling (`--set notifications.enabled=false`) silences everything at once —
+already-wired worktrees included.
+
 ## Prerequisites
 
 - `git`

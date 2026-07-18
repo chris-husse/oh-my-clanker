@@ -29,8 +29,26 @@ class Provider(ABC):
         """
 
     @abstractmethod
-    def session_argv(self, *, session_name: str, model: str, seed: str) -> list[str]:
-        """Interactive session seeded with ``seed``; named where the CLI supports it."""
+    def session_argv(
+        self,
+        *,
+        session_name: str,
+        model: str,
+        seed: str,
+        notify_sink_argv: list[str] | None = None,
+    ) -> list[str]:
+        """Interactive session seeded with ``seed``; named where the CLI supports it.
+
+        ``notify_sink_argv``, when set, is the notification sink command; the
+        provider that wires notifications via argv (codex) places it itself —
+        flag ordering is provider-specific. File-wired providers ignore it.
+        """
+
+    def notification_setup(self, sink_argv: list[str]) -> dict[str, str]:
+        """Worktree-relative path -> file content wiring this provider's
+        "needs attention" events to ``sink_argv``. {} = no file wiring.
+        Pure like everything here — the caller writes the files."""
+        return {}
 
     @abstractmethod
     def title_env(self) -> dict[str, str]:

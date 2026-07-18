@@ -72,3 +72,39 @@ def test_headless_runs_seed_in_worktree(tmp_path, capsys):
     assert rc == 0
     # the claude stub echoes its verdict for both calls; transcript is printed
     assert "OMC_SLUG" in capsys.readouterr().out
+
+
+def _notify_cfg():
+    cfg = Config()
+    cfg.notifications.enabled = True
+    return cfg
+
+
+def test_start_wires_notifications_when_enabled(tmp_path, capsys):
+    ctx = full_env(tmp_path)
+    wt = tmp_path / "wtree"
+    wt.mkdir()
+    rc = run_start(ctx, _notify_cfg(), "PROJ-1", headless=True)
+    assert rc == 0
+    settings = json.loads((wt / ".claude" / "settings.local.json").read_text())
+    assert "Notification" in settings["hooks"]
+    assert "✓ notification wiring: .claude/settings.local.json" in capsys.readouterr().err
+
+
+def test_start_skips_wiring_when_disabled(tmp_path):
+    ctx = full_env(tmp_path)
+    wt = tmp_path / "wtree"
+    wt.mkdir()
+    rc = run_start(ctx, Config(), "PROJ-1", headless=True)
+    assert rc == 0
+    assert not (wt / ".claude").exists()
+
+
+def test_dry_run_shows_notify_plan(tmp_path, capsys):
+    ctx = full_env(tmp_path)
+    rc = run_start(ctx, _notify_cfg(), "PROJ-1", dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "notify:       backend macos; files: .claude/settings.local.json" in out
+    rc = run_start(ctx, Config(), "PROJ-1", dry_run=True)
+    assert "notify:       disabled" in capsys.readouterr().out

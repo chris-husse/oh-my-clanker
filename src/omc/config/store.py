@@ -5,11 +5,22 @@ from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 
 from ..errors import ConfigError
-from .schema import Config, LLMConfig, ProviderConfig
+from .schema import Config, LLMConfig, NotificationsConfig, ProviderConfig
 
 
 def config_path(home: Path) -> Path:
     return home / "config.json"
+
+
+def validate_backend(value: str) -> str:
+    """'macos' or file:// + absolute path; shared by load and set paths."""
+    if value == "macos":
+        return value
+    if value.startswith("file://") and value[len("file://") :].startswith("/"):
+        return value
+    raise ConfigError(
+        f"invalid notifications.backend {value!r}: use 'macos' or 'file:///absolute/path'"
+    )
 
 
 def load(home: Path) -> Config | None:
@@ -39,6 +50,23 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
             raise ConfigError(f"unknown config key: providers.{tail}")
         cfg.providers.setdefault(name, ProviderConfig()).model = value
         return
+    if isinstance(cfg, NotificationsConfig):
+        # set_key values arrive as strings; enabled is a bool ("true" would be
+        # truthy as a string even when the user meant false) and backend has a
+        # closed scheme set — both need explicit handling.
+        if head == "enabled":
+            if tail:
+                raise ConfigError(f"unknown config key: notifications.{head}.{tail}")
+            if value not in ("true", "false"):
+                raise ConfigError(f"notifications.enabled expects true or false, got {value!r}")
+            cfg.enabled = value == "true"
+            return
+        if head == "backend":
+            if tail:
+                raise ConfigError(f"unknown config key: notifications.{head}.{tail}")
+            cfg.backend = validate_backend(value)
+            return
+        raise ConfigError(f"unknown config key: notifications.{head}")
     field_names = {f.name for f in fields(cfg)}  # type: ignore[arg-type]
     if head not in field_names:
         raise ConfigError(f"unknown config key: {head}")
@@ -80,4 +108,13 @@ def _hydrate(cls: type, data: dict, path: str):
             kwargs[name] = _hydrate(f.type, value, path)
         else:
             kwargs[name] = value
-    return cls(**kwargs)
+    obj = cls(**kwargs)
+    if cls is NotificationsConfig:
+        if not isinstance(obj.enabled, bool):
+            raise ConfigError(
+                f"invalid value for 'notifications.enabled' in {path}: expected true/false"
+            )
+        if not isinstance(obj.backend, str):
+            raise ConfigError(f"invalid value for 'notifications.backend' in {path}")
+        validate_backend(obj.backend)
+    return obj

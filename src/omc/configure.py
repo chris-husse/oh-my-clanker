@@ -7,7 +7,7 @@ import sys
 from .agentsmd import ensure_agents_chain
 from .config import store
 from .config.schema import Config, ProviderConfig
-from .errors import Refusal
+from .errors import ConfigError, Refusal
 from .providers.registry import get_provider, provider_names
 from .toolctx import ToolContext
 from .wtconfig import repo_root
@@ -119,3 +119,23 @@ def _walkthrough(cfg: Config) -> None:  # pragma: no cover - PTY-driven, E2E ter
         questionary.text("Base branch", default=cfg.worktree.base_branch).ask()
         or cfg.worktree.base_branch
     )
+
+    enable = questionary.confirm(
+        "Notify when a session needs attention (macOS notification / log file)?",
+        default=cfg.notifications.enabled,
+    ).ask()
+    cfg.notifications.enabled = bool(enable)
+    if enable:
+        while True:
+            backend = (
+                questionary.text(
+                    "Notification backend: 'macos' or file:///absolute/path.log",
+                    default=cfg.notifications.backend,
+                ).ask()
+                or cfg.notifications.backend
+            )
+            try:
+                cfg.notifications.backend = store.validate_backend(backend)
+                break
+            except ConfigError as exc:
+                print(exc)

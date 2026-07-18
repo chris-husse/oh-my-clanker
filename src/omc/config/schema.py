@@ -21,7 +21,14 @@ class WorktreeConfig:
 
 
 @dataclass
+class NotificationsConfig:
+    enabled: bool = False  # opt-in
+    backend: str = "macos"  # "macos" | "file://<absolute path>"
+
+
+@dataclass
 class Config:
     schema_version: int = 1
     llm: LLMConfig = field(default_factory=LLMConfig)
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)

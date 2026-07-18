@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import shlex
+
 from .base import Provider
 
 
@@ -22,7 +25,7 @@ class ClaudeProvider(Provider):
             argv += ["--allowed-tools", *allowed_tools]
         return argv
 
-    def session_argv(self, *, session_name, model, seed):
+    def session_argv(self, *, session_name, model, seed, notify_sink_argv=None):
         argv = ["claude"]
         if session_name:
             argv += ["-n", session_name]  # resumable later via `claude --resume <name>`
@@ -30,6 +33,14 @@ class ClaudeProvider(Provider):
             argv += ["--model", model]
         argv.append(seed)
         return argv
+
+    def notification_setup(self, sink_argv):
+        # Notification stays UNFILTERED (all attention events) + Stop for turn
+        # end — per the COPS-988 design. settings.local.json is Claude's
+        # personal per-checkout settings file (conventionally gitignored).
+        group = {"hooks": [{"type": "command", "command": shlex.join(sink_argv)}]}
+        settings = {"hooks": {"Notification": [group], "Stop": [group]}}
+        return {".claude/settings.local.json": json.dumps(settings, indent=2) + "\n"}
 
     def title_env(self):
         return {"CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"}
