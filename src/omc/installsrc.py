@@ -32,6 +32,18 @@ def _redact(source: str) -> str:
     return re.sub(r"://[^/@]+@", "://[REDACTED]@", source)
 
 
+def package_root() -> Path:
+    """Absolute directory of the installed omc package (contains distribution/).
+
+    importlib.resources over __file__ math: works identically for wheel
+    installs (uv tool venv) and the dev checkout (src/omc). uv tool venvs are
+    real directories, so the result is a valid symlink target.
+    """
+    from importlib import resources
+
+    return Path(str(resources.files("omc")))
+
+
 def install_source(env: Mapping[str, str]) -> tuple[str, bool]:
     """(display_source, is_remote_git) from uv's receipt; ("unknown", False) on any problem."""
     receipt = _uv_tool_dir(env) / "omc" / "uv-receipt.toml"

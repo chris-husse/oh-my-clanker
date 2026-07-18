@@ -43,3 +43,9 @@ class CodexProvider(Provider):
 
     def install_hint(self):
         return "npm install -g @openai/codex"
+
+    def plugin_update_argvs(self):
+        # Refreshes ALL configured git marketplace snapshots (no per-marketplace
+        # filter exists); plugins resolve from the refreshed snapshot. Verified
+        # empirically in docker/PLUGIN-NOTES.md (Task 9 records the run).
+        return [["codex", "plugin", "marketplace", "upgrade"]]

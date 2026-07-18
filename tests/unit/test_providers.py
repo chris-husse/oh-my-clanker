@@ -131,3 +131,14 @@ def test_claude_opencode_ignore_notify_sink_argv():
         with_arg = p.session_argv(session_name="n", model="m", seed="s", notify_sink_argv=SINK)
         without = p.session_argv(session_name="n", model="m", seed="s")
         assert with_arg == without
+
+
+def test_plugin_update_argvs_are_pure_and_per_provider():
+    from omc.providers.registry import get_provider
+
+    claude = get_provider("claude").plugin_update_argvs()
+    assert ["claude", "plugin", "marketplace", "update", "oh-my-clanker"] in claude
+    assert ["claude", "plugin", "update", "omc@oh-my-clanker"] in claude
+    codex = get_provider("codex").plugin_update_argvs()
+    assert codex == [["codex", "plugin", "marketplace", "upgrade"]]
+    assert get_provider("opencode").plugin_update_argvs() == []  # not scriptable yet

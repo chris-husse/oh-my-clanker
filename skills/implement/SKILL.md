@@ -38,6 +38,13 @@ with the answers; surface real alternatives to the user.
 Execute the plan via `superpowers:subagent-driven-development` — a fresh
 subagent per task; its own checkpoints and reviews apply.
 
+Phase 2 → 3 is NOT a gate: once the plan is written and pressure-tested,
+start the subagent build immediately. Do not ask which execution approach
+to use (writing-plans offers a choice; this conductor has already made it)
+and do not ask permission to begin — the user typed /omc:implement, that
+IS the instruction to build. The only stops are the human gates the
+sub-skills themselves define (spec review) and genuine blockers.
+
 ## Phase 4 — ship
 
 Invoke the `finish` skill (`/omc:finish`): rebase, squash with the MR

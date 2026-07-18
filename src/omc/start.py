@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import notify, worktree
+from .agentsmd import ensure_agents_chain
 from .config.schema import Config
 from .errors import OmcError
 from .plugin import ensure_plugin
@@ -17,6 +18,7 @@ from .shells.registry import detect_shell
 from .slug import fetch_slug
 from .terminals import detect_terminal
 from .toolctx import ToolContext
+from .wtconfig import repo_root
 
 
 def _print_plan(branch, base, wt_argv, title_seq, session_argv, shell_argv, notify_desc):
@@ -68,6 +70,11 @@ def run_start(
     require_tools(ctx, cfg)
     plugin_status = ensure_plugin(ctx, cfg, check_only=dry_run)
     _say(f"→ omc plugin for {name}: {plugin_status}")
+
+    root = repo_root(ctx)
+    if root is not None:
+        # Warn-but-proceed: a blocked chain is configure's fight, not start's.
+        ensure_agents_chain(ctx, root)
 
     _say(f"→ generating slug via {name} (LLM call, typically 15–60s)…")
     slug = fetch_slug(ctx, cfg, context)  # raises Refusal with the skill's message

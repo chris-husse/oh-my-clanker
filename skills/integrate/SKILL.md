@@ -30,8 +30,9 @@ get written.
 
 1. **Inventory**, presented as a status table (present / missing /
    suspicious), one row each:
-   - `AGENTS.md` + `CLAUDE.md` → are both symlinks resolving to
-     `.omc/internal/AGENTS.md`?
+   - `AGENTS.md` + `CLAUDE.md` → do both root symlinks resolve into the omc
+     install's `distribution/AGENTS.md` (machine-local, gitignored), with
+     project guidance committed at `.omc/config/AGENTS.md`?
    - `.omc/config/AGENTS.md` — the project's own agent instructions
    - `.config/wt.toml` — does a copy-ignored step exist?
    - `.gitnexus/` index and `.omc/docs/` generated docs

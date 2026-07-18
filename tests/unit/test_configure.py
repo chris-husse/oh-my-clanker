@@ -1,3 +1,4 @@
+from omc.agentsmd import distribution_agents_md
 from omc.cli import main
 from omc.config import store
 
@@ -77,7 +78,8 @@ def test_configure_in_repo_creates_agents_chain(tmp_path, monkeypatch):
     assert main(["configure", "--defaults"]) == 0
     assert (repo / "AGENTS.md").is_symlink()
     assert (repo / "CLAUDE.md").is_symlink()
-    assert (repo / ".omc" / "internal" / "AGENTS.md").is_file()
+    assert (repo / "AGENTS.md").resolve() == distribution_agents_md().resolve()
+    assert not (repo / ".omc" / "internal" / "AGENTS.md").exists()
     assert (repo / ".omc" / "config" / "AGENTS.md").is_file()
 
 

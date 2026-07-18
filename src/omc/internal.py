@@ -21,8 +21,11 @@ from .wtconfig import WT_TEMPLATE, primary_root, repo_root
 
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] | wt-template"
-    " | notify --provider NAME [--event E] [--message M] [payload]}"
+    " | notify --provider NAME [--event E] [--message M] [payload]"
+    " | gitnexus <query|context|impact|cypher> [args…]}"
 )
+
+_GITNEXUS_VERBS = ("query", "context", "impact", "cypher")
 
 
 def _verdict(payload: dict) -> None:
@@ -76,6 +79,36 @@ def _rebase_main(ctx: ToolContext, base_arg: str | None) -> int:
     return 0
 
 
+def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
+    """Scoped GitNexus proxy. GitNexus keys its DEFAULT store to the branch the
+    repo was FIRST indexed on (which may since be deleted), while incremental
+    analyze writes to .gitnexus/branches/<branch>/ — an unscoped query silently
+    reads the frozen default store. So: always run from the PRIMARY root and
+    always pin --repo (registry may hold several repos) and --branch (the
+    configured base). gitnexus 1.6.x resolves --branch <base> against the
+    branch store when one exists and falls back to the default store when the
+    base branch IS the originally-indexed one — verify on a gitnexus upgrade.
+    """
+    if not rest or rest[0] not in _GITNEXUS_VERBS:
+        print(_USAGE, file=sys.stderr)
+        return 2
+    if not gitnexus_cli(ctx).is_file():
+        print(
+            "error: GitNexus is not installed — run /omc:index once in a session first",
+            file=sys.stderr,
+        )
+        return 1
+    primary = primary_root(ctx)
+    if primary is None:
+        print("error: not inside a git repository", file=sys.stderr)
+        return 2
+    cfg = store.load(ctx.home)
+    base = cfg.worktree.base_branch if cfg else "main"
+    argv = gitnexus_argv(ctx, *rest, "--repo", Path(primary).name, "--branch", base)
+    cp = ctx.run(argv, cwd=primary, capture=False)  # stream JSON straight through
+    return cp.returncode
+
+
 def run_internal(argv: list[str]) -> int:
     if not argv:
         print(_USAGE, file=sys.stderr)
@@ -107,5 +140,7 @@ def run_internal(argv: list[str]) -> int:
         from .notify import run_notify
 
         return run_notify(ToolContext.from_env(), args)
+    if cmd == "gitnexus":
+        return _gitnexus(ToolContext.from_env(), rest)
     print(_USAGE, file=sys.stderr)
     return 2
