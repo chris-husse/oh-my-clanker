@@ -15,10 +15,14 @@ from pathlib import Path
 from .config import store
 from .gitnexus import gitnexus_argv, gitnexus_cli
 from .mirror import mirror_snapshot
+from .providers.registry import provider_names
 from .toolctx import ToolContext
 from .wtconfig import WT_TEMPLATE, primary_root, repo_root
 
-_USAGE = "usage: omc internal {rebase-main [--base BRANCH] | wt-template}"
+_USAGE = (
+    "usage: omc internal {rebase-main [--base BRANCH] | wt-template"
+    " | notify --provider NAME [--event E] [--message M] [payload]}"
+)
 
 
 def _verdict(payload: dict) -> None:
@@ -89,5 +93,19 @@ def run_internal(argv: list[str]) -> int:
             print(_USAGE, file=sys.stderr)
             return 2
         return _rebase_main(ToolContext.from_env(), args.base)
+    if cmd == "notify":
+        parser = argparse.ArgumentParser(prog="omc internal notify", add_help=False)
+        parser.add_argument("--provider", required=True, choices=provider_names())
+        parser.add_argument("--event", default="")
+        parser.add_argument("--message", default="")
+        parser.add_argument("payload", nargs="?", default=None)  # codex's single JSON arg
+        try:
+            args = parser.parse_args(rest)
+        except SystemExit:
+            print(_USAGE, file=sys.stderr)
+            return 2
+        from .notify import run_notify
+
+        return run_notify(ToolContext.from_env(), args)
     print(_USAGE, file=sys.stderr)
     return 2

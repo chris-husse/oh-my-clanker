@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import shlex
 import sys
+from pathlib import Path
 
-from . import worktree
+from . import notify, worktree
 from .config.schema import Config
 from .errors import OmcError
 from .plugin import ensure_plugin
@@ -18,7 +19,7 @@ from .terminals import detect_terminal
 from .toolctx import ToolContext
 
 
-def _print_plan(branch, base, wt_argv, title_seq, session_argv, shell_argv):
+def _print_plan(branch, base, wt_argv, title_seq, session_argv, shell_argv, notify_desc):
     print("omc start — plan (dry run, no changes made):")
     print(f"  branch:       {branch}")
     print(f"  fetch:        git fetch origin {base}")
@@ -26,6 +27,7 @@ def _print_plan(branch, base, wt_argv, title_seq, session_argv, shell_argv):
     print(f"  title seq:    {title_seq!r}")
     print(f"  session argv: {session_argv}")
     print(f"  shell argv:   {shell_argv}")
+    print(f"  notify:       {notify_desc}")
 
 
 def _run_headless(ctx: ToolContext, cfg: Config, seed: str, cwd: str, slug: str) -> int:
@@ -77,7 +79,10 @@ def run_start(
     pcfg = cfg.llm.providers.get(name)
     model = pcfg.model if pcfg else ""
     seed = f"/omc:start {context}"
-    session_argv = provider.session_argv(session_name=slug, model=model, seed=seed)
+    notify_argv = notify.sink_argv(name) if cfg.notifications.enabled else None
+    session_argv = provider.session_argv(
+        session_name=slug, model=model, seed=seed, notify_sink_argv=notify_argv
+    )
     title_seq = detect_terminal(ctx.env).title_sequence(slug)
 
     if dry_run:
@@ -89,7 +94,13 @@ def run_start(
             ctx.wt_bin, "switch", "--create", branch,
             "--base", f"origin/{base}", "--no-cd", "--yes", "--format=json",
         ]  # fmt: skip
-        _print_plan(branch, base, wt_argv, title_seq, session_argv, shell_argv)
+        if cfg.notifications.enabled:
+            files = provider.notification_setup(notify.sink_argv(name))
+            what = ", ".join(files) or "none (argv only)"
+            notify_desc = f"backend {cfg.notifications.backend}; files: {what}"
+        else:
+            notify_desc = "disabled"
+        _print_plan(branch, base, wt_argv, title_seq, session_argv, shell_argv, notify_desc)
         return 0
 
     _say(f"→ creating worktree {branch} (base origin/{base})")
@@ -98,6 +109,11 @@ def run_start(
     if path is None:
         raise OmcError(f"could not create or switch to the worktree for {branch}")
     _say(f"✓ worktree: {path}")
+
+    if cfg.notifications.enabled:
+        wired = notify.wire_worktree(provider, Path(path))
+        if wired:
+            _say(f"✓ notification wiring: {', '.join(wired)}")
 
     if headless:
         _say(f"→ running headless {name} session seeded with /omc:start")

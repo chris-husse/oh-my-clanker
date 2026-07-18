@@ -68,3 +68,76 @@ def test_provider_entry_must_be_object(tmp_path):
     (tmp_path / "config.json").write_text('{"llm": {"providers": {"claude": 5}}}')
     with pytest.raises(ConfigError, match="claude"):
         store.load(tmp_path)
+
+
+def test_notifications_defaults(tmp_path):
+    cfg = Config()
+    assert cfg.notifications.enabled is False
+    assert cfg.notifications.backend == "macos"
+    store.save(tmp_path, cfg)
+    loaded = store.load(tmp_path)
+    assert loaded.notifications.enabled is False
+    assert loaded.notifications.backend == "macos"
+
+
+def test_notifications_missing_key_defaults(tmp_path):
+    # configs written before this feature carry no notifications key at all
+    (tmp_path / "config.json").write_text('{"schema_version": 1}')
+    loaded = store.load(tmp_path)
+    assert loaded.notifications.enabled is False
+    assert loaded.notifications.backend == "macos"
+
+
+def test_notifications_round_trip(tmp_path):
+    cfg = Config()
+    cfg.notifications.enabled = True
+    cfg.notifications.backend = "file:///tmp/omc-notifications.log"
+    store.save(tmp_path, cfg)
+    loaded = store.load(tmp_path)
+    assert loaded.notifications.enabled is True
+    assert loaded.notifications.backend == "file:///tmp/omc-notifications.log"
+
+
+def test_set_key_notifications_enabled_coerces_bool():
+    cfg = Config()
+    store.set_key(cfg, "notifications.enabled", "true")
+    assert cfg.notifications.enabled is True
+    store.set_key(cfg, "notifications.enabled", "false")
+    assert cfg.notifications.enabled is False
+    with pytest.raises(ConfigError, match="true or false"):
+        store.set_key(cfg, "notifications.enabled", "yes")
+
+
+def test_set_key_notifications_backend_validated():
+    cfg = Config()
+    store.set_key(cfg, "notifications.backend", "file:///var/log/omc.log")
+    assert cfg.notifications.backend == "file:///var/log/omc.log"
+    store.set_key(cfg, "notifications.backend", "macos")
+    assert cfg.notifications.backend == "macos"
+    with pytest.raises(ConfigError, match="notifications.backend"):
+        store.set_key(cfg, "notifications.backend", "file://relative/path")
+    with pytest.raises(ConfigError, match="notifications.backend"):
+        store.set_key(cfg, "notifications.backend", "slack")
+    with pytest.raises(ConfigError, match="unknown config key"):
+        store.set_key(cfg, "notifications.bogus", "x")
+
+
+def test_hydrate_rejects_bad_notification_values(tmp_path):
+    (tmp_path / "config.json").write_text(
+        '{"schema_version": 1, "notifications": {"enabled": "true"}}'
+    )
+    with pytest.raises(ConfigError, match="notifications.enabled"):
+        store.load(tmp_path)
+    (tmp_path / "config.json").write_text(
+        '{"schema_version": 1, "notifications": {"backend": "slack"}}'
+    )
+    with pytest.raises(ConfigError, match="notifications.backend"):
+        store.load(tmp_path)
+
+
+def test_set_key_notifications_rejects_trailing_segments():
+    cfg = Config()
+    with pytest.raises(ConfigError, match="unknown config key"):
+        store.set_key(cfg, "notifications.enabled.extra", "true")
+    with pytest.raises(ConfigError, match="unknown config key"):
+        store.set_key(cfg, "notifications.backend.extra", "macos")

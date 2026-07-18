@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from .base import Provider
 
 
@@ -21,12 +23,18 @@ class CodexProvider(Provider):
         argv.append(prompt)
         return argv
 
-    def session_argv(self, *, session_name, model, seed):
+    def session_argv(self, *, session_name, model, seed, notify_sink_argv=None):
         # No session-name flag exists — codex names sessions internally; omc's
         # terminal title carries the slug instead.
         argv = ["codex"]
         if model:
             argv += ["-m", model]
+        if notify_sink_argv:
+            # -c overrides one config.toml key for THIS session only (the global
+            # config is never touched). The value is TOML — a JSON array of
+            # strings happens to be valid TOML array syntax. Must precede the
+            # seed: the prompt is a trailing positional.
+            argv += ["-c", f"notify={json.dumps(notify_sink_argv)}"]
         argv.append(seed)
         return argv
 
