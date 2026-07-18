@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_install = sub.add_parser("install", help="(Re)install omc from a local checkout")
     p_install.add_argument("path", nargs="?", default=".", help="Checkout path (default: .)")
 
-    sub.add_parser("update", help="Update omc from the source it was installed from")
+    sub.add_parser("update", help="Update omc, its plugins, and managed dependencies (GitNexus)")
     sub.add_parser("uninstall", help="Remove omc (binary + ~/.omc)")
 
     return parser

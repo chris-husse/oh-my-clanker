@@ -45,6 +45,28 @@ def test_update_calls_uv_upgrade(tmp_path):
     assert run_update(ctx) == 0
 
 
+def test_run_update_combines_uv_and_dependency_refresh(monkeypatch, tmp_path):
+    from omc import installer
+    from omc.toolctx import ToolContext
+
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "home")})
+    seen = []
+    monkeypatch.setattr(installer, "_uv", lambda ctx, *a: seen.append(("uv", a)) or 0)
+    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: seen.append(("dep",)) or 0)
+    assert installer.run_update(ctx) == 0
+    assert ("uv", ("tool", "upgrade", "omc")) in seen and ("dep",) in seen
+
+
+def test_run_update_fails_if_dependency_refresh_fails(monkeypatch, tmp_path):
+    from omc import installer
+    from omc.toolctx import ToolContext
+
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "home")})
+    monkeypatch.setattr(installer, "_uv", lambda ctx, *a: 0)
+    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: 1)
+    assert installer.run_update(ctx) == 1
+
+
 def test_uninstall_removes_home_but_refuses_unsafe(tmp_path, capsys):
     bindir = tmp_path / "bin"
     make_stub(bindir, "uv", stdout="ok")
