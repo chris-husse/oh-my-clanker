@@ -60,3 +60,19 @@ def test_render_shape():
     out = hatch_build._render("main", "abc1234", "git@example.com:x/y.git")
     assert 'BRANCH = "main"' in out and 'COMMIT = "abc1234"' in out
     assert out.startswith("# Auto-generated")
+
+
+def test_render_survives_hostile_values():
+    # backslashes (Windows paths) and quote+newline injection attempts must
+    # yield a module that COMPILES and round-trips the values verbatim
+    hostile_source = 'x"\nINJECTED = "pwned'
+    out = hatch_build._render("main", "abc1234", hostile_source)
+    ns: dict = {}
+    exec(compile(out, "<generated>", "exec"), ns)  # must not raise
+    assert ns["SOURCE"] == hostile_source
+    assert "INJECTED" not in ns
+
+    out = hatch_build._render("main", "abc1234", "C:\\Users\\dev\\omc-checkout")
+    ns = {}
+    exec(compile(out, "<generated>", "exec"), ns)  # SyntaxError before the fix
+    assert ns["SOURCE"] == "C:\\Users\\dev\\omc-checkout"
