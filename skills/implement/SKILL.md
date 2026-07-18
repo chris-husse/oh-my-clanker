@@ -33,10 +33,24 @@ should this be an enum? add a parameter here, or reuse an existing
 mechanism? does this fit what the codebase already has? Refine the section
 with the answers; surface real alternatives to the user.
 
+Pass this directive to writing-plans verbatim: "Per the behavior layer's
+model-tier policy (AGENTS.md, Model selection), every task in the plan
+carries a `Model:` line naming its tier — `top tier` for spec, review, and
+judging tasks; `standard coding tier` as the floor for coding tasks;
+`heavy coding tier` for bigger coding tasks (multi-file, architecturally
+tricky, or ambiguous). Tier names only, never pinned model ids."
+
 ## Phase 3 — build
 
 Execute the plan via `superpowers:subagent-driven-development` — a fresh
 subagent per task; its own checkpoints and reviews apply.
+
+Dispatch each task's subagent with its `Model:` tier resolved against the
+provider's current lineup (the Agent tool's model parameter); reviewer and
+judge subagents always get the top tier. Where the harness cannot switch
+per-subagent models, proceed on the session model — never substitute a
+cheaper tier. Plans missing `Model:` lines fall back to the behavior
+layer's model-tier policy directly.
 
 Phase 2 → 3 is NOT a gate: once the plan is written and pressure-tested,
 start the subagent build immediately. Do not ask which execution approach

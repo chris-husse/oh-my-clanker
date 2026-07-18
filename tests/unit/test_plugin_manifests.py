@@ -181,6 +181,7 @@ def test_plan_skill_contract():
         "$ARGUMENTS",
         "OMC_SLUG",
         "non-fatal",
+        "model-tier",
     ):
         assert needle in text, f"plan skill missing {needle!r}"
     # composition rule: explain is called as a command, never unpacked
@@ -196,6 +197,9 @@ def test_implement_skill_contract():
         "finish",
         "silently resume",
         "/omc:explain",
+        "model-tier policy",
+        "`Model:`",
+        "top tier",
     ):
         assert needle in text, f"implement skill missing {needle!r}"
     # phases run strictly spec -> plan -> build -> ship
@@ -269,6 +273,21 @@ def test_integrate_skill_contract():
     assert "review" in text.lower() and "fresh" in text.lower()
     assert "zero writes" in text.lower() or "no writes" in text.lower()
     assert "--defaults" in text  # the do-NOT-reset-config warning
+
+
+def test_distribution_agents_model_tier_policy():
+    text = (ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text()
+    for needle in (
+        "model-tier policy",
+        "top tier",
+        "heavy coding tier",
+        "standard coding tier",
+        "never used",
+        "OpenAI",
+    ):
+        assert needle in text, f"behavior layer missing {needle!r}"
+    # the old guidance invited cheap-tier models for execution work
+    assert "efficient models" not in text, "old Model selection phrasing must be gone"
 
 
 def test_spec_skill_contract():
