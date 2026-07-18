@@ -51,11 +51,21 @@ primer exists, so they can react to what the codebase already says.
 
 ## Step 4 — hand off to brainstorming
 
-Invoke `superpowers:brainstorming` with: the user's seed, the primer, and —
-only when `OMC_SLUG` is set (`echo "$OMC_SLUG"`) — this doc-naming
-directive: "Use the topic slug `$OMC_SLUG` so the design doc lands at
+Invoke `superpowers:brainstorming` with: the user's seed, the primer, the
+presentation rule below, and — only when `OMC_SLUG` is set
+(`echo "$OMC_SLUG"`) — this doc-naming directive: "Use the topic slug
+`$OMC_SLUG` so the design doc lands at
 `docs/superpowers/specs/YYYY-MM-DD-$OMC_SLUG-design.md` and the plan at
 `docs/superpowers/plans/YYYY-MM-DD-$OMC_SLUG-plan.md`."
+
+**Presentation rule (pass it to the brainstorm verbatim)**: present the
+design as ONE well-formatted text document — every section printed in full,
+open questions numbered and inlined where they arise — then ask for
+targeted clarifications or an overall go-ahead in plain text. Never
+drip-feed sections through question dialogs: dialog prompts hide the
+surrounding prose, so a "does this section look right?" chain shows the
+user questions about text they never saw. Question dialogs are for genuine
+standalone forks (pick A/B/C), not for section sign-off.
 
 This skill prepares and hands off — it never designs, never writes code,
 and never writes to the tracker.

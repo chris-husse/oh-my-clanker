@@ -18,6 +18,9 @@ CLI = ~/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js
 
 `node <CLI> --version` succeeds → report the version and end. Done.
 
+(Updating an already-healthy install is `omc update`'s job — deterministic,
+forces `main`. This skill only installs/repairs.)
+
 ## Step 2 — install (approved source ONLY)
 
 The ONLY source ever cloned or accepted is:

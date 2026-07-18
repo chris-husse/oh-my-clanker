@@ -59,10 +59,16 @@ def run_update(ctx: ToolContext) -> int:
     rc = _uv(ctx, "tool", "upgrade", "omc")
     if rc != 0:
         return rc
+    # Managed dependencies (GitNexus). Module-attribute import so tests can
+    # monkeypatch omc.gitnexus.update_gitnexus; a failure here must fail the
+    # command (unlike the best-effort plugin loop below).
+    from . import gitnexus
+
+    dep_rc = gitnexus.update_gitnexus(ctx)
     cfg = store.load(ctx.home)
     if cfg is None:
         print("· no config — skipping plugin updates (run `omc configure`)", file=sys.stderr)
-        return 0
+        return dep_rc
     for name in cfg.llm.providers:
         try:
             argvs = get_provider(name).plugin_update_argvs()
@@ -87,7 +93,7 @@ def run_update(ctx: ToolContext) -> int:
                 break
         if ok:
             print(f"✓ {name}: plugin updated", file=sys.stderr)
-    return 0
+    return dep_rc
 
 
 def _is_unsafe_home(home: Path, env) -> bool:
