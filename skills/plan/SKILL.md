@@ -52,7 +52,11 @@ primer exists, so they can react to what the codebase already says.
 ## Step 4 — hand off to brainstorming
 
 Invoke `superpowers:brainstorming` with: the user's seed, the primer, the
-presentation rule below, and — only when `OMC_SLUG` is set
+presentation rule below, this model-tier pointer: "Any implementation plan
+born from this brainstorm follows the behavior layer's model-tier policy
+(AGENTS.md, Model selection): every task carries a `Model:` line naming
+its tier; the cheap/fast tier is never used." — and, only when `OMC_SLUG`
+is set
 (`echo "$OMC_SLUG"`) — this doc-naming directive: "Use the topic slug
 `$OMC_SLUG` so the design doc lands at
 `docs/superpowers/specs/YYYY-MM-DD-$OMC_SLUG-design.md` and the plan at
