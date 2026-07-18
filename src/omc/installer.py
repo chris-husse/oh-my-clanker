@@ -6,6 +6,9 @@ import shutil
 import sys
 from pathlib import Path
 
+from .config import store
+from .errors import OmcError
+from .providers.registry import get_provider
 from .toolctx import ToolContext
 
 _UV_MISSING = (
@@ -53,7 +56,38 @@ def run_install(ctx: ToolContext, path: str) -> int:
 
 def run_update(ctx: ToolContext) -> int:
     print("Updating omc via uv…", file=sys.stderr)
-    return _uv(ctx, "tool", "upgrade", "omc")
+    rc = _uv(ctx, "tool", "upgrade", "omc")
+    if rc != 0:
+        return rc
+    cfg = store.load(ctx.home)
+    if cfg is None:
+        print("· no config — skipping plugin updates (run `omc configure`)", file=sys.stderr)
+        return 0
+    for name in cfg.llm.providers:
+        try:
+            argvs = get_provider(name).plugin_update_argvs()
+        except OmcError as exc:
+            print(f"✗ {name}: {exc} — continuing", file=sys.stderr)
+            continue
+        if not argvs:
+            print(f"· {name}: no scriptable plugin update yet — update it in-app", file=sys.stderr)
+            continue
+        ok = True
+        for argv in argvs:
+            try:
+                cp = ctx.run(argv)
+            except OSError as exc:
+                print(f"✗ {name}: {argv[0]} not runnable ({exc}) — continuing", file=sys.stderr)
+                ok = False
+                break
+            if cp.returncode != 0:
+                detail = (cp.stderr or cp.stdout or "").strip()[:200]
+                print(f"✗ {name}: {' '.join(argv)} failed: {detail} — continuing", file=sys.stderr)
+                ok = False
+                break
+        if ok:
+            print(f"✓ {name}: plugin updated", file=sys.stderr)
+    return 0
 
 
 def _is_unsafe_home(home: Path, env) -> bool:

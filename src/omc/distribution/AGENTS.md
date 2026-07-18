@@ -1,4 +1,4 @@
-# omc behavior layer (generated — do not edit; `omc configure` regenerates it)
+# omc behavior layer (ships with the omc install — `omc update` updates it everywhere)
 
 This repo is omc-managed. Root `AGENTS.md`/`CLAUDE.md` resolve here so every
 harness (Claude Code, Codex, OpenCode) gets the same ground rules:

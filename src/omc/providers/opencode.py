@@ -54,3 +54,9 @@ export const OmcNotify = async ({{ $ }}) => ({{
 
     def install_hint(self):
         return "npm install -g opencode-ai"
+
+    def plugin_update_argvs(self):
+        # opencode manages its plugin cache itself (git-ref entry in
+        # opencode.json); no scriptable update verified yet — see
+        # docker/PLUGIN-NOTES.md (Task 9 investigation).
+        return []

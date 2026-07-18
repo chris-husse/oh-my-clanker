@@ -1,55 +1,30 @@
-"""The AGENTS.md control chain: root AGENTS.md + CLAUDE.md symlink into
-omc-owned `.omc/internal/AGENTS.md`, which defers to the project-owned
-`.omc/config/AGENTS.md`.
+"""The AGENTS.md control chain, v2: root AGENTS.md + CLAUDE.md are
+machine-local, gitignored symlinks into the INSTALLED omc package's
+distribution/AGENTS.md, which defers to the project-owned
+.omc/config/AGENTS.md.
 
-omc needs deterministic control over how agents behave in omc-managed repos —
-across Claude Code (CLAUDE.md), Codex, and OpenCode (AGENTS.md) — without
-owning the project's voice. omc regenerates the internal layer; it never
-touches the project layer and never replaces existing regular root files.
+`uv tool upgrade omc` replacing the venv is the whole propagation story —
+every managed repo serves the new behavior layer instantly. The v1 chain
+(root symlinks -> committed .omc/internal/AGENTS.md stamped from a constant)
+is migrated automatically; omc never touches the project layer and never
+replaces files it does not own.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
+from .errors import OmcError
+from .installsrc import package_root
 from .toolctx import ToolContext
 
-_INTERNAL_REL = Path(".omc/internal/AGENTS.md")
+_V1_INTERNAL_REL = Path(".omc/internal/AGENTS.md")
 _PROJECT_REL = Path(".omc/config/AGENTS.md")
-
-INTERNAL_AGENTS_MD = """\
-# omc behavior layer (generated — do not edit; `omc configure` regenerates it)
-
-This repo is omc-managed. Root `AGENTS.md`/`CLAUDE.md` resolve here so every
-harness (Claude Code, Codex, OpenCode) gets the same ground rules:
-
-- **Worktrees are snapshots of main** — code AND knowledge (`.gitnexus/`,
-  `.omc/docs/`). Refresh a worktree with `/omc:rebase-main` (it is also
-  `/omc:finish`'s first step). Never hand-copy or hand-delete those dirs;
-  the deterministic mirror lives in `omc internal rebase-main`.
-- **Finish work through `/omc:finish`** — rebase, squash, project stage gates
-  (`/omc:build` → `/omc:verify` → `/omc:review`), described push. Do not
-  bypass a failing stage.
-- **Ask the graph, not grep**: `/omc:explain <question>` answers from the
-  project's GitNexus knowledge graph and docs.
-- **Model selection**: the main session runs the model chosen in
-  `omc configure` — never second-guess it. When dispatching subagents,
-  assess each task and pick the model that fits: the heavyweight model for
-  planning/design, reviews, and judging subagent output; efficient models
-  for well-specified execution work.
-- **Machine contracts are sacred**: single-line `OMC_SLUG` / `OMC_STAGE` /
-  `OMC_SQUASH` / `OMC_REBASE_MAIN` verdicts are parsed by tools — emit them
-  exactly as their skills specify, never wrapped in markdown.
-- Skills marked "not meant for direct invocation" are internal — compose
-  them via their user-facing entry points.
-
-## Project instructions
-
-Read `.omc/config/AGENTS.md` next and follow it — that file is the
-project's own guidance (omc never edits it) and takes precedence over this
-layer wherever they overlap.
-"""
+_DISTRIBUTION_REL = Path("distribution/AGENTS.md")
+_ROOT_NAMES = ("AGENTS.md", "CLAUDE.md")
+_GITIGNORE_ENTRIES = ("/AGENTS.md", "/CLAUDE.md")
 
 PROJECT_STARTER = """\
 # Project agent instructions
@@ -57,7 +32,7 @@ PROJECT_STARTER = """\
 This file is YOURS — omc seeds it once and never touches it again. Put the
 project's real guidance here: build/test commands, architecture ground
 rules, review expectations, tribal knowledge. Every agent reads it right
-after omc's behavior layer (`.omc/internal/AGENTS.md`).
+after omc's behavior layer (the root AGENTS.md/CLAUDE.md symlinks).
 """
 
 
@@ -65,28 +40,71 @@ def _say(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-def ensure_agents_chain(ctx: ToolContext, root: str | Path) -> str:
-    """Verify/create the chain. Returns "created" | "ok" | "blocked".
+def distribution_agents_md() -> Path:
+    """The installed behavior-layer file — the chain's symlink target."""
+    target = package_root() / _DISTRIBUTION_REL
+    if not target.is_file():
+        raise OmcError(f"broken install: {target} is missing")
+    return target
 
-    - `.omc/internal/AGENTS.md`: ALWAYS regenerated (omc owns it).
-    - `.omc/config/AGENTS.md`: seeded only if absent (the project owns it).
-    - Root `AGENTS.md`/`CLAUDE.md`: created as symlinks when missing; a
-      regular file or foreign symlink is NEVER replaced — the chain is
-      reported "blocked" with migration steps, and nothing is changed.
+
+def is_omc_link(link: Path) -> bool:
+    """True when `link` is a symlink omc owns (v1, v2, or a stale v2 from a
+    previous install location) and may therefore repair or migrate."""
+    if not link.is_symlink():
+        return False
+    raw = os.readlink(link)
+    if raw.endswith(str(_V1_INTERNAL_REL)):
+        return True  # v1 relative link
+    return raw.endswith(str(_DISTRIBUTION_REL))  # v2, current or stale
+
+
+def chain_healthy(root: str | Path) -> bool:
+    """Cheap read-only probe: both root links exist and hit the live target."""
+    root = Path(root)
+    target = distribution_agents_md().resolve()
+    return all(
+        (root / name).is_symlink() and (root / name).resolve() == target for name in _ROOT_NAMES
+    )
+
+
+def _ensure_gitignore(root: Path) -> bool:
+    """Append-only: add missing root-anchored entries, never rewrite content."""
+    gi = root / ".gitignore"
+    text = gi.read_text() if gi.is_file() else ""
+    missing = [e for e in _GITIGNORE_ENTRIES if e not in text.splitlines()]
+    if not missing:
+        return False
+    chunk = "" if not text or text.endswith("\n") else "\n"
+    chunk += "# machine-local omc chain symlinks (targets differ per machine)\n"
+    chunk += "".join(f"{e}\n" for e in missing)
+    gi.write_text(text + chunk)
+    return True
+
+
+def ensure_agents_chain(ctx: ToolContext, root: str | Path) -> str:
+    """Verify/create the v2 chain. Returns "created" | "ok" | "blocked".
+
+    - Root AGENTS.md/CLAUDE.md: absolute symlinks to the installed
+      distribution/AGENTS.md; gitignored (entries ensured, append-only).
+    - v1 chain artifacts (omc's own relative symlinks + the stamped
+      .omc/internal/AGENTS.md) migrate automatically.
+    - Foreign regular files or unknown symlinks: NEVER replaced — chain is
+      "blocked" with migration steps and NOTHING is mutated.
+    - .omc/config/AGENTS.md: seeded only if absent (the project owns it).
     """
     root = Path(root)
-    internal = root / _INTERNAL_REL
-    project = root / _PROJECT_REL
+    target = distribution_agents_md()
+    resolved_target = target.resolve()
 
     # Check the root files FIRST: a blocked chain must not half-mutate the repo.
     blocked = []
-    for name in ("AGENTS.md", "CLAUDE.md"):
+    for name in _ROOT_NAMES:
         link = root / name
         if not link.exists() and not link.is_symlink():
             continue  # missing -> creatable
-        if link.is_symlink() and link.resolve() == internal.resolve():
-            continue  # already correct
-        blocked.append(name)
+        if not is_omc_link(link):
+            blocked.append(name)
     if blocked:
         _say(
             f"→ {', '.join(blocked)} already exist and are not omc's symlinks — "
@@ -96,25 +114,36 @@ def ensure_agents_chain(ctx: ToolContext, root: str | Path) -> str:
         return "blocked"
 
     created = False
-    internal.parent.mkdir(parents=True, exist_ok=True)
-    internal.write_text(INTERNAL_AGENTS_MD)  # omc-owned: always regenerated
+    for name in _ROOT_NAMES:
+        link = root / name
+        if link.is_symlink():
+            if link.resolve() == resolved_target:
+                continue  # already correct
+            link.unlink()  # v1 or stale v2 — replace
+        link.symlink_to(target)
+        created = True
 
+    internal = root / _V1_INTERNAL_REL
+    if internal.is_file():
+        internal.unlink()  # v1 stamped layer retired; content now ships installed
+        if internal.parent.is_dir() and not any(internal.parent.iterdir()):
+            internal.parent.rmdir()
+        created = True
+
+    project = root / _PROJECT_REL
     if not project.exists():
         project.parent.mkdir(parents=True, exist_ok=True)
         project.write_text(PROJECT_STARTER)
         created = True
 
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        link = root / name
-        if link.is_symlink():
-            continue  # verified correct above
-        link.symlink_to(_INTERNAL_REL)
+    if _ensure_gitignore(root):
         created = True
 
     if created:
         _say(
-            "→ AGENTS.md/CLAUDE.md now resolve through omc's behavior layer "
-            f"({_INTERNAL_REL}); project guidance lives in {_PROJECT_REL} — commit all three"
+            "→ AGENTS.md/CLAUDE.md now symlink into the omc install "
+            f"({target}); they are machine-local (gitignored) — project guidance "
+            f"lives in {_PROJECT_REL}, commit that one"
         )
         return "created"
     return "ok"

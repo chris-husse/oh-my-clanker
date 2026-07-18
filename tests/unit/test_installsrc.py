@@ -57,3 +57,12 @@ def test_source_git_redacts_credentials(tmp_path):
     assert remote
     assert "glpat-abc123" not in src
     assert src == "https://[REDACTED]@gitlab.example.com/x/omc"
+
+
+def test_package_root_is_the_omc_package_dir():
+    from omc.installsrc import package_root
+
+    root = package_root()
+    assert root.is_dir()
+    assert (root / "__init__.py").is_file()
+    assert root.name == "omc"

@@ -19,6 +19,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("version", help="Print version + install source")
 
+    sub.add_parser(
+        "print-install-path", help="Print the installed omc package directory (one line, no banner)"
+    )
+
     p_conf = sub.add_parser("configure", help="Pick your LLM; writes ~/.omc/config.json")
     p_conf.add_argument("--defaults", action="store_true", help="Write defaults, no prompts")
     p_conf.add_argument(
@@ -31,7 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_start = sub.add_parser("start", help="Begin work on a ticket / task description")
     p_start.add_argument("context", help="Ticket key, ticket URL, or quoted task description")
-    p_start.add_argument("--dry-run", action="store_true", help="Print the plan, change nothing")
+    p_start.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the plan; no worktree/session created (still ensures the agents chain)",
+    )
     p_start.add_argument("--headless", action="store_true", help="Print-mode session (no exec)")
 
     p_watch = sub.add_parser(
@@ -75,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         build_parser().print_help(sys.stderr)
         return 2
     ctx = ToolContext.from_env()
-    if args.command != "version":
+    if args.command not in ("version", "print-install-path"):
         print(f"Oh My Clanker! v{__version__}", file=sys.stderr)
     try:
         return _dispatch(ctx, args)
@@ -89,6 +97,11 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
         from .installsrc import version_string
 
         print(version_string(ctx.env))
+        return 0
+    if args.command == "print-install-path":
+        from .installsrc import package_root
+
+        print(package_root())
         return 0
     if args.command == "start":
         cfg = _load_cfg_or_bail(ctx)

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from omc.cli import main
 
 
@@ -40,3 +42,13 @@ def test_watch_default_interval_is_30s():
 
     args = build_parser().parse_args(["watch"])
     assert args.interval == 30
+
+
+def test_print_install_path_is_machine_pure(capsys):
+    rc = main(["print-install-path"])
+    assert rc == 0
+    out = capsys.readouterr()
+    assert out.err == ""  # banner-exempt, like version
+    lines = out.out.splitlines()
+    assert len(lines) == 1  # exactly one line: OMC_PATH=$(omc print-install-path)
+    assert (Path(lines[0]) / "distribution" / "AGENTS.md").is_file()

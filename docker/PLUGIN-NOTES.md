@@ -197,3 +197,159 @@ add `superpowers` when it wasn't present at build time).
 loading normally through the standard marketplace-installed-plugin path,
 there is no longer a reason for E2E (or any other) sessions to launch via
 `claude --plugin-dir /repo` instead of relying on the installed plugin.
+
+## omc update: per-provider plugin update verification (COPS-987)
+
+**Not verified (both providers): whether a running, authenticated agent
+session picks up a refreshed snapshot/cache without a restart — live-session
+proof stays token-gated and deferred, per the standing live-E2E follow-up.**
+
+`Provider.plugin_update_argvs()` (Task 6) is what `omc update` runs per
+provider after the `uv tool upgrade omc` step. This section records the
+empirical checks behind each provider's implementation, run against
+`omc-e2e:dev` (built from this branch's `docker/Dockerfile.e2e`).
+CLI versions in the image: `codex-cli 0.144.5`, `opencode 1.18.3`,
+`claude 2.1.212 (Claude Code)`.
+
+### codex — `codex plugin marketplace upgrade` — CONFIRMED, no code change
+
+The image's own `oh-my-clanker` marketplace is registered as a **local
+path** (`docker/setup-plugins.sh` runs `codex plugin marketplace add
+/repo`). Repro in a fresh container:
+
+```
+$ docker run --rm omc-e2e:dev bash -c "
+    codex plugin marketplace add /repo
+    codex plugin marketplace list
+    codex plugin marketplace upgrade
+    codex plugin marketplace list
+  "
+Marketplace `oh-my-clanker` is already added from /repo.
+Installed marketplace root: /repo
+MARKETPLACE    ROOT
+oh-my-clanker  /repo
+No configured Git marketplaces to upgrade.
+MARKETPLACE    ROOT
+oh-my-clanker  /repo
+```
+
+`codex plugin marketplace upgrade --help` explains why: *"Refresh configured
+Git marketplace snapshots. Omit MARKETPLACE_NAME to upgrade all configured
+Git marketplaces."* A marketplace added from a local filesystem path is not
+a "Git marketplace" in codex's bookkeeping, so `upgrade` correctly reports
+zero Git marketplaces and leaves it untouched — this is expected, not a
+bug: the local-path registration only exists in this dev image for
+convenience; end users are told (`_PLUGIN_HINTS` in
+`src/omc/configure.py`) to run `codex plugin marketplace add
+chris-husse/oh-my-clanker`, an `owner/repo` spec, which codex resolves and
+tracks as a **Git** marketplace.
+
+To verify `upgrade` actually refreshes a Git marketplace (`file://` is
+rejected — `codex plugin marketplace add` only accepts `owner/repo[@ref]`,
+an HTTPS/SSH Git URL, or a local path — so a `git+http://` dumb-HTTP mirror
+was used to simulate a real remote without needing network access to a real
+host):
+
+```
+# one container, one session:
+git init --bare /tmp/mkt-origin.git
+# ... commit "test v1" to .claude-plugin/marketplace.json, push, `git
+# update-server-info`, serve /tmp via `python3 -m http.server 8080`
+
+$ codex plugin marketplace add http://localhost:8080/mkt-origin.git
+Added marketplace `fake-git-marketplace` from http://localhost:8080/mkt-origin.git.
+Installed marketplace root: /root/.codex/.tmp/marketplaces/fake-git-marketplace
+
+# bump origin to "test v2", commit, push, update-server-info again
+
+$ codex plugin marketplace upgrade
+Upgraded 1 marketplace(s).
+Installed marketplace root: /root/.codex/.tmp/marketplaces/fake-git-marketplace
+
+$ grep -rl "test v2" ~/.codex
+/root/.codex/.tmp/marketplaces/fake-git-marketplace/.claude-plugin/marketplace.json
+$ grep -rl "test v1" ~/.codex
+# (no output — old content is gone)
+```
+
+**Conclusion:** `codex plugin marketplace upgrade` (Task 6's wiring) is
+correct and needs no change — it refreshes Git-sourced marketplace
+snapshots in place, confirmed by content diff before/after. The existing
+code comment in `src/omc/providers/codex.py` ("Refreshes ALL configured git
+marketplace snapshots") already matches this precisely.
+`tests/unit/test_providers.py::test_plugin_update_argvs_are_pure_and_per_provider`'s
+assertion (`codex == [["codex", "plugin", "marketplace", "upgrade"]]`) is
+unchanged.
+
+### opencode — no scriptable update command exists — `[]` confirmed correct
+
+`opencode --help` has no plugin-cache-refresh subcommand. The closest
+candidate, `opencode plugin <module> [-g] [--force]`, is described as
+"install plugin and update config" — it manipulates `opencode.json`'s
+`plugin` array, not the fetched package cache.
+
+Repro (one container session, same dumb-HTTP local-mirror trick as above,
+serving a throwaway npm-shaped package `fakeplugin` whose `index.js` prints
+`FAKEPLUGIN_VERSION=v1`/`v2` at load time so the loaded content is directly
+observable):
+
+```
+$ cat /tmp/proj2/opencode.json
+{"plugin": ["fakeplugin@git+http://localhost:8080/plg-origin.git"]}
+
+$ opencode debug config 2>&1 | grep FAKEPLUGIN     # origin at v1
+FAKEPLUGIN_VERSION=v1
+
+# bump origin to v2, commit, push, update-server-info
+
+$ opencode debug config 2>&1 | grep FAKEPLUGIN     # re-run, no flags
+FAKEPLUGIN_VERSION=v1                                # <- still v1, not refetched
+
+$ opencode plugin "fakeplugin@git+http://localhost:8080/plg-origin.git" --force
+◇  Plugin package ready
+◇  Detected server target
+◇  Plugin config updated
+●  Added to /tmp/proj2/.opencode/opencode.json
+◆  Installed fakeplugin@git+http://localhost:8080/plg-origin.git
+
+$ opencode debug config 2>&1 | grep FAKEPLUGIN     # after --force
+FAKEPLUGIN_VERSION=v1                                # <- still v1
+
+$ rm -rf "/root/.cache/opencode/packages/fakeplugin@git+http:"
+$ opencode debug config 2>&1 | grep FAKEPLUGIN     # after manual cache nuke
+FAKEPLUGIN_VERSION=v2                                 # <- only this refetches
+```
+
+The git-ref plugin is fetched once into
+`~/.cache/opencode/packages/<spec>/node_modules/<name>/` (spec-as-directory-name,
+confirmed via `find` — e.g. `fakeplugin@git+http:/localhost:8080/...`)
+and never revisited: neither an unflagged re-run nor `opencode plugin
+<same-spec> --force` re-fetches it (`--force` only rewrites the
+`opencode.json` plugin-array entry — "Plugin config updated" — not the
+package cache). The only way observed to force a refresh is deleting that
+package's cache directory directly, which is an unsupported reach into
+opencode's internal cache layout (exact path shape is not documented and
+could change across opencode releases) — not something `omc update` should
+script.
+
+**Conclusion:** `OpencodeProvider.plugin_update_argvs()` returning `[]`
+(Task 6) is correct and unchanged. The in-app hint (`_PLUGIN_HINTS`) telling
+users how to install the git-ref plugin stands as the extent of scripted
+support; there is no verified command to force-refresh it, so `omc update`
+correctly does nothing for opencode.
+`tests/unit/test_providers.py`'s `get_provider("opencode").plugin_update_argvs()
+== []` assertion is unchanged.
+
+### Chain v2 E2E (`tests/e2e/test_e2e_chain.py`)
+
+`test_chain_creates_and_migrates_in_container` drives two scenarios inside a
+fresh container: (1) `omc configure --defaults` in a repo with no chain at
+all creates the v2 symlinks, gitignore entries, and the project starter
+file; (2) the same command in a repo carrying a v1 chain (relative symlinks
+into a committed `.omc/internal/AGENTS.md`) migrates it to v2 in place while
+preserving the pre-existing `.omc/config/AGENTS.md` content. Both checks run
+with `set -e` inside each script block (the brief's original sketch left
+that off for the assertion blocks, which would have let an early `test`
+failure be masked by the exit code of the last line in the block — see
+`docker/PLUGIN-NOTES.md`'s sibling report, `.superpowers/sdd/task-9-report.md`,
+for the full note). Passing run: `1 passed in 17.60s`.

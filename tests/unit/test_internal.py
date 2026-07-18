@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import subprocess
 
 from omc.internal import run_internal
@@ -134,3 +135,88 @@ def test_notify_dispatches(tmp_path, monkeypatch):
     # silent no-op, stdin never read)
     monkeypatch.setenv("OMC_HOME", str(tmp_path / "home"))
     assert run_internal(["notify", "--provider", "claude"]) == 0
+
+
+def _chdir(path):
+    old = os.getcwd()
+    os.chdir(path)
+    return old
+
+
+def _gitnexus_env(tmp_path):
+    """Real git repo + linked worktree + recording node stub + fake CLI + config."""
+    from omc.config import store
+    from omc.config.schema import Config
+
+    repo = tmp_path / "primary"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "f").write_text("x")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "c"], check=True)
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", str(wt), "-b", "feat"], check=True
+    )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = bindir / "node.calls"
+    node = bindir / "node"
+    node.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\npwd >> "{calls}"\nexit 0\n')
+    node.chmod(node.stat().st_mode | stat.S_IXUSR)
+    home = tmp_path / "omc-home"
+    cli = home / "dependencies" / "gitnexus" / "gitnexus" / "dist" / "cli" / "index.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("// fake")
+    store.save(home, Config())  # base_branch defaults to "main"
+    env = {
+        "HOME": str(tmp_path),
+        "OMC_HOME": str(home),
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+    }
+    return repo, wt, calls, env
+
+
+def test_gitnexus_proxy_injects_scoping_and_runs_from_primary(tmp_path, monkeypatch):
+    repo, wt, calls, env = _gitnexus_env(tmp_path)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    old = _chdir(wt)  # invoked from a WORKTREE
+    try:
+        rc = run_internal(["gitnexus", "query", "how does start work"])
+    finally:
+        os.chdir(old)
+    assert rc == 0
+    logged = calls.read_text()
+    assert "query how does start work" in logged
+    assert "--repo primary" in logged  # basename of the primary root
+    assert "--branch main" in logged  # configured base branch
+    assert str(repo) in logged  # pwd line: ran FROM the primary root
+
+
+def test_gitnexus_proxy_rejects_unknown_subcommands(tmp_path, capsys, monkeypatch):
+    repo, wt, calls, env = _gitnexus_env(tmp_path)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    old = _chdir(repo)
+    try:
+        assert run_internal(["gitnexus", "analyze"]) == 2  # not a query verb
+        assert run_internal(["gitnexus"]) == 2
+    finally:
+        os.chdir(old)
+
+
+def test_gitnexus_proxy_errors_helpfully_without_the_cli(tmp_path, capsys, monkeypatch):
+    repo, wt, calls, env = _gitnexus_env(tmp_path)
+    (tmp_path / "omc-home" / "dependencies").rename(tmp_path / "gone")
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    old = _chdir(repo)
+    try:
+        rc = run_internal(["gitnexus", "query", "x"])
+    finally:
+        os.chdir(old)
+    assert rc == 1
+    assert "/omc:index" in capsys.readouterr().err  # install hint

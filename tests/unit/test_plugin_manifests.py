@@ -160,8 +160,10 @@ def test_gitnexus_document_contract():
 
 def test_gitnexus_explain_contract():
     text = (ROOT / "skills" / "gitnexus-explain" / "SKILL.md").read_text()
-    for needle in ("query", "context", "impact", "cypher", "/omc:index"):
-        assert needle in text, f"gitnexus-explain missing {needle!r}"
+    assert "omc internal gitnexus" in text  # queries go through the proxy
+    assert "--repo" not in text  # scoping is the proxy's job, not prose
+    assert "--branch" not in text
+    assert "node <CLI> query" not in text  # no raw CLI recipes remain
 
 
 def test_explain_user_facing_contract():
@@ -242,10 +244,10 @@ def test_finish_starts_with_rebase_main():
     assert order == sorted(order), "finish must order rebase-main -> squash -> push"
 
 
-def test_gitnexus_explain_prefers_local_snapshot():
-    text = (ROOT / "skills" / "gitnexus-explain" / "SKILL.md").read_text()
-    assert "local" in text.lower() and "snapshot" in text.lower()
-    assert "rebase-main" in text  # points at the refresh path when stale
+def test_integrate_skill_describes_chain_v2():
+    text = (ROOT / "skills" / "integrate" / "SKILL.md").read_text()
+    assert ".omc/internal/AGENTS.md" not in text  # v1 layer is retired
+    assert "distribution" in text or "install" in text  # points at the v2 chain
 
 
 def test_integrate_skill_contract():

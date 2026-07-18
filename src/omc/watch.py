@@ -13,7 +13,9 @@ import sys
 import time
 from pathlib import Path
 
+from .agentsmd import chain_healthy, ensure_agents_chain, is_omc_link
 from .config.schema import Config
+from .errors import OmcError
 from .gitnexus import ANALYZE_ARGS, gitnexus_argv, gitnexus_cli
 from .mirror import mirror_dir
 from .toolctx import ToolContext
@@ -52,6 +54,41 @@ def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentatio
     if wiki.is_dir():
         mirror_dir(wiki, Path(root) / ".omc" / "docs" / "gitnexus" / "docs")
         _say("✓ documentation refreshed → .omc/docs/gitnexus/docs")
+
+
+def _chain_tick(ctx: ToolContext, root: str, last: str | None) -> str:
+    """REPAIR the AGENTS.md chain; never create it from nothing (that is
+    configure/start's job — watch must not mutate repos it merely observes).
+    Healthy: silent. Repair: narrates (action outcome). Blocked: warn once
+    per state change (quiet-token doctrine, like _tick), never block the loop."""
+    try:
+        if chain_healthy(root):
+            return "chain-ok"
+        root_p = Path(root)
+        names = ("AGENTS.md", "CLAUDE.md")
+        if not any((root_p / n).exists() or (root_p / n).is_symlink() for n in names):
+            return "chain-absent"  # never chain-managed — silently leave it alone
+        if last == "chain-blocked":
+            # Still blocked (foreign root files/symlinks don't vanish between
+            # ticks) — re-running ensure would re-narrate the same warning
+            # every tick.
+            if any(
+                ((root_p / n).exists() or (root_p / n).is_symlink()) and not is_omc_link(root_p / n)
+                for n in names
+            ):
+                return "chain-blocked"
+        status = ensure_agents_chain(ctx, root)
+        return "chain-blocked" if status == "blocked" else "chain-ok"
+    except OmcError as e:
+        # chain_healthy()/ensure_agents_chain() call distribution_agents_md(),
+        # which RAISES OmcError when the installed distribution/AGENTS.md is
+        # missing (a broken install). Watch doctrine: a tick failure must warn
+        # and skip, never crash the loop — narrate once per state change, same
+        # quiet-token convention as everything else here.
+        token = "chain-error"
+        if token != last:
+            _say(f"✗ chain check failed: {e}")
+        return token
 
 
 def _tick(
@@ -149,8 +186,10 @@ def run_watch(
         f"{', documentation enabled' if enable_documentation else ''}) — Ctrl-C stops"
     )
     last: str | None = None
+    chain_last: str | None = None
     try:
         while True:
+            chain_last = _chain_tick(ctx, root, chain_last)
             last = _tick(
                 ctx,
                 cfg,

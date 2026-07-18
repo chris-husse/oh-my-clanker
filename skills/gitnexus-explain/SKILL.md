@@ -9,34 +9,31 @@ description: Internal — used by /omc:explain; not meant for direct invocation.
 
 A question about the codebase (from `/omc:explain`).
 
-## Step 1 — ensure CLI + locate the graph (local snapshot first)
+## Step 1 — ensure the CLI
 
-Run the `gitnexus-ensure` skill. Then pick the graph to query:
-
-- The CURRENT worktree has a local `.gitnexus/` → use it (worktrees carry a
-  snapshot of main's graph from creation; `/omc:rebase-main` refreshes it —
-  mention that if the snapshot looks stale relative to the question).
-- Otherwise fall back to the primary worktree root (`git worktree list`,
-  first entry) and run the queries from there.
-- Neither has a `.gitnexus/` index → tell the user to run `/omc:index` first
-  and stop (do not index implicitly; indexing a large repo is not something
-  to trigger as a side effect of a question).
+Run the `gitnexus-ensure` skill (installs/heals GitNexus under
+`~/.omc/dependencies/gitnexus`).
 
 ## Step 2 — compose graph queries
 
 There is no single `explain` CLI command — composing the query tools IS this
-skill. From the chosen root, iterate until the question is answerable
-(prefer the graph over grep):
+skill. Iterate until the question is answerable (prefer the graph over grep).
+All queries go through omc's proxy, which resolves the graph location and
+scoping deterministically (primary root, configured base branch) — pass ONLY
+the verb and its arguments:
 
-- `node <CLI> query "<concept>"` — find the execution flows and symbols
-  related to the question's concepts.
-- `node <CLI> context <symbol>` — 360° view of each load-bearing symbol
-  (callers, callees, processes). Disambiguate with `--file <path>` if the
-  name is shared.
-- `node <CLI> impact <symbol>` — blast radius, when the question is about
-  change consequences ("what breaks if…").
-- `node <CLI> cypher "<stmt>"` — raw graph query for anything structural the
-  higher-level commands can't express.
+- `omc internal gitnexus query "<concept>"` — find the execution flows and
+  symbols related to the question's concepts.
+- `omc internal gitnexus context <symbol>` — 360° view of each load-bearing
+  symbol (callers, callees, processes). Disambiguate with `--file <path>` if
+  the name is shared.
+- `omc internal gitnexus impact <symbol>` — blast radius, when the question
+  is about change consequences ("what breaks if…").
+- `omc internal gitnexus cypher "<stmt>"` — raw graph query for anything
+  structural the higher-level commands can't express.
+
+The proxy exits 1 with an install hint when GitNexus is missing — relay that
+hint ("run `/omc:index` first") and stop; never index implicitly.
 
 Also read the generated docs at `.omc/docs/gitnexus/docs/` (primary root)
 when present — module pages often carry the architectural "why" the graph

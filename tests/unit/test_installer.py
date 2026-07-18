@@ -1,3 +1,8 @@
+import os
+import stat
+
+from omc.config import store
+from omc.config.schema import Config, ProviderConfig
 from omc.installer import run_install, run_uninstall, run_update, validate_checkout
 from omc.toolctx import ToolContext
 
@@ -55,3 +60,78 @@ def test_uninstall_removes_home_but_refuses_unsafe(tmp_path, capsys):
     assert run_uninstall(ToolContext.from_env(env2)) == 0
     assert tmp_path.exists()
     assert "refuse" in capsys.readouterr().err
+
+
+def _stub(bindir, name, rc=0):
+    calls = bindir / f"{name}.calls"
+    exe = bindir / name
+    exe.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\nexit {rc}\n')
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+    return calls
+
+
+def _update_ctx(tmp_path, *, claude_rc=0):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    uv_calls = _stub(bindir, "uv")
+    claude_calls = _stub(bindir, "claude", rc=claude_rc)
+    codex_calls = _stub(bindir, "codex")
+    home = tmp_path / "omc-home"
+    ctx = ToolContext.from_env(
+        {"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}"}
+    )
+    cfg = Config()
+    cfg.llm.providers = {"claude": ProviderConfig(), "codex": ProviderConfig()}
+    store.save(ctx.home, cfg)
+    return ctx, uv_calls, claude_calls, codex_calls
+
+
+def test_update_upgrades_then_updates_each_providers_plugin(tmp_path, capsys):
+    ctx, uv_calls, claude_calls, codex_calls = _update_ctx(tmp_path)
+    assert run_update(ctx) == 0
+    assert "tool upgrade omc" in uv_calls.read_text()
+    assert "plugin marketplace update oh-my-clanker" in claude_calls.read_text()
+    assert "plugin update omc@oh-my-clanker" in claude_calls.read_text()
+    assert "plugin marketplace upgrade" in codex_calls.read_text()
+
+
+def test_update_isolates_provider_failures(tmp_path, capsys):
+    ctx, uv_calls, claude_calls, codex_calls = _update_ctx(tmp_path, claude_rc=1)
+    assert run_update(ctx) == 0  # a broken provider never fails the update
+    assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
+    err = capsys.readouterr().err
+    assert "claude" in err and "✗" in err  # failure narrated
+
+
+def test_update_without_config_skips_plugins(tmp_path, capsys):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "uv")
+    ctx = ToolContext.from_env(
+        {
+            "HOME": str(tmp_path),
+            "OMC_HOME": str(tmp_path / "omc-home"),
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+        }
+    )
+    assert run_update(ctx) == 0
+    assert "skipping plugin updates" in capsys.readouterr().err
+
+
+def test_update_isolates_unknown_provider(tmp_path, capsys):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "uv")
+    codex_calls = _stub(bindir, "codex")
+    home = tmp_path / "omc-home"
+    ctx = ToolContext.from_env(
+        {"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}"}
+    )
+    # Config with unknown provider FIRST, then codex
+    cfg = Config()
+    cfg.llm.providers = {"nonexistent-provider": ProviderConfig(), "codex": ProviderConfig()}
+    store.save(ctx.home, cfg)
+    assert run_update(ctx) == 0  # Must succeed despite unknown provider
+    assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
+    err = capsys.readouterr().err
+    assert "✗" in err and "nonexistent-provider" in err  # failure narrated

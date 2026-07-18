@@ -205,3 +205,84 @@ def test_quiet_line_reappears_after_a_sync(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "synced main" in err
     assert err.count("up to date") == 2, f"suppression must reset after a sync:\n{err}"
+
+
+def test_watch_repairs_a_dangling_chain(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    home = tmp_path / "omc-home"
+    ctx, _ = _ctx_with_node_stub(tmp_path, home)
+    from omc.agentsmd import chain_healthy, ensure_agents_chain
+
+    ensure_agents_chain(ctx, repo)
+    (repo / "AGENTS.md").unlink()  # simulate a broken link
+    assert not chain_healthy(repo)
+    assert _run_once(repo, ctx) == 0
+    assert chain_healthy(repo)  # tick repaired it
+    assert "AGENTS.md" in capsys.readouterr().err  # repair narrates
+
+
+def test_watch_blocked_chain_warns_once_and_never_stops_the_loop(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    home = tmp_path / "omc-home"
+    ctx, _ = _ctx_with_node_stub(tmp_path, home)
+    (repo / "AGENTS.md").write_text("# handwritten\n")
+    from omc.watch import _chain_tick
+
+    first = _chain_tick(ctx, str(repo), None)
+    capsys.readouterr()
+    second = _chain_tick(ctx, str(repo), first)
+    assert first == second == "chain-blocked"
+    assert capsys.readouterr().err == ""  # quiet-token: repeat state is silent
+    assert (repo / "AGENTS.md").read_text() == "# handwritten\n"
+
+
+def test_watch_blocked_chain_with_foreign_symlink_warns_once_and_never_stops_the_loop(
+    tmp_path, capsys
+):
+    origin, repo = _repo_with_origin(tmp_path)
+    home = tmp_path / "omc-home"
+    ctx, _ = _ctx_with_node_stub(tmp_path, home)
+    (repo / "other.md").write_text("x")
+    (repo / "AGENTS.md").symlink_to("other.md")
+    from omc.watch import _chain_tick
+
+    first = _chain_tick(ctx, str(repo), None)
+    capsys.readouterr()
+    second = _chain_tick(ctx, str(repo), first)
+    assert first == second == "chain-blocked"
+    assert capsys.readouterr().err == ""  # quiet-token: repeat state is silent
+    assert (repo / "AGENTS.md").resolve() == (repo / "other.md").resolve()
+
+
+def test_watch_leaves_never_managed_repos_alone(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    home = tmp_path / "omc-home"
+    ctx, _ = _ctx_with_node_stub(tmp_path, home)
+    from omc.watch import _chain_tick
+
+    assert _chain_tick(ctx, str(repo), None) == "chain-absent"
+    assert not (repo / "AGENTS.md").exists()  # watch never creates from nothing
+    assert capsys.readouterr().err == ""
+
+
+def test_watch_chain_tick_survives_a_broken_install(tmp_path, capsys, monkeypatch):
+    """chain_healthy() raises OmcError when the installed distribution/AGENTS.md
+    is missing (broken install). A tick failure must warn and skip, never
+    crash the loop."""
+    origin, repo = _repo_with_origin(tmp_path)
+    home = tmp_path / "omc-home"
+    ctx, _ = _ctx_with_node_stub(tmp_path, home)
+    from omc.errors import OmcError
+
+    def _boom(_root):
+        raise OmcError("broken install: distribution/AGENTS.md is missing")
+
+    monkeypatch.setattr("omc.watch.chain_healthy", _boom)
+    from omc.watch import _chain_tick
+
+    first = _chain_tick(ctx, str(repo), None)
+    assert first == "chain-error"
+    assert "chain check failed" in capsys.readouterr().err
+    second = _chain_tick(ctx, str(repo), first)
+    assert second == "chain-error"
+    assert capsys.readouterr().err == ""  # quiet-token: repeat state is silent

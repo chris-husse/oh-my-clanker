@@ -57,3 +57,10 @@ class Provider(ABC):
     @abstractmethod
     def install_hint(self) -> str:
         """One-line install command for this provider's CLI."""
+
+    @abstractmethod
+    def plugin_update_argvs(self) -> list[list[str]]:
+        """Commands that update this provider's installed omc plugin, in order.
+
+        [] means no scriptable update path is known yet — `omc update` says so
+        and moves on. Builders stay pure (no I/O)."""

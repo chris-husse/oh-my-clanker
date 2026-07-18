@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 
 import pytest
 
@@ -12,9 +14,22 @@ from ._stubs import make_stub, stub_env
 OK_VERDICT = 'OMC_SLUG {"ok": true, "slug": "proj-1-fix-login"}'
 
 
+def _make_git_stub(bindir):
+    """git stub that's argv-aware just enough for run_start's needs: --version
+    (require_tools' probe) answers like a real git; rev-parse (repo_root, now
+    called unconditionally by run_start) reports "not a repo" so these
+    tools-only tests don't accidentally resolve to the real project checkout."""
+    bindir.mkdir(parents=True, exist_ok=True)
+    path = bindir / "git"
+    path.write_text(
+        '#!/bin/sh\ncase "$1" in\n  rev-parse) exit 128 ;;\n  *) echo "git version 2.99" ;;\nesac\n'
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 def full_env(tmp_path, *, verdict=OK_VERDICT, wt_json=None):
     bindir = tmp_path / "bin"
-    make_stub(bindir, "git", stdout="git version 2.99")
+    _make_git_stub(bindir)
     # The static stub answers EVERY claude invocation with the same stdout, so
     # prepend an "omc@" line: ensure_plugin's `plugin list` probe sees the
     # plugin as installed, and parse_verdict ignores non-OMC_SLUG lines.
@@ -108,3 +123,39 @@ def test_dry_run_shows_notify_plan(tmp_path, capsys):
     assert "notify:       backend macos; files: .claude/settings.local.json" in out
     rc = run_start(ctx, Config(), "PROJ-1", dry_run=True)
     assert "notify:       disabled" in capsys.readouterr().out
+
+
+def _repo_env(tmp_path):
+    """A real git repo (repo_root/ensure_agents_chain need a real toplevel) with
+    stubbed wt/claude on PATH — mirrors full_env but keeps the system git
+    reachable instead of a canned stub, like test_configure's chain test does."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "claude", stdout=f"omc@oh-my-clanker\n{OK_VERDICT}")
+    make_stub(bindir, "wt", stdout=json.dumps({"path": str(tmp_path / "wtree")}))
+    env = stub_env(bindir, SHELL="/bin/bash")
+    env["PATH"] = f"{bindir}:{os.environ['PATH']}"  # real git alongside the stubs
+    return ToolContext.from_env(env), repo
+
+
+def test_start_dry_run_ensures_the_chain(tmp_path, monkeypatch):
+    from omc.agentsmd import chain_healthy
+
+    ctx, repo = _repo_env(tmp_path)
+    monkeypatch.chdir(repo)
+    rc = run_start(ctx, Config(), "PROJ-1 do the thing", dry_run=True)
+    assert rc == 0
+    assert chain_healthy(repo)  # chain exists even on dry runs
+
+
+def test_start_proceeds_when_chain_is_blocked(tmp_path, monkeypatch):
+    ctx, repo = _repo_env(tmp_path)
+    (repo / "AGENTS.md").write_text("# handwritten\n")
+    monkeypatch.chdir(repo)
+    rc = run_start(ctx, Config(), "PROJ-1 do the thing", dry_run=True)
+    assert rc == 0  # blocked chain never stops start
+    assert (repo / "AGENTS.md").read_text() == "# handwritten\n"
