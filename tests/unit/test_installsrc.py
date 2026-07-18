@@ -1,3 +1,4 @@
+from omc import installsrc
 from omc.installsrc import install_source, version_string
 
 
@@ -66,3 +67,14 @@ def test_package_root_is_the_omc_package_dir():
     assert root.is_dir()
     assert (root / "__init__.py").is_file()
     assert root.name == "omc"
+
+
+def test_provenance_fallback_is_unknown():
+    prov = installsrc.provenance()
+    assert set(prov) == {"branch", "commit", "source"}
+    # the checked-in fallback ships all-unknown; a stamped build overwrites it
+    assert prov["branch"] == "unknown"
+    assert prov["commit"] == "unknown"
+    assert prov["source"] == "unknown"
+    prov["branch"] = "mutated"
+    assert installsrc.provenance()["branch"] == "unknown"  # fresh dict per call

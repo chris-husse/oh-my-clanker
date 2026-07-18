@@ -7,7 +7,7 @@ import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
-from . import __version__
+from . import __version__, _buildinfo
 
 _REMOTE_SCHEME = ("ssh://", "https://", "http://", "git+", "git://")
 _SCP_FORM = re.compile(r"^[^/@]+@[^/:]+:")
@@ -42,6 +42,20 @@ def package_root() -> Path:
     from importlib import resources
 
     return Path(str(resources.files("omc")))
+
+
+def provenance() -> dict[str, str]:
+    """Build provenance as a fresh dict: ``{branch, commit, source}``.
+
+    All ``"unknown"`` for a source install where the build hook never fired
+    (the checked-in ``_buildinfo`` fallback). A new dict each call so callers
+    can mutate without affecting later reads.
+    """
+    return {
+        "branch": _buildinfo.BRANCH,
+        "commit": _buildinfo.COMMIT,
+        "source": _buildinfo.SOURCE,
+    }
 
 
 def install_source(env: Mapping[str, str]) -> tuple[str, bool]:
