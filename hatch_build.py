@@ -90,13 +90,15 @@ def _git(root: Path, *args: str) -> str:
 
 
 def _redact(url: str) -> str:
-    """Strip ``user:password@`` credentials from a URL before it lands in the artifact.
+    """Strip credentials from a URL before it lands in the artifact.
 
-    Only a form WITH a colon is a credential — a bare ``user@host`` is an ssh login
-    (e.g. ``git@github.com:…``) and MUST be preserved verbatim, so the regex requires
-    the ``:`` and leaves bare-user URLs untouched.
+    Any ``userinfo@`` on a ``scheme://`` URL is dropped UNLESS it is exactly the
+    universal ssh login ``git@`` (``ssh://git@host/…`` is identity-free and must
+    stay readable). Bare SCP forms (``git@host:path``, no ``://``) are untouched.
+    A colon is NOT required: colonless tokens (``https://ghp_xxx@host``) are
+    credentials too.
     """
-    return re.sub(r"://[^/@]+:[^/@]+@", "://", url)
+    return re.sub(r"://(?!git@)[^/@]+@", "://", url)
 
 
 def _render(branch: str, commit: str, source: str) -> str:

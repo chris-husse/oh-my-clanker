@@ -54,6 +54,9 @@ def test_redact_strips_credentials_keeps_ssh_user():
     assert (
         hatch_build._redact("git+ssh://git@example.com/x.git") == "git+ssh://git@example.com/x.git"
     )
+    # colonless tokens are credentials too (RED before the fix)
+    assert hatch_build._redact("https://ghp_abc123@github.com/x.git") == "https://github.com/x.git"
+    assert hatch_build._redact("ssh://git@example.com/x.git") == "ssh://git@example.com/x.git"
 
 
 def test_render_shape():
