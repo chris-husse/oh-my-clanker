@@ -38,6 +38,8 @@ get written.
    - `.gitnexus/` index and `.omc/docs/` generated docs
    - `.omc/skills/build` · `.omc/skills/verify` · `.omc/skills/review` ·
      `.omc/skills/explain-context`
+   - `.omc/hooks/post-watch.sh` — optional CLI-side hook `omc watch` runs
+     after action ticks (sync / forced refresh)
 2. **Mechanical fixes** via the existing machinery (with the user's go-ahead):
    - Chain missing/stale → re-run `omc configure`: read the CURRENT default
      from `~/.omc/config.json` and re-set it
@@ -81,6 +83,14 @@ explicit pass rule (e.g. "no Critical/Important findings").
 Where does this project's truth live — READMEs, docs dirs, ADRs, wikis,
 specs? In what order of authority? Propose the map so `/omc:explain` can
 ground itself the way a senior teammate would.
+
+### `.omc/hooks/post-watch.sh` (optional)
+The CLI-side sibling of the session skills: `omc watch` runs it after every
+cycle that did real work (env: `OMC_WATCH_OUTCOME`=`synced`|`refreshed`;
+failures warn and link a log, never stop the loop). Investigate whether the
+project has post-refresh work — regenerating downstream artifacts, cache
+warming, notifying a dashboard. Propose it only when a real use exists;
+absence is the correct default.
 
 ### `.omc/config/AGENTS.md`
 The project's own agent instructions (the omc chain sends every agent here).

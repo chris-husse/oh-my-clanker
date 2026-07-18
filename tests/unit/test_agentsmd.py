@@ -16,7 +16,7 @@ def test_distribution_agents_md_resolves_and_carries_the_layer():
     text = target.read_text()
     assert ".omc/config/AGENTS.md" in text  # fans out to the project layer
     assert "rebase-main" in text and "OMC_" in text
-    assert "subagent" in text.lower() and "efficient" in text  # model doctrine
+    assert "subagent" in text.lower() and "model-tier policy" in text  # model doctrine
     assert "omc update" in text  # header explains how the file updates
 
 

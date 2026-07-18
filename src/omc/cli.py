@@ -52,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also regenerate the LLM documentation on changes (costly)",
     )
+    p_watch.add_argument(
+        "--auto-build",
+        action="store_true",
+        help="After each action tick, run the project's build stage via the default LLM",
+    )
 
     p_install = sub.add_parser("install", help="(Re)install omc from a local checkout")
     p_install.add_argument("path", nargs="?", default=".", help="Checkout path (default: .)")
@@ -120,6 +125,7 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             interval=args.interval,
             once=args.once,
             enable_documentation=args.enable_documentation,
+            auto_build=args.auto_build,
         )
     if args.command == "configure":
         from .configure import run_configure
