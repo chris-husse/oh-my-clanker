@@ -69,6 +69,12 @@ the bug).
   up" flags without re-verifying against the real CLI.
 - Long-running behavior is foreground-only: omc never creates daemons,
   LaunchAgents, or cron entries.
+- **Never run `omc install` / `uv tool install` on your own initiative.**
+  `omc install <path>` re-roots every future `omc update` at that path — an
+  install pointed at a feature worktree has silently pinned the host omc to
+  a stale branch multiple times. Installing is a USER decision, made from
+  the primary checkout on `main`; if a task seems to require reinstalling
+  omc, stop and tell the user the exact command instead of running it.
 
 ## Build & verify
 

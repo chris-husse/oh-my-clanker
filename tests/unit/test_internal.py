@@ -191,9 +191,9 @@ def test_gitnexus_proxy_injects_scoping_and_runs_from_primary(tmp_path, monkeypa
     assert rc == 0
     logged = calls.read_text()
     assert "query how does start work" in logged
-    assert "--repo primary" in logged  # basename of the primary root
+    assert f"--repo {repo}" in logged  # absolute PATH of the primary root
     assert "--branch main" in logged  # configured base branch
-    assert str(repo) in logged  # pwd line: ran FROM the primary root
+    assert logged.splitlines()[-1] == str(repo)  # pwd line: ran FROM the primary root
 
 
 def test_gitnexus_proxy_rejects_unknown_subcommands(tmp_path, capsys, monkeypatch):
