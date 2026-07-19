@@ -220,3 +220,14 @@ def test_gitnexus_proxy_errors_helpfully_without_the_cli(tmp_path, capsys, monke
         os.chdir(old)
     assert rc == 1
     assert "/omc:index" in capsys.readouterr().err  # install hint
+
+
+def test_internal_build_progress_usage_and_dispatch(tmp_path, capsys):
+    from omc.internal import run_internal
+
+    assert run_internal(["build-progress"]) == 2  # missing logfile -> usage
+    log = tmp_path / "done.log"
+    log.write_text("--- omc: stage finished (rc 0) ---\n")
+    assert run_internal(["build-progress", str(log)]) == 0
+    out = capsys.readouterr().out
+    assert out == ""  # internal stdout stays machine-clean; bar goes to stderr

@@ -22,7 +22,8 @@ from .wtconfig import WT_TEMPLATE, primary_root, repo_root
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] | wt-template"
     " | notify --provider NAME [--event E] [--message M] [payload]"
-    " | gitnexus <query|context|impact|cypher> [args…]}"
+    " | gitnexus <query|context|impact|cypher> [args…]"
+    " | build-progress LOGFILE}"
 )
 
 _GITNEXUS_VERBS = ("query", "context", "impact", "cypher")
@@ -145,5 +146,16 @@ def run_internal(argv: list[str]) -> int:
         return run_notify(ToolContext.from_env(), args)
     if cmd == "gitnexus":
         return _gitnexus(ToolContext.from_env(), rest)
+    if cmd == "build-progress":
+        parser = argparse.ArgumentParser(prog="omc internal build-progress", add_help=False)
+        parser.add_argument("logfile")
+        try:
+            args = parser.parse_args(rest)
+        except SystemExit:
+            print(_USAGE, file=sys.stderr)
+            return 2
+        from .buildprogress import follow_log
+
+        return follow_log(args.logfile)
     print(_USAGE, file=sys.stderr)
     return 2
