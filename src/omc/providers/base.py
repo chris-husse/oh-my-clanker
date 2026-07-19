@@ -50,6 +50,26 @@ class Provider(ABC):
         Pure like everything here — the caller writes the files."""
         return {}
 
+    def headless_stream_argv(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        allowed_tools: list[str] | None = None,
+    ) -> list[str]:
+        """Like headless_argv, but for LIVE streaming consumption. Default:
+        same argv — codex/opencode already emit incremental text. Providers
+        that buffer their print mode (claude) override with a streaming
+        output format."""
+        return self.headless_argv(prompt, model=model, allowed_tools=allowed_tools)
+
+    def decode_stream_line(self, line: str) -> list[str]:
+        """Decode ONE raw child output line into human-readable text lines.
+        Default: identity. Providers whose stream is an event protocol
+        (claude stream-json) override to unwrap events; multi-line texts
+        must be split so line-anchored contracts (OMC_STAGE) survive."""
+        return [line]
+
     @abstractmethod
     def title_env(self) -> dict[str, str]:
         """Env that stops the CLI from clobbering the terminal title ({} if none exists)."""

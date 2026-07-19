@@ -17,10 +17,12 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 from .agentsmd import chain_healthy, ensure_agents_chain, is_omc_link
+from .buildprogress import ProgressTracker, sentinel_line
 from .config.schema import Config
 from .errors import OmcError
 from .gitnexus import ANALYZE_ARGS, gitnexus_argv, gitnexus_cli
@@ -61,11 +63,41 @@ def _decode(v: object) -> str:
 _HOOK_TIMEOUT = 600  # seconds — a stuck project hook must not wedge the loop
 
 
-def _write_hook_log(output: str, prefix: str) -> str:
+def _make_live_log(prefix: str) -> tuple[object, str]:
     fd, path = tempfile.mkstemp(prefix=prefix, suffix=".log")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(output)
-    return path
+    return os.fdopen(fd, "w", encoding="utf-8"), path
+
+
+class _BarThread:
+    """Redraws the progress bar once per second on stderr, in place (\\r).
+    TTY-gated: constructing on a non-TTY yields a no-op. Watch narration is
+    sequential — nothing else writes to stderr while a stage streams."""
+
+    def __init__(self, tracker: ProgressTracker, out=None) -> None:
+        self._tracker = tracker
+        self._out = out if out is not None else sys.stderr
+        self._enabled = bool(getattr(self._out, "isatty", lambda: False)())
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if not self._enabled:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(1.0):
+            self._out.write("\r" + self._tracker.render())
+            self._out.flush()
+
+    def stop(self) -> None:
+        if not self._enabled or self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._out.write("\r\x1b[K")  # clear the bar line before normal narration resumes
+        self._out.flush()
 
 
 def _post_watch_hook(ctx: ToolContext, root: str, outcome: str) -> None:
@@ -75,7 +107,8 @@ def _post_watch_hook(ctx: ToolContext, root: str, outcome: str) -> None:
     hook = Path(root) / ".omc" / "hooks" / "post-watch.sh"
     if not hook.is_file():
         return
-    _say("→ running project post-watch hook (.omc/hooks/post-watch.sh)")
+    log, log_path = _make_live_log("omc-post-watch-")
+    _say(f"→ running project post-watch hook (.omc/hooks/post-watch.sh) — log: {log_path}")
     status: str | None = None
     try:
         cp = ctx.run(
@@ -98,14 +131,14 @@ def _post_watch_hook(ctx: ToolContext, root: str, outcome: str) -> None:
     except OSError as exc:
         output = str(exc)
         status = "failed to start"
-    log = _write_hook_log(output, "omc-post-watch-")
+    log.write(output)
+    log.close()
     if status is None:
         _say("✓ post-watch hook done")
     else:
-        _say(f"✗ post-watch hook failed ({status}) — log: {log}")
+        _say(f"✗ post-watch hook failed ({status}) — log: {log_path}")
 
 
-_BUILD_TIMEOUT = 1800  # seconds — an LLM build stage must not wedge the loop
 _STAGE_RE = re.compile(r"^OMC_STAGE (\{.*\})\s*$", re.MULTILINE)
 
 
@@ -121,12 +154,23 @@ def _parse_stage(output: str) -> dict | None:
     return v if isinstance(v, dict) else None
 
 
+_CARGO_PROGRESS_ENV = {
+    # cargo suppresses its (12/1288) counters when piped; these force them so
+    # the progress parsers see real numbers. Harmless for non-cargo projects.
+    "CARGO_TERM_PROGRESS_WHEN": "always",
+    "CARGO_TERM_PROGRESS_WIDTH": "80",
+}
+
+
 def _auto_build(ctx: ToolContext, cfg: Config, root: str) -> None:
     """--auto-build: run the project's build stage via the default LLM after
-    an action tick. Same doctrine as the hook: failures warn, never crash.
-    The SKILL.md existence pre-check deliberately mirrors the build skill's
-    own step 2 — a cost guard so an unconfigured project never spends an
-    LLM call per tick to learn 'nothing to do'."""
+    an action tick, STREAMING: decoded transcript tees to a live log
+    (announced up front, tail -f-able) and feeds the progress bar. No
+    timeout — a build may run an hour; the elapsed clock + Ctrl-C replace
+    it. Failures warn, never crash. The SKILL.md existence pre-check
+    deliberately mirrors the build skill's own step 2 — a cost guard so an
+    unconfigured project never spends an LLM call per tick to learn
+    'nothing to do'."""
     if not (Path(root) / ".omc" / "skills" / "build" / "SKILL.md").is_file():
         _say("· no project build stage configured — skipping auto-build")
         return
@@ -134,41 +178,64 @@ def _auto_build(ctx: ToolContext, cfg: Config, root: str) -> None:
     provider = get_provider(name)
     pcfg = cfg.llm.providers.get(name)
     model = pcfg.model if pcfg else ""
-    _say(f"→ running project build stage via {name} (LLM-heavy)")
+    log, log_path = _make_live_log("omc-auto-build-")
+    _say(f"→ running project build stage via {name} (LLM-heavy) — log: {log_path}")
+    tracker = ProgressTracker()
+    collected: list[str] = []
+
+    def on_line(raw: str) -> None:
+        for text in provider.decode_stream_line(raw):
+            log.write(text + "\n")
+            log.flush()
+            collected.append(text)
+            tracker.feed(text)
+
+    bar = _BarThread(tracker)
     status: str | None = None
+    rc: int | None = None
+    bar.start()
     try:
-        cp = ctx.run(
-            provider.headless_argv(
+        rc = ctx.stream(
+            provider.headless_stream_argv(
                 skill_prompt("build"),
                 model=model,
                 allowed_tools=["Bash", "Read", "Glob", "Grep"],
             ),
             cwd=root,
-            timeout=_BUILD_TIMEOUT,
-            extra_env=provider.title_env(),
+            extra_env={**provider.title_env(), **_CARGO_PROGRESS_ENV},
+            on_line=on_line,
         )
-        output = (cp.stdout or "") + (cp.stderr or "")
-        verdict = _parse_stage(output)
-        if cp.returncode != 0:
-            status = f"exit {cp.returncode}"
+    except OSError as exc:
+        # ctx.stream re-raises an on_line failure (our own log write) after
+        # reaping the child, so this OSError is BOTH a spawn failure (nothing
+        # decoded yet) AND a mid-stream log-write failure (lines already in).
+        status = "failed to start" if not collected else "log write failed"
+        try:
+            log.write(f"{exc}\n")
+        except OSError:
+            pass
+    finally:
+        bar.stop()
+        try:
+            log.write(sentinel_line(rc) + "\n")
+        except OSError:
+            pass
+        try:
+            log.close()
+        except OSError:
+            pass
+    if status is None:
+        verdict = _parse_stage("\n".join(collected))
+        if rc != 0:
+            status = f"exit {rc}"
         elif verdict is None:
             status = "no verdict"
         elif not verdict.get("passed"):
             status = str(verdict.get("summary") or "stage failed")
-    except subprocess.TimeoutExpired as exc:
-        output = _decode(exc.stdout) + _decode(exc.stderr)
-        status = "timeout"
-    except UnicodeDecodeError as exc:
-        output = str(exc)
-        status = "undecodable output"
-    except OSError as exc:
-        output = str(exc)
-        status = "failed to start"
-    log = _write_hook_log(output, "omc-auto-build-")
     if status is None:
         _say("✓ auto-build passed")
     else:
-        _say(f"✗ auto-build failed ({status}) — log: {log}")
+        _say(f"✗ auto-build failed ({status}) — log: {log_path}")
 
 
 def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentation: bool) -> None:

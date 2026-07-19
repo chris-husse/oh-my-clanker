@@ -142,3 +142,77 @@ def test_plugin_update_argvs_are_pure_and_per_provider():
     codex = get_provider("codex").plugin_update_argvs()
     assert codex == [["codex", "plugin", "marketplace", "upgrade"]]
     assert get_provider("opencode").plugin_update_argvs() == []  # not scriptable yet
+
+
+# Captured from a real `claude -p --output-format stream-json --verbose` run
+# (2026-07-19 probe) — shapes, not verbatim transcripts.
+_SJ_ASSISTANT_TEXT = (
+    '{"type":"assistant","message":{"content":[{"type":"text",'
+    '"text":"Build stage passed.\\nOMC_STAGE {\\"passed\\": true}"}]}}'
+)
+_SJ_TOOL_USE = (
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash",'
+    '"input":{"command":"just build","description":"Run build"}}]}}'
+)
+_SJ_TOOL_RESULT_STR = (
+    '{"type":"user","message":{"content":[{"type":"tool_result",'
+    '"content":"Compiling foo (12/1288)\\nok"}]}}'
+)
+_SJ_TOOL_RESULT_LIST = (
+    '{"type":"user","message":{"content":[{"type":"tool_result",'
+    '"content":[{"type":"text","text":"251 passed"}]}]}}'
+)
+_SJ_RESULT = '{"type":"result","result":"done\\nOMC_STAGE {\\"passed\\": true}"}'
+_SJ_SYSTEM = '{"type":"system","subtype":"init"}'
+_SJ_THINKING = '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}'
+
+
+def test_claude_stream_argv_uses_stream_json():
+    p = get_provider("claude")
+    argv = p.headless_stream_argv("do it", model="m1", allowed_tools=["Bash"])
+    assert argv[:3] == ["claude", "-p", "do it"]
+    assert "--output-format" in argv and "stream-json" in argv and "--verbose" in argv
+    assert argv[-2:] == ["--allowed-tools", "Bash"]  # allowed-tools stays LAST (variadic)
+
+
+def test_claude_decode_assistant_text_splits_lines():
+    p = get_provider("claude")
+    assert p.decode_stream_line(_SJ_ASSISTANT_TEXT) == [
+        "Build stage passed.",
+        'OMC_STAGE {"passed": true}',
+    ]
+
+
+def test_claude_decode_tool_use_echoes_command():
+    p = get_provider("claude")
+    assert p.decode_stream_line(_SJ_TOOL_USE) == ["$ just build"]
+
+
+def test_claude_decode_tool_result_string_and_list():
+    p = get_provider("claude")
+    assert p.decode_stream_line(_SJ_TOOL_RESULT_STR) == ["Compiling foo (12/1288)", "ok"]
+    assert p.decode_stream_line(_SJ_TOOL_RESULT_LIST) == ["251 passed"]
+
+
+def test_claude_decode_result_event_carries_final_text():
+    p = get_provider("claude")
+    assert p.decode_stream_line(_SJ_RESULT) == ["done", 'OMC_STAGE {"passed": true}']
+
+
+def test_claude_decode_skips_system_and_thinking():
+    p = get_provider("claude")
+    assert p.decode_stream_line(_SJ_SYSTEM) == []
+    assert p.decode_stream_line(_SJ_THINKING) == []
+
+
+def test_claude_decode_passes_non_json_through():
+    p = get_provider("claude")
+    assert p.decode_stream_line("plain warning line") == ["plain warning line"]
+    assert p.decode_stream_line("   ") == []  # blank noise dropped
+
+
+def test_codex_and_opencode_stream_defaults_are_identity():
+    for name in ("codex", "opencode"):
+        p = get_provider(name)
+        assert p.headless_stream_argv("x", model="") == p.headless_argv("x", model="")
+        assert p.decode_stream_line("anything") == ["anything"]

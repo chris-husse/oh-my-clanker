@@ -637,3 +637,89 @@ def test_no_auto_build_flag_means_no_build(tmp_path, capsys):
     assert _run_once(repo, ctx) == 0  # plain --once, no auto_build
     assert "auto-build" not in capsys.readouterr().err
     assert not calls.exists()
+
+
+def test_auto_build_announces_log_path_up_front(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_build_stage(repo)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _stub_claude(
+        tmp_path,
+        'OMC_STAGE {"stage": "build", "configured": true, "passed": true, "summary": "ok"}',
+    )
+    assert _run_once_auto_build(repo, ctx) == 0
+    err = capsys.readouterr().err
+    m = re.search(r"→ running project build stage via claude \(LLM-heavy\) — log: (\S+)", err)
+    assert m, f"missing up-front log announcement:\n{err}"
+    log = Path(m.group(1))
+    assert log.is_file()
+    content = log.read_text()
+    assert "OMC_STAGE" in content  # decoded transcript logged
+    assert re.search(r"^--- omc: stage finished \(rc 0\) ---$", content, re.MULTILINE)
+
+
+def test_auto_build_decodes_stream_json_lines(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_build_stage(repo)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    # stub emits stream-json: a tool result with a cargo counter, then the
+    # final result event carrying the verdict — the log must hold DECODED text
+    _stub_claude(
+        tmp_path,
+        '{"type":"user","message":{"content":[{"type":"tool_result",'
+        '"content":"Compiling foo (12/1288)"}]}}\n'
+        '{"type":"result","result":"OMC_STAGE {\\"stage\\": \\"build\\", '
+        '\\"configured\\": true, \\"passed\\": true, \\"summary\\": \\"ok\\"}"}',
+    )
+    assert _run_once_auto_build(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "✓ auto-build passed" in err
+    m = re.search(r"— log: (\S+)", err)
+    content = Path(m.group(1)).read_text()
+    assert "Compiling foo (12/1288)" in content  # decoded, not raw JSON
+    assert '"type":"user"' not in content  # raw event NOT in log
+    assert re.search(r"^OMC_STAGE ", content, re.MULTILINE)
+
+
+def test_auto_build_stream_call_has_no_timeout(tmp_path, monkeypatch):
+    """The no-timeout requirement, pinned: _auto_build must call ctx.stream
+    (which has no timeout parameter), never ctx.run with a timeout."""
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_build_stage(repo)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _stub_claude(
+        tmp_path,
+        'OMC_STAGE {"stage": "build", "configured": true, "passed": true, "summary": "ok"}',
+    )
+    calls = {}
+    real_stream = type(ctx).stream
+
+    def spy(self, argv, **kwargs):
+        calls["kwargs"] = kwargs
+        return real_stream(self, argv, **kwargs)
+
+    monkeypatch.setattr(type(ctx), "stream", spy)
+    assert _run_once_auto_build(repo, ctx) == 0
+    assert "kwargs" in calls, "auto-build no longer uses ctx.stream"
+    assert "timeout" not in calls["kwargs"]
+    assert calls["kwargs"]["extra_env"]["CARGO_TERM_PROGRESS_WHEN"] == "always"
+    assert calls["kwargs"]["extra_env"]["CARGO_TERM_PROGRESS_WIDTH"] == "80"
+
+
+def test_build_timeout_constant_is_gone():
+    import omc.watch as watch_mod
+
+    assert not hasattr(watch_mod, "_BUILD_TIMEOUT")
+
+
+def test_hook_announces_log_path_up_front(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_hook(repo, "echo hello\n")
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0
+    err = capsys.readouterr().err
+    m = re.search(
+        r"→ running project post-watch hook \(\.omc/hooks/post-watch\.sh\) — log: (\S+)", err
+    )
+    assert m, f"hook start line lacks log path:\n{err}"
+    assert Path(m.group(1)).is_file()

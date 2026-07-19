@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -65,6 +66,75 @@ class ToolContext:
             kwargs["text"] = True
             kwargs["stdin"] = subprocess.DEVNULL
         return subprocess.run(list(argv), **kwargs)  # noqa: S603 - argv list, no shell
+
+    def stream(
+        self,
+        argv: Sequence[str],
+        *,
+        on_line: Callable[[str], None],
+        cwd: str | os.PathLike[str] | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> int:
+        """Run argv, delivering every stdout/stderr line to ``on_line`` live.
+
+        stdout and stderr are SEPARATE pipes read by two threads — never
+        merged into one pipe: pipe writes beyond PIPE_BUF are not atomic, so
+        a large stdout line (e.g. a stream-json tool result) could splice
+        with a stderr line mid-line. Two readers guarantee whole lines; a
+        lock serializes ``on_line`` calls. Per-stream order is preserved;
+        cross-stream order is best-effort.
+
+        ``on_line`` exceptions are not swallowed — callers own their callbacks.
+        The first exception from either stream is captured; both readers then
+        drain their pipes silently (without calling ``on_line``) so the child
+        never blocks on a full pipe and the joins cannot deadlock. Once the
+        child is reaped, that exception propagates to the caller (the child's
+        return code is lost in that case — the raise IS the signal).
+
+        Deliberately NO timeout: used for LLM build stages that may run an
+        hour — liveness is the user's call (visible elapsed time + Ctrl-C).
+        """
+        kwargs: dict[str, object] = {
+            "env": {**self.child_env(), **(extra_env or {})},
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "stdin": subprocess.DEVNULL,
+            "text": True,
+            "errors": "replace",
+        }
+        if cwd is not None:
+            kwargs["cwd"] = cwd
+        proc = subprocess.Popen(list(argv), **kwargs)  # noqa: S603 - argv list, no shell
+        lock = threading.Lock()
+        error: list[BaseException] = []
+
+        def pump(pipe) -> None:
+            try:
+                for raw in pipe:
+                    with lock:
+                        if error:
+                            continue  # a callback already failed — drain silently
+                        try:
+                            on_line(raw.rstrip("\n"))
+                        except BaseException as exc:  # noqa: BLE001 - caller's callback owns it
+                            error.append(exc)
+            finally:
+                pipe.close()
+
+        # daemon=True matters only when a KeyboardInterrupt abandons the join below:
+        # never strand interpreter shutdown on a wedged child's still-open pipes.
+        readers = [
+            threading.Thread(target=pump, args=(p,), daemon=True)
+            for p in (proc.stdout, proc.stderr)
+        ]
+        for t in readers:
+            t.start()
+        for t in readers:
+            t.join()
+        rc = proc.wait()
+        if error:
+            raise error[0]
+        return rc
 
 
 def tool_version(ctx: ToolContext, argv: Sequence[str], *, timeout: float = 5) -> tuple[bool, str]:
