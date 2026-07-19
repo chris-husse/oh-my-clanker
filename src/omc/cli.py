@@ -57,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="After each action tick, run the project's build stage via the default LLM",
     )
+    p_watch.add_argument(
+        "--rebase",
+        action="store_true",
+        help="Sync via 'git rebase --autostash' — syncs even dirty or diverged "
+        "checkouts (opt-out of warn-and-skip)",
+    )
 
     p_install = sub.add_parser("install", help="(Re)install omc from a local checkout")
     p_install.add_argument("path", nargs="?", default=".", help="Checkout path (default: .)")
@@ -126,6 +132,7 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             once=args.once,
             enable_documentation=args.enable_documentation,
             auto_build=args.auto_build,
+            rebase=args.rebase,
         )
     if args.command == "configure":
         from .configure import run_configure

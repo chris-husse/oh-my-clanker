@@ -44,6 +44,13 @@ def test_watch_default_interval_is_30s():
     assert args.interval == 30
 
 
+def test_watch_rebase_flag_default_off():
+    from omc.cli import build_parser
+
+    assert build_parser().parse_args(["watch"]).rebase is False
+    assert build_parser().parse_args(["watch", "--rebase"]).rebase is True
+
+
 def test_print_install_path_is_machine_pure(capsys):
     rc = main(["print-install-path"])
     assert rc == 0
