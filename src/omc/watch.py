@@ -9,7 +9,12 @@ checkouts are warned about and left alone.
 
 from __future__ import annotations
 
+import json
+import os
+import re
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -18,6 +23,8 @@ from .config.schema import Config
 from .errors import OmcError
 from .gitnexus import ANALYZE_ARGS, gitnexus_argv, gitnexus_cli
 from .mirror import mirror_dir
+from .providers.registry import get_provider
+from .skills_source import skill_prompt
 from .toolctx import ToolContext
 from .wtconfig import ensure_wt_config, primary_root, repo_root
 
@@ -29,6 +36,123 @@ def _say(msg: str) -> None:
 def _out(ctx: ToolContext, argv: list[str], cwd: str) -> str:
     cp = ctx.run(argv, cwd=cwd)
     return (cp.stdout or "").strip() if cp.returncode == 0 else ""
+
+
+def _decode(v: object) -> str:
+    return v.decode(errors="replace") if isinstance(v, bytes) else (v or "")  # type: ignore[union-attr]
+
+
+_HOOK_TIMEOUT = 600  # seconds — a stuck project hook must not wedge the loop
+
+
+def _write_hook_log(output: str, prefix: str) -> str:
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".log")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(output)
+    return path
+
+
+def _post_watch_hook(ctx: ToolContext, root: str, outcome: str) -> None:
+    """Project extension point: .omc/hooks/post-watch.sh, fired only after
+    ACTION ticks (synced/refreshed). Hooks never break work — failures and
+    timeouts warn (with the captured log) and the loop continues."""
+    hook = Path(root) / ".omc" / "hooks" / "post-watch.sh"
+    if not hook.is_file():
+        return
+    _say("→ running project post-watch hook (.omc/hooks/post-watch.sh)")
+    status: str | None = None
+    try:
+        cp = ctx.run(
+            ["bash", str(hook)],
+            cwd=root,
+            timeout=_HOOK_TIMEOUT,
+            extra_env={"OMC_WATCH_OUTCOME": outcome},
+        )
+        output = (cp.stdout or "") + (cp.stderr or "")
+        if cp.returncode != 0:
+            status = f"exit {cp.returncode}"
+    except subprocess.TimeoutExpired as exc:
+        # POSIX quirk: TimeoutExpired carries the partial output as BYTES
+        # even in text mode — decode before logging.
+        output = _decode(exc.stdout) + _decode(exc.stderr)
+        status = "timeout"
+    except UnicodeDecodeError as exc:
+        output = str(exc)
+        status = "undecodable output"
+    except OSError as exc:
+        output = str(exc)
+        status = "failed to start"
+    log = _write_hook_log(output, "omc-post-watch-")
+    if status is None:
+        _say("✓ post-watch hook done")
+    else:
+        _say(f"✗ post-watch hook failed ({status}) — log: {log}")
+
+
+_BUILD_TIMEOUT = 1800  # seconds — an LLM build stage must not wedge the loop
+_STAGE_RE = re.compile(r"^OMC_STAGE (\{.*\})\s*$", re.MULTILINE)
+
+
+def _parse_stage(output: str) -> dict | None:
+    matches = _STAGE_RE.findall(output)
+    if not matches:
+        return None
+    try:
+        # last verdict line wins — transcripts may echo earlier OMC_STAGE lines
+        v = json.loads(matches[-1])
+    except json.JSONDecodeError:
+        return None
+    return v if isinstance(v, dict) else None
+
+
+def _auto_build(ctx: ToolContext, cfg: Config, root: str) -> None:
+    """--auto-build: run the project's build stage via the default LLM after
+    an action tick. Same doctrine as the hook: failures warn, never crash.
+    The SKILL.md existence pre-check deliberately mirrors the build skill's
+    own step 2 — a cost guard so an unconfigured project never spends an
+    LLM call per tick to learn 'nothing to do'."""
+    if not (Path(root) / ".omc" / "skills" / "build" / "SKILL.md").is_file():
+        _say("· no project build stage configured — skipping auto-build")
+        return
+    name = cfg.llm.default
+    provider = get_provider(name)
+    pcfg = cfg.llm.providers.get(name)
+    model = pcfg.model if pcfg else ""
+    _say(f"→ running project build stage via {name} (LLM-heavy)")
+    status: str | None = None
+    try:
+        cp = ctx.run(
+            provider.headless_argv(
+                skill_prompt("build"),
+                model=model,
+                allowed_tools=["Bash", "Read", "Glob", "Grep"],
+            ),
+            cwd=root,
+            timeout=_BUILD_TIMEOUT,
+            extra_env=provider.title_env(),
+        )
+        output = (cp.stdout or "") + (cp.stderr or "")
+        verdict = _parse_stage(output)
+        if cp.returncode != 0:
+            status = f"exit {cp.returncode}"
+        elif verdict is None:
+            status = "no verdict"
+        elif not verdict.get("passed"):
+            status = str(verdict.get("summary") or "stage failed")
+    except subprocess.TimeoutExpired as exc:
+        output = _decode(exc.stdout) + _decode(exc.stderr)
+        status = "timeout"
+    except UnicodeDecodeError as exc:
+        output = str(exc)
+        status = "undecodable output"
+    except OSError as exc:
+        output = str(exc)
+        status = "failed to start"
+    log = _write_hook_log(output, "omc-auto-build-")
+    if status is None:
+        _say("✓ auto-build passed")
+    else:
+        _say(f"✗ auto-build failed ({status}) — log: {log}")
 
 
 def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentation: bool) -> None:
@@ -160,6 +284,7 @@ def run_watch(
     interval: int = 30,
     once: bool = False,
     enable_documentation: bool = False,
+    auto_build: bool = False,
 ) -> int:
     root = repo_root(ctx)
     if root is None:
@@ -198,6 +323,10 @@ def run_watch(
                 force_refresh=once,
                 last=last,
             )
+            if last in ("synced", "refreshed"):
+                _post_watch_hook(ctx, root, last)
+                if auto_build:
+                    _auto_build(ctx, cfg, root)
             if once:
                 return 0
             time.sleep(interval)

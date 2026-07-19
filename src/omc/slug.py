@@ -10,13 +10,12 @@ from dataclasses import dataclass
 from .config.schema import Config
 from .errors import OmcError, Refusal
 from .providers.registry import get_provider
-from .skills_source import skill_text
+from .skills_source import skill_prompt
 from .toolctx import ToolContext
 
 _NON_SLUG_RE = re.compile(r"[^a-z0-9]+")
 _SLUG_MAX = 50
 _VERDICT_PREFIX = "OMC_SLUG "
-_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 
 # Server-scoped MCP grants for the headless call (claude only; other providers
 # ignore allowed_tools). Verified live 2026-07-17 (spec §10.2 contingency fired):
@@ -70,8 +69,7 @@ def parse_verdict(text: str) -> Verdict | None:
 
 
 def build_prompt(context: str) -> str:
-    body = _FRONTMATTER_RE.sub("", skill_text("slug"))
-    return body.replace("$ARGUMENTS", context)
+    return skill_prompt("slug").replace("$ARGUMENTS", context)
 
 
 def fetch_slug(ctx: ToolContext, cfg: Config, context: str) -> str:

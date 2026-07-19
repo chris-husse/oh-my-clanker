@@ -1,6 +1,8 @@
 import os
+import re
 import stat
 import subprocess
+from pathlib import Path
 
 from omc.config.schema import Config
 from omc.toolctx import ToolContext
@@ -286,3 +288,181 @@ def test_watch_chain_tick_survives_a_broken_install(tmp_path, capsys, monkeypatc
     second = _chain_tick(ctx, str(repo), first)
     assert second == "chain-error"
     assert capsys.readouterr().err == ""  # quiet-token: repeat state is silent
+
+
+def _seed_hook(repo, body):
+    hooks = repo / ".omc" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "post-watch.sh").write_text(body)
+
+
+def test_once_runs_post_watch_hook_after_forced_refresh(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" > hook-ran.txt\n')
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "→ running project post-watch hook (.omc/hooks/post-watch.sh)" in err
+    assert "✓ post-watch hook done" in err
+    # cwd was the repo root and OMC_WATCH_OUTCOME carried the token
+    assert (repo / "hook-ran.txt").read_text().strip() == "refreshed"
+
+
+def test_hook_sees_synced_outcome(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    _push_remote_commit(origin, tmp_path)
+    _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" > hook-ran.txt\n')
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0
+    assert (repo / "hook-ran.txt").read_text().strip() == "synced"
+
+
+def test_quiet_loop_tick_does_not_run_hook(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_hook(repo, "touch hook-ran.txt\n")
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_loop(repo, ctx, ticks=2) == 0  # loop mode: both ticks are quiet up-to-date
+    assert not (repo / "hook-ran.txt").exists()
+    assert "post-watch" not in capsys.readouterr().err
+
+
+def test_absent_hook_is_silent(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0
+    assert "post-watch" not in capsys.readouterr().err
+
+
+def test_hook_failure_links_log_and_keeps_once_rc_zero(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_hook(repo, "echo boom-out\necho boom-err >&2\nexit 3\n")
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0  # hook failure never changes --once's exit code
+    err = capsys.readouterr().err
+    m = re.search(r"✗ post-watch hook failed \(exit 3\) — log: (\S+)", err)
+    assert m, f"missing failure narration:\n{err}"
+    log = Path(m.group(1))
+    assert log.is_file()
+    content = log.read_text()
+    assert "boom-out" in content and "boom-err" in content  # both streams captured
+
+
+def test_hook_timeout_is_a_failure_and_loop_survives(tmp_path, capsys, monkeypatch):
+    import omc.watch as watch_mod
+
+    monkeypatch.setattr(watch_mod, "_HOOK_TIMEOUT", 1)
+    origin, repo = _repo_with_origin(tmp_path)
+    _seed_hook(repo, "echo partial-out\necho partial-err >&2\nsleep 5\n")
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+
+    def between(i):
+        if i == 1:  # teammate pushes between tick 1 and 2 -> tick 2 syncs -> hook fires
+            _push_remote_commit(origin, tmp_path)
+
+    assert _run_loop(repo, ctx, ticks=3, between=between) == 0
+    err = capsys.readouterr().err
+    m = re.search(r"✗ post-watch hook failed \(timeout\) — log: (\S+)", err)
+    assert m, f"missing timeout narration with log link:\n{err}"
+    content = Path(m.group(1)).read_text()
+    # partial output decoded into the log
+    assert "partial-out" in content and "partial-err" in content
+    # tick 3 still ran after the hook blew up: quiet line reappears post-sync
+    assert err.count("up to date") == 2, f"loop did not survive the timeout:\n{err}"
+
+
+def test_hook_binary_output_never_crashes_the_loop(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_hook(repo, "printf '\\xff\\xfe'\n")
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0  # undecodable output must never crash the loop
+    err = capsys.readouterr().err
+    assert "✗ post-watch hook failed (undecodable output) — log:" in err
+
+
+def _stub_claude(tmp_path, transcript, rc=0):
+    """A fake `claude` on the stub PATH: records argv, prints transcript."""
+    bindir = tmp_path / "bin"  # same dir _ctx_with_node_stub already put on PATH
+    calls = bindir / "claude.calls"
+    stub = bindir / "claude"
+    stub.write_text(
+        f'#!/bin/sh\necho "$@" >> "{calls}"\ncat <<\'TRANSCRIPT\'\n'
+        f"{transcript}\nTRANSCRIPT\nexit {rc}\n"
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    return calls
+
+
+def _seed_build_stage(repo):
+    d = repo / ".omc" / "skills" / "build"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("# build\nrun make\n")
+
+
+def _run_once_auto_build(repo, ctx):
+    old = os.getcwd()
+    os.chdir(repo)
+    try:
+        return run_watch(ctx, Config(), interval=1, once=True, auto_build=True)
+    finally:
+        os.chdir(old)
+
+
+def test_auto_build_passes_on_stage_verdict(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_build_stage(repo)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    calls = _stub_claude(
+        tmp_path,
+        'building...\nOMC_STAGE {"stage": "build", "configured": true, "passed": true, '
+        '"summary": "ok"}',
+    )
+    assert _run_once_auto_build(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "→ running project build stage via claude (LLM-heavy)" in err
+    assert "✓ auto-build passed" in err
+    recorded = calls.read_text()
+    assert "-p" in recorded  # headless print-mode invocation
+
+
+def test_auto_build_failure_links_log_and_keeps_rc_zero(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_build_stage(repo)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _stub_claude(
+        tmp_path,
+        'OMC_STAGE {"stage": "build", "configured": true, "passed": false, '
+        '"summary": "make exploded"}',
+    )
+    assert _run_once_auto_build(repo, ctx) == 0  # failures never change --once's exit code
+    err = capsys.readouterr().err
+    m = re.search(r"✗ auto-build failed \(make exploded\) — log: (\S+)", err)
+    assert m, f"missing failure narration:\n{err}"
+    assert "OMC_STAGE" in Path(m.group(1)).read_text()  # full transcript logged
+
+
+def test_auto_build_no_verdict_is_a_failure(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_build_stage(repo)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _stub_claude(tmp_path, "rambling with no verdict line")
+    assert _run_once_auto_build(repo, ctx) == 0
+    assert "✗ auto-build failed (no verdict)" in capsys.readouterr().err
+
+
+def test_auto_build_unconfigured_skips_llm_entirely(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)  # no .omc/skills/build
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    calls = _stub_claude(tmp_path, "should never run")
+    assert _run_once_auto_build(repo, ctx) == 0
+    assert "· no project build stage configured — skipping auto-build" in capsys.readouterr().err
+    assert not calls.exists()  # the provider binary was NEVER invoked
+
+
+def test_no_auto_build_flag_means_no_build(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_build_stage(repo)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    calls = _stub_claude(tmp_path, "should never run")
+    assert _run_once(repo, ctx) == 0  # plain --once, no auto_build
+    assert "auto-build" not in capsys.readouterr().err
+    assert not calls.exists()
