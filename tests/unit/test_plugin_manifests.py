@@ -43,6 +43,7 @@ USER_FACING_SKILLS = (
     "index",
     "document",
     "explain",
+    "investigate",
     "rebase-main",
     "check-wt-config",
     "integrate",
@@ -172,6 +173,31 @@ def test_explain_user_facing_contract():
         assert needle in text, f"explain missing {needle!r}"
 
 
+def test_investigate_skill_contract():
+    text = (ROOT / "skills" / "investigate" / "SKILL.md").read_text()
+    for needle in (
+        "/omc:investigate <environment> <prompt>",
+        ".omc/skills/investigation-context",
+        "$ARGUMENTS",
+        "worker-mission.md",
+        "read-only",
+        "/omc:integrate",
+        "standard coding tier",
+        "environments the project defines",
+        "/tmp/omc-investigations/",
+    ):
+        assert needle in text, f"investigate missing {needle!r}"
+    # required context hook: refusal, not graceful degradation
+    assert "REFUSE" in text
+    # env names are the project's, never omc's
+    assert "opaque" in text
+    # the worker template exists and stays generic (no project namespaces)
+    mission = (ROOT / "skills" / "investigate" / "worker-mission.md").read_text()
+    for needle in ("<env>", "<mission>", "FORBIDDEN", "verbatim"):
+        assert needle in mission, f"worker-mission missing {needle!r}"
+    assert "cops" not in mission
+
+
 def test_plan_skill_contract():
     text = (ROOT / "skills" / "plan" / "SKILL.md").read_text()
     for needle in (
@@ -261,6 +287,7 @@ def test_integrate_skill_contract():
         ".omc/skills/verify",
         ".omc/skills/review",
         ".omc/skills/explain-context",
+        ".omc/skills/investigation-context",
         ".omc/config/AGENTS.md",
         ".config/wt.toml",
         "check-wt-config",

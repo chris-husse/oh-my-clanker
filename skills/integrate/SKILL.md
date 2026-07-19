@@ -37,7 +37,7 @@ get written.
    - `.config/wt.toml` — does a copy-ignored step exist?
    - `.gitnexus/` index and `.omc/docs/` generated docs
    - `.omc/skills/build` · `.omc/skills/verify` · `.omc/skills/review` ·
-     `.omc/skills/explain-context`
+     `.omc/skills/explain-context` · `.omc/skills/investigation-context`
    - `.omc/hooks/post-watch.sh` — optional CLI-side hook `omc watch` runs
      after action ticks (sync / forced refresh)
 2. **Mechanical fixes** via the existing machinery (with the user's go-ahead):
@@ -83,6 +83,20 @@ explicit pass rule (e.g. "no Critical/Important findings").
 Where does this project's truth live — READMEs, docs dirs, ADRs, wikis,
 specs? In what order of authority? Propose the map so `/omc:explain` can
 ground itself the way a senior teammate would.
+
+### `.omc/skills/investigation-context`
+The WHERE for `/omc:investigate <environment> <prompt>` — required before
+that skill will run at all. Investigate what live environments the project
+has (local, dev, staging, uat, prod, …) and what observability stack serves
+them: log platform + the base scope per env, databases + access paths, MCP
+namespaces, metrics. Propose the canonical layout: a `SKILL.md` router
+(map the environment token to its briefing, list defined envs on a miss)
+plus one `envs/<env>.md` briefing per environment answering: MCP
+namespace(s) + read-only-safe tools, log source + base scope, DB access,
+metrics source, env caveats, pointers to further tools/skills, optional
+execution-model or report-location overrides. A project with no live
+environments correctly skips this slot — `/omc:investigate` then refuses
+with instructions, which is the intended behavior.
 
 ### `.omc/hooks/post-watch.sh` (optional)
 The CLI-side sibling of the session skills: `omc watch` runs it after every
