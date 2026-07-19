@@ -45,6 +45,18 @@ def _push_remote_commit(origin, tmp_path):
     _git("push", "-q", "origin", "main", cwd=other)
 
 
+def _push_remote_edit(origin, tmp_path):
+    """Advance origin/main with an edit to f.txt (conflicts with local f.txt changes)."""
+    other = tmp_path / "other-edit"
+    subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+    _git("config", "user.email", "o@o", cwd=other)
+    _git("config", "user.name", "o", cwd=other)
+    (other / "f.txt").write_text("remote edit\n")
+    _git("add", ".", cwd=other)
+    _git("commit", "-qm", "remote edit", cwd=other)
+    _git("push", "-q", "origin", "main", cwd=other)
+
+
 def _ctx_with_node_stub(tmp_path, home):
     """Real git on PATH + a recording `node` stub + a fake built gitnexus CLI."""
     bindir = tmp_path / "bin"
@@ -64,12 +76,17 @@ def _ctx_with_node_stub(tmp_path, home):
     return ToolContext.from_env(env), calls
 
 
-def _run_once(repo, ctx, *, enable_documentation=False):
+def _run_once(repo, ctx, *, enable_documentation=False, rebase=False):
     old = os.getcwd()
     os.chdir(repo)
     try:
         return run_watch(
-            ctx, Config(), interval=1, once=True, enable_documentation=enable_documentation
+            ctx,
+            Config(),
+            interval=1,
+            once=True,
+            enable_documentation=enable_documentation,
+            rebase=rebase,
         )
     finally:
         os.chdir(old)
@@ -145,6 +162,160 @@ def test_tick_refuses_dirty_tree(tmp_path, capsys):
     assert _run_once(repo, ctx) == 0
     assert "dirty" in capsys.readouterr().err
     assert not calls.exists()
+
+
+def _tick_rebase(ctx, repo, last=None):
+    from omc.watch import _tick
+
+    return _tick(
+        ctx,
+        Config(),
+        str(repo),
+        enable_documentation=False,
+        force_refresh=False,
+        last=last,
+        rebase=True,
+    )
+
+
+def test_tick_rebase_syncs_dirty_tree(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    _push_remote_commit(origin, tmp_path)  # remote adds new.txt — no overlap with f.txt
+    (repo / "f.txt").write_text("uncommitted edit\n")
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _tick_rebase(ctx, repo) == "synced"
+    assert "rebased main" in capsys.readouterr().err
+    assert (repo / "new.txt").exists()  # sync actually happened
+    assert (repo / "f.txt").read_text() == "uncommitted edit\n"  # autostash restored the dirt
+    assert "analyze" in calls.read_text()  # action tick -> index refresh
+
+
+def test_tick_rebase_replays_local_commits(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    _push_remote_commit(origin, tmp_path)
+    (repo / "local.txt").write_text("local\n")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-qm", "local work", cwd=repo)  # diverged: ahead 1, behind 1
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _tick_rebase(ctx, repo) == "synced"
+    assert (repo / "new.txt").exists() and (repo / "local.txt").exists()
+    subjects = subprocess.run(
+        ["git", "log", "--format=%s", "-2"], cwd=repo, capture_output=True, text=True
+    ).stdout.splitlines()
+    assert subjects == ["local work", "remote change"]  # replayed ON TOP of origin/main
+
+
+def test_tick_rebase_conflict_aborts_and_restores(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    _push_remote_edit(origin, tmp_path)  # remote edits f.txt
+    (repo / "f.txt").write_text("conflicting local\n")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-qm", "local conflicting", cwd=repo)
+    (repo / "g.txt").write_text("dirt\n")
+    _git("add", "g.txt", cwd=repo)  # tracked dirt on top — must survive the abort
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout
+    assert _tick_rebase(ctx, repo) == "rebase-failed"
+    assert "aborted, checkout restored" in capsys.readouterr().err
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout
+    assert head_after == head_before  # abort restored HEAD
+    assert (repo / "g.txt").read_text() == "dirt\n"  # and the autostashed dirt
+    assert not calls.exists()  # no index refresh on failure
+
+
+def test_tick_rebase_autostash_conflict_warns_and_skips_refresh(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    _push_remote_edit(origin, tmp_path)  # remote edits f.txt
+    (repo / "f.txt").write_text("dirty conflicting edit\n")  # UNCOMMITTED same-file edit
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _tick_rebase(ctx, repo) == "autostash-conflict"
+    assert "safe in git stash" in capsys.readouterr().err
+    unmerged = subprocess.run(
+        ["git", "ls-files", "-u"], cwd=repo, capture_output=True, text=True
+    ).stdout
+    assert unmerged  # tree left with conflict markers to resolve
+    stashes = subprocess.run(
+        ["git", "stash", "list"], cwd=repo, capture_output=True, text=True
+    ).stdout
+    assert "autostash" in stashes  # changes parked in the stash too
+    assert not calls.exists()  # NOT an action tick — no index refresh
+
+
+def _push_remote_file(origin, tmp_path, name, content):
+    """Advance origin/main by ADDING a new file `name` (a teammate's push)."""
+    other = tmp_path / f"other-{name}"
+    subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+    _git("config", "user.email", "o@o", cwd=other)
+    _git("config", "user.name", "o", cwd=other)
+    (other / name).write_text(content)
+    _git("add", ".", cwd=other)
+    _git("commit", "-qm", f"remote adds {name}", cwd=other)
+    _git("push", "-q", "origin", "main", cwd=other)
+
+
+def test_tick_rebase_pre_start_refusal_quiets_and_leaves_untracked_file(tmp_path, capsys):
+    """Canonical pre-start refusal: remote adds a file that already exists
+    UNTRACKED locally. `git rebase --autostash` refuses before starting (exit
+    1, HEAD unmoved, no rebase in progress) so no abort is attempted; the tick
+    quiets to `rebase-failed` and the untracked content is untouched. A second
+    tick with last='rebase-failed' must narrate NOTHING (quiet-token)."""
+    origin, repo = _repo_with_origin(tmp_path)
+    _push_remote_file(origin, tmp_path, "collide.txt", "from remote\n")
+    (repo / "collide.txt").write_text("my untracked work\n")  # untracked, would be clobbered
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout
+    assert _tick_rebase(ctx, repo) == "rebase-failed"
+    err = capsys.readouterr().err
+    assert "refused before starting" in err  # not the misleading "aborted, checkout restored"
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout
+    assert head_after == head_before  # HEAD never moved
+    assert (repo / "collide.txt").read_text() == "my untracked work\n"  # untracked work untouched
+    assert not calls.exists()  # not an action tick — no analyze call
+    # Steady state: a second tick with the same token narrates NOTHING.
+    assert _tick_rebase(ctx, repo, last="rebase-failed") == "rebase-failed"
+    assert capsys.readouterr().err == ""
+
+
+def test_tick_rebase_conflicted_tree_skips_quietly(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    _push_remote_edit(origin, tmp_path)
+    (repo / "f.txt").write_text("dirty conflicting edit\n")
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _tick_rebase(ctx, repo) == "autostash-conflict"
+    _push_remote_commit(origin, tmp_path)  # behind again, tree still conflicted
+    capsys.readouterr()
+    assert _tick_rebase(ctx, repo, last="autostash-conflict") == "conflicted"
+    assert "unmerged paths" in capsys.readouterr().err  # token changed -> narrates once
+    assert _tick_rebase(ctx, repo, last="conflicted") == "conflicted"
+    assert capsys.readouterr().err == ""  # same token -> silent (quiet convention)
+
+
+def test_tick_rebase_clean_tree_still_syncs(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    _push_remote_commit(origin, tmp_path)
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _tick_rebase(ctx, repo) == "synced"
+    assert "rebased main" in capsys.readouterr().err
+    assert (repo / "new.txt").exists()  # rebase fast-forwards a clean checkout
+
+
+def test_watch_rebase_flag_threads_through(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    _push_remote_commit(origin, tmp_path)
+    (repo / "f.txt").write_text("uncommitted edit\n")
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx, rebase=True) == 0
+    assert "rebased main" in capsys.readouterr().err
+    assert (repo / "new.txt").exists()
+    assert (repo / "f.txt").read_text() == "uncommitted edit\n"
 
 
 def test_watch_requires_gitnexus_cli(tmp_path, capsys):

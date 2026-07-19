@@ -3,8 +3,10 @@
 Foreground polling loop (omc never creates daemons/launchd/cron). Each tick:
 fetch → ff-sync when safely possible → on new commits refresh the GitNexus
 index directly (zero LLM cost) and, only with --enable-documentation, the
-LLM-generated wiki. Never destructive: off-branch, dirty, or diverged
-checkouts are warned about and left alone.
+LLM-generated wiki. Never destructive by default: off-branch, dirty, or
+diverged checkouts are warned about and left alone — --rebase is the explicit
+opt-in past the dirty/diverged skips (autostash rebase; conflicts abort and
+restore); off-branch checkouts are never touched in any mode.
 """
 
 from __future__ import annotations
@@ -36,6 +38,20 @@ def _say(msg: str) -> None:
 def _out(ctx: ToolContext, argv: list[str], cwd: str) -> str:
     cp = ctx.run(argv, cwd=cwd)
     return (cp.stdout or "").strip() if cp.returncode == 0 else ""
+
+
+def _rebase_in_progress(ctx: ToolContext, root: str) -> bool:
+    """True only when git has an actual rebase checked out. `git rebase
+    --autostash` can REFUSE before starting (e.g. an untracked file the replay
+    would overwrite): it exits non-zero with HEAD still on the branch and no
+    rebase state, so a following `git rebase --abort` would just fail with
+    'no rebase in progress'. Detect the real thing via the state dirs git
+    itself uses (rebase-merge for the merge backend, rebase-apply for am)."""
+    for name in ("rebase-merge", "rebase-apply"):
+        p = _out(ctx, [ctx.git_bin, "rev-parse", "--git-path", name], root)
+        if p and (Path(root) / p).exists():
+            return True
+    return False
 
 
 def _decode(v: object) -> str:
@@ -223,11 +239,14 @@ def _tick(
     enable_documentation: bool,
     force_refresh: bool,
     last: str | None = None,
+    rebase: bool = False,
 ) -> str:
     """One tick; returns an outcome token. Repeatable QUIET outcomes (up to
-    date, off-branch, dirty, diverged, fetch-fail) narrate only when the
-    outcome CHANGED since the last tick — a 30s loop must not spam identical
-    lines. Action outcomes (sync, refresh) always narrate."""
+    date, off-branch, dirty, diverged, fetch-fail, conflicted, rebase-failed,
+    autostash-conflict) narrate only when the outcome CHANGED since the last
+    tick — a 30s loop must not spam identical lines. Action outcomes (sync,
+    refresh) always narrate. With rebase=True the dirty/diverged skips are
+    replaced by `git rebase --autostash` (the user's explicit opt-in)."""
     base = cfg.worktree.base_branch
 
     def quiet(token: str, msg: str) -> str:
@@ -257,6 +276,44 @@ def _tick(
             "up-to-date",
             f"· up to date — waiting for changes on origin/{base}",
         )
+    if rebase:
+        if _out(ctx, [ctx.git_bin, "ls-files", "-u"], root):
+            return quiet("conflicted", "· unmerged paths in the tree — resolve them, skipping sync")
+        old = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
+        cp = ctx.run([ctx.git_bin, "rebase", "--autostash", f"origin/{base}"], cwd=root)
+        if cp.returncode != 0:
+            why = (cp.stderr or "").strip()[:200]
+            if _rebase_in_progress(ctx, root):
+                # A rebase actually started then hit a conflict: abort restores
+                # HEAD and the autostash.
+                abort = ctx.run([ctx.git_bin, "rebase", "--abort"], cwd=root)
+                detail = (
+                    "aborted, checkout restored"
+                    if abort.returncode == 0
+                    else f"abort ALSO failed: {(abort.stderr or '').strip()[:200]}"
+                )
+            else:
+                # Refused before starting (canonical: an untracked local file the
+                # replay would overwrite) — HEAD never moved, nothing to abort.
+                detail = "refused before starting, checkout untouched"
+            return quiet(
+                "rebase-failed",
+                f"✗ rebase onto origin/{base} failed — {detail}; resolve manually"
+                + (f" ({why})" if why else ""),
+            )
+        # A conflicting autostash pop still exits 0: git rebases HEAD, leaves the
+        # tree with conflict markers AND keeps the changes in stash@{0}. The exit
+        # code cannot distinguish this from success — unmerged paths can.
+        if _out(ctx, [ctx.git_bin, "ls-files", "-u"], root):
+            return quiet(
+                "autostash-conflict",
+                "✗ rebased, but restoring your uncommitted changes conflicted — "
+                "resolve the markers; your changes are also safe in git stash",
+            )
+        new = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
+        _say(f"✓ rebased {base}: {old}..{new} ({behind} commits)")
+        _refresh_index(ctx, cfg, root, enable_documentation)
+        return "synced"
     if ahead not in ("", "0"):
         return quiet(
             "diverged",
@@ -285,6 +342,7 @@ def run_watch(
     once: bool = False,
     enable_documentation: bool = False,
     auto_build: bool = False,
+    rebase: bool = False,
 ) -> int:
     root = repo_root(ctx)
     if root is None:
@@ -322,6 +380,7 @@ def run_watch(
                 enable_documentation=enable_documentation,
                 force_refresh=once,
                 last=last,
+                rebase=rebase,
             )
             if last in ("synced", "refreshed"):
                 _post_watch_hook(ctx, root, last)
