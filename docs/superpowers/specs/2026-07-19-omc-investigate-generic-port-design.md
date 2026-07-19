@@ -80,9 +80,13 @@ with project specifics abstracted out:
 - **Intake** — extract a lead (ID, token, or scoped property + time-window);
   if material info is missing, one `AskUserQuestion` at a time; never fabricate
   hypotheses.
-- **Pre-flight context (orchestrator only)** — the generated GitNexus docs
-  under `.omc/docs/gitnexus/docs/` when present, design records where the
-  project's explain-context points; workers never do this.
+- **Pre-flight context (orchestrator only)** — preferably one `/omc:explain`
+  pass over the lead (black-box call; it composes the graph, generated docs,
+  and the project's explain-context), falling back to the generated GitNexus
+  docs under `.omc/docs/gitnexus/docs/` when explain is unavailable, design
+  records where the project's explain-context points; workers never do this.
+  Mid-loop "how does this code work" questions also go through
+  `/omc:explain`.
 - **One-sentence plan** before the first dispatch.
 - **Investigation loop** — the same digraph: decide next mission → local
   reasoning or worker dispatch → evidence-quoted finding → confident-next-step

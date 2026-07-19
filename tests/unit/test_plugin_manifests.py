@@ -185,6 +185,7 @@ def test_investigate_skill_contract():
         "standard coding tier",
         "environments the project defines",
         "/tmp/omc-investigations/",
+        "/omc:explain",
     ):
         assert needle in text, f"investigate missing {needle!r}"
     # required context hook: refusal, not graceful degradation
