@@ -104,12 +104,18 @@ hypotheses. If you don't know what the user is asking about, ask.
 
 ### 3. Pre-flight context gathering (orchestrator only)
 
-Before the first dispatch, read what you need *in the main thread*: the
-generated GitNexus docs under `.omc/docs/gitnexus/docs/` when present
+Before the first dispatch, ground yourself in the implicated code *in the
+main thread* — preferably with one `/omc:explain` pass ("which parts of this
+codebase are relevant to: <the symptom/lead>?"), called as a command, never
+unpacked: it composes the project's knowledge graph, generated docs, and its
+own explain-context. When explain is unavailable (no index), fall back to
+reading the generated GitNexus docs under `.omc/docs/gitnexus/docs/` directly
 (skip silently when absent), design records where the project's
 explain-context points, specific source files only when the docs point at
 them. Workers never do this — the orchestrator is the only thing that
-synthesizes against code.
+synthesizes against code. During the loop, further `/omc:explain` calls are
+the preferred way to answer "how does this code work" questions a finding
+raises.
 
 ### 4. State the plan in one sentence
 
