@@ -52,6 +52,17 @@ per-subagent models, proceed on the session model — never substitute a
 cheaper tier. Plans missing `Model:` lines fall back to the behavior
 layer's model-tier policy directly.
 
+Pass this directive to subagent-driven-development verbatim: "After each
+task's review passes, dispatch one additional reviewer: the code-quality
+reviewer, built from `quality-reviewer.md` (alongside this skill file), on
+the **top tier** — never scaled down by diff size. Reuse the task's
+existing review package as `[DIFF_FILE]`. Critical/Important findings go
+through the same fix-subagent → re-review loop as task-review findings;
+the task is not complete until the quality reviewer reports
+`Quality: Approved`. Minor findings are recorded in the progress ledger,
+not fixed inline. After 2 fix rounds still `Needs fixes` → stop and
+surface the findings to the user rather than looping."
+
 Phase 2 → 3 is NOT a gate: once the plan is written and pressure-tested,
 start the subagent build immediately. Do not ask which execution approach
 to use (writing-plans offers a choice; this conductor has already made it)
