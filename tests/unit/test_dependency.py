@@ -444,6 +444,28 @@ def test_document_wiki_nonzero_rc_keeps_documented_false(tmp_path, capsys):
     assert entry["documented"] is False
 
 
+def test_document_ignores_session_model_uses_docs_floor(tmp_path, capsys):
+    # The SESSION model (providers.claude.model) must never reach wiki; with
+    # docs_model unset the standard-coding-tier floor is passed explicitly.
+    from omc.config import store
+    from omc.config.schema import GlobalConfig, LLMConfig, ProviderConfig
+
+    ctx, _, nodecalls = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    store.save_global(
+        ctx.home,
+        GlobalConfig(
+            llm=LLMConfig(
+                default="claude", providers={"claude": ProviderConfig(model="claude-fable-5")}
+            )
+        ),
+    )
+    assert run_document(ctx, "github.com/foo/bar") == 0
+    log = nodecalls.read_text()
+    assert "--model claude-sonnet-5" in log
+    assert "claude-fable-5" not in log
+
+
 def test_document_passes_model_when_configured(tmp_path, capsys):
     from omc.config import store
     from omc.config.schema import GlobalConfig, LLMConfig, ProviderConfig
@@ -453,7 +475,9 @@ def test_document_passes_model_when_configured(tmp_path, capsys):
     store.save_global(
         ctx.home,
         GlobalConfig(
-            llm=LLMConfig(default="claude", providers={"claude": ProviderConfig(model="opus-x")})
+            llm=LLMConfig(
+                default="claude", providers={"claude": ProviderConfig(docs_model="opus-x")}
+            )
         ),
     )
     assert run_document(ctx, "github.com/foo/bar") == 0

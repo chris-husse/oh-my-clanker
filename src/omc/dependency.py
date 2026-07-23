@@ -303,10 +303,13 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
         print("error: omc is not configured — run `omc configure` first.", file=sys.stderr)
         return 1
     name = cfg.llm.default
-    pcfg = cfg.llm.providers.get(name)
     wiki_args = ["wiki", "--provider", name]
-    if pcfg and pcfg.model:
-        wiki_args += ["--model", pcfg.model]
+    # Docs model, never the session model (see watch._refresh_index rationale).
+    from .providers.registry import docs_model_for
+
+    docs_model = docs_model_for(cfg, name)
+    if docs_model:
+        wiki_args += ["--model", docs_model]
     cp = ctx.run(gitnexus_argv(ctx, *wiki_args), cwd=dest)
     wiki = dest / ".gitnexus" / "wiki"
     if cp.returncode != 0 or not wiki.is_dir():

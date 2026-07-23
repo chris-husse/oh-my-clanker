@@ -27,7 +27,7 @@ from .config.schema import Config
 from .errors import OmcError
 from .gitnexus import ANALYZE_ARGS, gitnexus_argv, gitnexus_cli
 from .mirror import mirror_dir
-from .providers.registry import get_provider
+from .providers.registry import docs_model_for, get_provider
 from .skills_source import skill_prompt
 from .toolctx import ToolContext
 from .wtconfig import ensure_wt_config, primary_root, repo_root
@@ -248,10 +248,12 @@ def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentatio
     if not enable_documentation:
         return
     name = cfg.llm.default
-    pcfg = cfg.llm.providers.get(name)
     wiki_args = ["wiki", "--provider", name]
-    if pcfg and pcfg.model:
-        wiki_args += ["--model", pcfg.model]
+    # Docs model, never the session model: wiki is bulk grounded summarization
+    # and a thinking-heavy session model turns it into an hours-long silent run.
+    docs_model = docs_model_for(cfg, name)
+    if docs_model:
+        wiki_args += ["--model", docs_model]
     _say(f"→ regenerating documentation via {name} (LLM-heavy)")
     cp = ctx.run(gitnexus_argv(ctx, *wiki_args), cwd=root)
     if cp.returncode != 0:

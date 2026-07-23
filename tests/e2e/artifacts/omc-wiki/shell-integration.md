@@ -68,6 +68,7 @@ Detected on `basename($SHELL) == "fish"`. Fish needs no init file at all — eve
 ```python
 _SHELLS: tuple[type[Shell], ...] = (FishShell, ZshShell, BashShell)
 
+
 def detect_shell(env: Mapping[str, str]) -> Shell:
     for cls in _SHELLS:
         if cls.detect(env):

@@ -122,9 +122,9 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
     head, _, tail = dotted.partition(".")
     if isinstance(cfg, LLMConfig) and head == "providers":
         name, _, leaf = tail.partition(".")
-        if leaf != "model":
+        if leaf not in ("model", "docs_model"):
             raise ConfigError(f"unknown config key: providers.{tail}")
-        cfg.providers.setdefault(name, ProviderConfig()).model = value
+        setattr(cfg.providers.setdefault(name, ProviderConfig()), leaf, value)
         return
     if isinstance(cfg, NotificationsConfig):
         # set_key values arrive as strings; enabled is a bool ("true" would be

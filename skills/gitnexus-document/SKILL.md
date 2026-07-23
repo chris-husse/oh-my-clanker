@@ -18,11 +18,19 @@ Determine the provider: omc's configured default (`llm.default` in
 providers include `claude`, `codex`, and `opencode` natively — it drives the
 LOCAL agent CLI, so this uses the same auth omc already requires. Pass the
 provider EXPLICITLY (never fall through to gitnexus's `openai` default, which
-needs credentials the user may not have); add `--model` only when omc config
-sets one for that provider:
+needs credentials the user may not have).
+
+The model is the DOCS model — `llm.providers.<provider>.docs_model` in
+`~/.omc/config.yaml` — NEVER the session model (`…providers.<provider>.model`):
+wiki generation is bulk grounded summarization, and a thinking-heavy session
+model turns it into an hours-long silent run. When `docs_model` is unset, use
+the provider's docs floor: `claude-sonnet-5` for claude (pass it explicitly —
+gitnexus caches models in its own config and a stale choice would otherwise
+resurrect); for codex/opencode omit `--model` (their CLI default is the
+coding model):
 
 ```sh
-node <CLI> wiki --provider <omc default provider> [--model <configured model>]
+node <CLI> wiki --provider <omc default provider> [--model <docs model>]
 ```
 
 Run it from the primary root. This is LLM-driven and can take a while on a

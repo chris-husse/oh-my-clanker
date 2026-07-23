@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 @dataclass
 class ProviderConfig:
     model: str = ""  # blank = provider default
+    # Model for documentation/wiki generation (bulk grounded summarization).
+    # Blank = the provider's docs default — the standard-coding-tier floor —
+    # NEVER the session model above (a thinking-heavy session model makes
+    # hours-long silent wiki runs; see 2026-07-23 docs-model spec).
+    docs_model: str = ""
 
 
 @dataclass

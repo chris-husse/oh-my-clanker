@@ -20,3 +20,11 @@ def get_provider(name: str) -> Provider:
         return _PROVIDERS[name]
     except KeyError:
         raise OmcError(f"unknown provider {name!r}; known: {', '.join(_PROVIDERS)}") from None
+
+
+def docs_model_for(cfg, name: str) -> str:
+    """Model for documentation/wiki runs: the user's docs_model, else the
+    provider's docs default (standard-coding-tier floor). The session model
+    (ProviderConfig.model) is deliberately never consulted here."""
+    pcfg = cfg.llm.providers.get(name)
+    return (pcfg.docs_model if pcfg else "") or get_provider(name).docs_model_default()
