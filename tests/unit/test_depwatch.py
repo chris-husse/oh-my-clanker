@@ -54,7 +54,11 @@ def test_tick_ensures_unindexed(tmp_path):
     assert run_dependency_watch(ctx, once=True) == 0
     logged = calls.read_text()
     assert f"internal dependency ensure --git https://github.com/foo/bar.git --commit {H}" in logged
-    assert "document" not in logged  # documentation waits for the NEXT tick's fresh manifest
+    # The stub never flips `indexed`, so the drain's re-scan sees the same
+    # unindexed entry, skips it (already attempted this pass) and never
+    # reaches document — and the pass must not spin on the retry either.
+    assert "document" not in logged
+    assert logged.count("internal dependency ensure") == 1
 
 
 def test_tick_quiet_when_reconciled(tmp_path):
@@ -187,8 +191,125 @@ def test_tick_survives_oserror_during_scan(tmp_path):
     )
 
 
-def test_cli_parser_accepts_dependency_watch():
+def _stateful_ctx(tmp_path):
+    """ToolContext whose `omc` stub actually mutates the manifest the way the
+    real internal subcommands would: ensure -> indexed:true, document ->
+    documented:true. Proves the drain reaches completion in ONE pass."""
+    import shutil
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = bindir / "omc.calls"
+    home = tmp_path / "omc-home"
+    home.mkdir()
+    python = shutil.which("python3")
+    flip = (
+        "import json,sys\n"
+        f"p = {str(home / 'dependencies.json')!r}\n"
+        "d = json.load(open(p))\n"
+        "field = sys.argv[1]\n"
+        "for dep in d['dependencies'].values():\n"
+        "    for entry in dep['commits'].values():\n"
+        "        entry[field] = True\n"
+        "json.dump(d, open(p, 'w'))\n"
+    )
+    script = bindir / "flip.py"
+    script.write_text(flip)
+    omc = bindir / "omc"
+    omc.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{calls}"\n'
+        'case "$3" in\n'
+        f'  ensure) "{python}" "{script}" indexed ;;\n'
+        f'  document) "{python}" "{script}" documented ;;\n'
+        "esac\nexit 0\n"
+    )
+    omc.chmod(omc.stat().st_mode | stat.S_IXUSR)
+    env = {"HOME": str(tmp_path), "PATH": f"{bindir}:{os.environ['PATH']}"}
+    return ToolContext(home=home, env=env), calls
+
+
+def test_once_pass_drains_to_completion_and_announces(tmp_path, capsys):
+    ctx, calls = _stateful_ctx(tmp_path)
+    _seed_manifest(ctx.home, indexed=False, documented=False)
+    assert run_dependency_watch(ctx, once=True) == 0
+    logged = calls.read_text()
+    # one pass covers BOTH steps: ensure, then (fresh manifest) document
+    assert f"internal dependency ensure --git https://github.com/foo/bar.git --commit {H}" in logged
+    assert f"internal dependency document --git github.com/foo/bar@{H}" in logged
+    err = capsys.readouterr().err
+    assert "Finished documenting all dependencies!" in err
+    assert "(1 dependency, 1 commit)" in err
+
+
+def test_once_pass_reports_pending_not_finished_on_failure(tmp_path, capsys):
+    # The no-op stub never flips `documented`, so the pass ends with work
+    # remaining: say so plainly, never claim completion, and don't spin.
+    ctx, calls = _ctx(tmp_path)
+    _seed_manifest(ctx.home, indexed=True, documented=False)
+    assert run_dependency_watch(ctx, once=True) == 0
+    assert calls.read_text().count("internal dependency document") == 1
+    err = capsys.readouterr().err
+    assert "still pending" in err
+    assert "Finished documenting" not in err
+
+
+def test_dependency_list_prints_status_table(tmp_path, capsys):
+    from omc.depwatch import run_dependency_list
+
+    ctx, _ = _ctx(tmp_path)
+    _seed_manifest(ctx.home, indexed=True, documented=False)
+    assert run_dependency_list(ctx.home) == 0
+    out = capsys.readouterr().out
+    assert "DEPENDENCY" in out and "COMMIT" in out  # header
+    assert "github.com/foo/bar" in out
+    assert H[:7] in out
+    assert "✓" in out and "✗" in out  # indexed yes, documented no
+
+
+def test_dependency_list_empty_manifest_is_friendly(tmp_path, capsys):
+    from omc.depwatch import run_dependency_list
+
+    ctx, _ = _ctx(tmp_path)
+    assert run_dependency_list(ctx.home) == 0
+    out = capsys.readouterr().out
+    assert "no dependencies" in out.lower()
+
+
+def test_cli_parser_dependency_group():
+    import pytest
+
     from omc.cli import build_parser
 
-    args = build_parser().parse_args(["dependency-watch", "--once", "--interval", "5"])
-    assert args.command == "dependency-watch" and args.once and args.interval == 5
+    args = build_parser().parse_args(["dependency", "watch", "--once", "--interval", "5"])
+    assert args.command == "dependency" and args.dep_command == "watch"
+    assert args.once and args.interval == 5
+    args = build_parser().parse_args(["dependency", "list"])
+    assert args.dep_command == "list"
+    with pytest.raises(SystemExit):  # the old top-level spelling is gone
+        build_parser().parse_args(["dependency-watch", "--once"])
+
+
+def test_cli_bare_dependency_is_usage_error(tmp_path, monkeypatch, capsys):
+    from omc.cli import main
+
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "home"))
+    assert main(["dependency"]) == 2
+
+
+def test_failed_adoption_never_claims_finished(tmp_path, capsys):
+    # The no-op stub's ensure leaves the manifest empty, so the pass's only
+    # "action" produced nothing adopted — the announcement must say pending,
+    # not "Finished documenting all dependencies! (0 dependencies, …)".
+    ctx, calls = _ctx(tmp_path)
+    dest = ctx.home / "dependencies" / "github.com" / "baz" / "qux" / H
+    dest.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(dest)], check=True)
+    subprocess.run(
+        ["git", "-C", str(dest), "remote", "add", "origin", "https://github.com/baz/qux.git"],
+        check=True,
+    )
+    assert run_dependency_watch(ctx, once=True) == 0
+    err = capsys.readouterr().err
+    assert "still pending" in err
+    assert "Finished documenting" not in err

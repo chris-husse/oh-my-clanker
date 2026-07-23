@@ -1,10 +1,16 @@
-"""`omc dependency-watch` — keep ~/.omc dependency indexes + docs reconciled.
+"""`omc dependency` (watch/list) — the ~/.omc dependency cache, human side.
 
-Foreground polling loop like watch.py (omc never creates daemons). Each tick
-reconciles manifest <-> disk and delegates EVERY mutation to an
-`omc internal dependency …` subprocess — the loop only scans and schedules
-(which is exactly what the unit tests assert). Runs from anywhere: it
-operates on ~/.omc, not on a project checkout.
+`watch`: foreground polling loop like watch.py (omc never creates daemons).
+Each pass DRAINS: ticks re-run back-to-back until a scan finds no new work
+(an attempted-set caps every action at once per pass, so failures cannot
+spin), then the pass announces plainly — "Finished documenting all
+dependencies!" or how many items are still pending. Every mutation is
+delegated to an `omc internal dependency …` subprocess — the loop only scans
+and schedules (which is exactly what the unit tests assert). Runs from
+anywhere: it operates on ~/.omc, not on a project checkout.
+
+`list`: read-only status table of the manifest (repo, commit, indexed,
+documented) on stdout.
 """
 
 from __future__ import annotations
@@ -76,8 +82,12 @@ def _spawn(ctx: ToolContext, argv: list[str]) -> None:
         _say("✓ done")
 
 
-def _tick(ctx: ToolContext) -> int:
-    """One reconciliation pass; returns the number of actions taken."""
+def _tick(ctx: ToolContext, attempted: set[tuple[str, str]]) -> int:
+    """One reconciliation scan; returns the number of NEW actions taken.
+
+    ``attempted`` caps every action at once per pass: a spawned action is
+    recorded (success or not) and skipped on the pass's next scan, so a
+    drain terminates even when an action fails or changes nothing."""
     try:
         manifest = load_manifest(ctx.home)
     except OmcError as exc:
@@ -89,7 +99,7 @@ def _tick(ctx: ToolContext) -> int:
     }
     actions = 0
     for checkout in _scan_disk(ctx.home):
-        if str(checkout) in known:
+        if str(checkout) in known or ("adopt", str(checkout)) in attempted:
             continue
         cp = ctx.run([ctx.git_bin, "-C", str(checkout), "remote", "get-url", "origin"])
         url = (cp.stdout or "").strip()
@@ -105,6 +115,7 @@ def _tick(ctx: ToolContext) -> int:
         except OmcError as exc:
             _say(f"· cannot adopt {checkout} — {exc}; skipping")
             continue
+        attempted.add(("adopt", str(checkout)))
         _spawn(
             ctx,
             [
@@ -122,12 +133,15 @@ def _tick(ctx: ToolContext) -> int:
     for key, dep in sorted(deps.items()):
         for commit, entry in dep.get("commits", {}).items():
             if not entry.get("indexed"):
+                if ("ensure", f"{key}@{commit}") in attempted:
+                    continue
                 # Warn-and-skip a malformed entry rather than KeyError out of the
                 # loop (watch.py _chain_tick doctrine: warn and skip, never crash).
                 url = dep.get("url")
                 if not url:
                     _say(f"· {key}@{commit} has no url in the manifest; skipping")
                     continue
+                attempted.add(("ensure", f"{key}@{commit}"))
                 _spawn(
                     ctx,
                     [
@@ -143,12 +157,57 @@ def _tick(ctx: ToolContext) -> int:
                 )
                 actions += 1
             elif not entry.get("documented"):
+                if ("document", f"{key}@{commit}") in attempted:
+                    continue
+                attempted.add(("document", f"{key}@{commit}"))
                 _spawn(
                     ctx,
                     ["omc", "internal", "dependency", "document", "--git", f"{key}@{commit}"],
                 )
                 actions += 1
     return actions
+
+
+def _manifest_status(home: Path) -> tuple[int, int, int]:
+    """(dependencies, commits, remaining). Remaining counts manifest commit
+    entries not yet indexed AND documented, plus disk checkouts the manifest
+    doesn't know (a failed adoption must not read as completion)."""
+    try:
+        deps = load_manifest(home).get("dependencies", {})
+    except OmcError:
+        return 0, 0, 0
+    commits = [e for dep in deps.values() for e in dep.get("commits", {}).values()]
+    remaining = sum(1 for e in commits if not (e.get("indexed") and e.get("documented")))
+    known = {e.get("checkout") for e in commits}
+    remaining += sum(1 for checkout in _scan_disk(home) if str(checkout) not in known)
+    return len(deps), len(commits), remaining
+
+
+def _pass(ctx: ToolContext, *, once: bool) -> int:
+    """Drain: re-tick immediately until a scan finds no new work, then say
+    where things stand. Returns the number of actions the pass took."""
+    attempted: set[tuple[str, str]] = set()
+    total = 0
+    while True:
+        actions = _tick(ctx, attempted)
+        total += actions
+        if actions == 0:
+            break
+    if total:
+        ndeps, ncommits, remaining = _manifest_status(ctx.home)
+        if remaining == 0:
+            dep_word = "dependency" if ndeps == 1 else "dependencies"
+            commit_word = "commit" if ncommits == 1 else "commits"
+            _say(
+                "✓ Finished documenting all dependencies! "
+                f"({ndeps} {dep_word}, {ncommits} {commit_word})"
+            )
+        else:
+            retry = "re-run to retry" if once else "retrying next tick"
+            _say(
+                f"· pass complete — {remaining} item(s) still pending (see ✗ lines above); {retry}"
+            )
+    return total
 
 
 def run_dependency_watch(ctx: ToolContext, *, interval: int = 30, once: bool = False) -> int:
@@ -160,7 +219,7 @@ def run_dependency_watch(ctx: ToolContext, *, interval: int = 30, once: bool = F
     last_idle = False
     try:
         while True:
-            actions = _tick(ctx)
+            actions = _pass(ctx, once=once)
             if actions == 0:
                 if not last_idle:
                     _say("· all dependencies reconciled — waiting for work")
@@ -173,3 +232,32 @@ def run_dependency_watch(ctx: ToolContext, *, interval: int = 30, once: bool = F
     except KeyboardInterrupt:
         _say("· stopped")
         return 0
+
+
+def run_dependency_list(home: Path) -> int:
+    """`omc dependency list` — human status table on stdout (read-only)."""
+    try:
+        deps = load_manifest(home).get("dependencies", {})
+    except OmcError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    rows = [
+        (
+            key,
+            commit[:7],
+            entry.get("ref") or "-",
+            "✓" if entry.get("indexed") else "✗",
+            "✓" if entry.get("documented") else "✗",
+            (entry.get("created") or "")[:10] or "-",
+        )
+        for key, dep in sorted(deps.items())
+        for commit, entry in sorted(dep.get("commits", {}).items())
+    ]
+    if not rows:
+        print("no dependencies cached yet — /omc:explain-dependency <name> <question> indexes one")
+        return 0
+    header = ("DEPENDENCY", "COMMIT", "REF", "INDEXED", "DOCUMENTED", "CREATED")
+    widths = [max(len(header[i]), *(len(r[i]) for r in rows)) for i in range(len(header))]
+    for row in (header, *rows):
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+    return 0
