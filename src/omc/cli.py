@@ -44,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the plan; no worktree/session created (still ensures the agents chain)",
     )
     p_start.add_argument("--headless", action="store_true", help="Print-mode session (no exec)")
+    p_start.add_argument(
+        "--no-mutex",
+        action="store_true",
+        help="Do not wait for an in-flight `omc watch` update before creating the worktree",
+    )
 
     p_watch = sub.add_parser(
         "watch", help="Keep the primary checkout's base branch + knowledge graph fresh"
@@ -65,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Sync via 'git rebase --autostash' — syncs even dirty or diverged "
         "checkouts (opt-out of warn-and-skip)",
+    )
+    p_watch.add_argument(
+        "--clear-mutex",
+        action="store_true",
+        help="Remove a leftover watch mutex and run anyway (bypasses the single-instance guard)",
     )
 
     p_dep = sub.add_parser(
@@ -140,7 +150,14 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
         cfg = _load_cfg_or_bail(ctx)
         if cfg is None:
             return 2
-        return run_start(ctx, cfg, args.context, dry_run=args.dry_run, headless=args.headless)
+        return run_start(
+            ctx,
+            cfg,
+            args.context,
+            dry_run=args.dry_run,
+            headless=args.headless,
+            no_mutex=args.no_mutex,
+        )
     if args.command == "watch":
         cfg = _load_cfg_or_bail(ctx)
         if cfg is None:
@@ -155,6 +172,7 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             enable_documentation=args.enable_documentation,
             auto_build=args.auto_build,
             rebase=args.rebase,
+            clear_mutex=args.clear_mutex,
         )
     if args.command == "dependency":
         if args.dep_command == "watch":

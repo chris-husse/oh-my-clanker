@@ -726,3 +726,67 @@ def test_hook_announces_log_path_up_front(tmp_path, capsys):
     )
     assert m, f"hook start line lacks log path:\n{err}"
     assert Path(m.group(1)).is_file()
+
+
+def test_busy_lock_held_while_hook_runs_and_instance_held_while_idle(tmp_path, capsys):
+    origin, repo = _repo_with_origin(tmp_path)
+    _push_remote_commit(origin, tmp_path)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    busy_path = repo / ".git" / "omc-watch-busy.lock"
+    instance_path = repo / ".git" / "omc-watch.lock"
+    probe_out = tmp_path / "probe.out"
+    hook = repo / ".omc" / "hooks" / "post-watch.sh"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    # the hook runs INSIDE the busy window: probe both locks from there
+    hook.write_text(
+        "#!/bin/bash\n"
+        f'python3 -c "\n'
+        f"import fcntl\n"
+        f"out = open('{probe_out}', 'w')\n"
+        f"for p in ('{busy_path}', '{instance_path}'):\n"
+        f"    f = open(p, 'a')\n"
+        f"    try:\n"
+        f"        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        f"        out.write('free\\n')\n"
+        f"    except OSError:\n"
+        f"        out.write('locked\\n')\n"
+        f'"\n'
+    )
+    rc = _run_once(repo, ctx)
+    assert rc == 0
+    assert probe_out.read_text() == "locked\nlocked\n"  # busy AND instance held mid-hook
+
+
+def test_busy_lock_free_but_instance_held_during_idle_sleep(tmp_path, capsys):
+    from ._mutexproc import flock_free
+
+    _, repo = _repo_with_origin(tmp_path)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    seen = {}
+
+    def between(i):
+        # fake_sleep runs BETWEEN ticks — the idle window
+        seen["busy_free"] = flock_free(repo / ".git" / "omc-watch-busy.lock")
+        seen["instance_free"] = flock_free(repo / ".git" / "omc-watch.lock")
+
+    rc = _run_loop(repo, ctx, ticks=1, between=between)
+    assert rc == 0
+    assert seen == {"busy_free": True, "instance_free": False}
+
+
+def test_instance_lock_released_after_clean_stop(tmp_path, capsys):
+    from ._mutexproc import flock_free
+
+    _, repo = _repo_with_origin(tmp_path)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_loop(repo, ctx, ticks=1) == 0  # KeyboardInterrupt path
+    assert flock_free(repo / ".git" / "omc-watch.lock")
+    assert flock_free(repo / ".git" / "omc-watch-busy.lock")
+
+
+def test_watch_clear_mutex_flag_parses():
+    from omc.cli import build_parser
+
+    args = build_parser().parse_args(["watch", "--clear-mutex"])
+    assert args.clear_mutex is True
+    assert build_parser().parse_args(["watch"]).clear_mutex is False
