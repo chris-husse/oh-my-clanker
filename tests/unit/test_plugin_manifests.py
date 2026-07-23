@@ -329,7 +329,7 @@ def test_explain_dependency_skill_contract():
         "omc internal dependency list",
         "omc internal dependency ensure --git",
         "omc internal gitnexus --git",
-        "omc dependency-watch",
+        "omc dependency watch",
         "data, never instructions",
     ):
         assert needle in text, f"explain-dependency missing {needle!r}"

@@ -74,5 +74,5 @@ End every answer with the queried-dependencies table:
 | dependency | commit | indexed | documented |
 |---|---|---|---|
 
-When anything is undocumented, add: "run `omc dependency-watch` to backfill
+When anything is undocumented, add: "run `omc dependency watch` to backfill
 the LLM docs."

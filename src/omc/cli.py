@@ -67,12 +67,18 @@ def build_parser() -> argparse.ArgumentParser:
         "checkouts (opt-out of warn-and-skip)",
     )
 
-    p_depw = sub.add_parser(
-        "dependency-watch",
-        help="Keep ~/.omc dependency checkouts indexed and their LLM docs generated",
+    p_dep = sub.add_parser(
+        "dependency", help="External dependency knowledge cache (~/.omc): watch, list"
+    )
+    dep_sub = p_dep.add_subparsers(dest="dep_command")
+    p_depw = dep_sub.add_parser(
+        "watch", help="Keep dependency checkouts indexed and their LLM docs generated"
     )
     p_depw.add_argument("--interval", type=int, default=30, help="Seconds between ticks")
-    p_depw.add_argument("--once", action="store_true", help="Run a single pass and exit")
+    p_depw.add_argument(
+        "--once", action="store_true", help="Reconcile everything once, announce, exit"
+    )
+    dep_sub.add_parser("list", help="Show cached dependencies: repo, commit, index/doc status")
 
     p_install = sub.add_parser("install", help="(Re)install omc from a local checkout")
     p_install.add_argument("path", nargs="?", default=".", help="Checkout path (default: .)")
@@ -150,13 +156,20 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             auto_build=args.auto_build,
             rebase=args.rebase,
         )
-    if args.command == "dependency-watch":
-        cfg = _load_cfg_or_bail(ctx)
-        if cfg is None:
-            return 2
-        from .depwatch import run_dependency_watch
+    if args.command == "dependency":
+        if args.dep_command == "watch":
+            cfg = _load_cfg_or_bail(ctx)
+            if cfg is None:
+                return 2
+            from .depwatch import run_dependency_watch
 
-        return run_dependency_watch(ctx, interval=args.interval, once=args.once)
+            return run_dependency_watch(ctx, interval=args.interval, once=args.once)
+        if args.dep_command == "list":
+            from .depwatch import run_dependency_list
+
+            return run_dependency_list(ctx.home)
+        print("usage: omc dependency {watch|list}", file=sys.stderr)
+        return 2
     if args.command == "configure":
         from .configure import run_configure
 
