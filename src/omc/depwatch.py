@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .dependency import load_manifest, parse_git_url
@@ -25,6 +26,11 @@ from .errors import OmcError
 from .toolctx import ToolContext
 
 _HASH_DIR = re.compile(r"\A[0-9a-f]{40}\Z")
+
+# Wiki generation dominates wall-clock; document up to this many dependencies
+# concurrently. The manifest stays consistent under this: every writer goes
+# through dependency.update_manifest's flock.
+_DOCUMENT_JOBS = 8
 
 
 def _say(msg: str) -> None:
@@ -98,6 +104,7 @@ def _tick(ctx: ToolContext, attempted: set[tuple[str, str]]) -> int:
         entry.get("checkout") for dep in deps.values() for entry in dep.get("commits", {}).values()
     }
     actions = 0
+    documents: list[str] = []
     for checkout in _scan_disk(ctx.home):
         if str(checkout) in known or ("adopt", str(checkout)) in attempted:
             continue
@@ -160,12 +167,25 @@ def _tick(ctx: ToolContext, attempted: set[tuple[str, str]]) -> int:
                 if ("document", f"{key}@{commit}") in attempted:
                     continue
                 attempted.add(("document", f"{key}@{commit}"))
-                _spawn(
-                    ctx,
-                    ["omc", "internal", "dependency", "document", "--git", f"{key}@{commit}"],
-                )
-                actions += 1
+                documents.append(f"{key}@{commit}")
+    actions += _document_batch(ctx, documents)
     return actions
+
+
+def _document_batch(ctx: ToolContext, refs: list[str]) -> int:
+    """Run the tick's document actions, up to _DOCUMENT_JOBS concurrently.
+    Threads only wait on subprocesses; narration interleaves but per-line."""
+    if not refs:
+        return 0
+    if len(refs) > 1:
+        _say(f"→ documenting {len(refs)} dependencies (up to {_DOCUMENT_JOBS} in parallel)")
+
+    def _document(ref: str) -> None:
+        _spawn(ctx, ["omc", "internal", "dependency", "document", "--git", ref])
+
+    with ThreadPoolExecutor(max_workers=min(_DOCUMENT_JOBS, len(refs))) as pool:
+        list(pool.map(_document, refs))
+    return len(refs)
 
 
 def _manifest_status(home: Path) -> tuple[int, int, int]:

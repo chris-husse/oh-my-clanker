@@ -483,3 +483,26 @@ def test_document_passes_model_when_configured(tmp_path, capsys):
     assert run_document(ctx, "github.com/foo/bar") == 0
     log = nodecalls.read_text()
     assert "wiki --provider claude --model opus-x" in log
+
+
+def test_update_manifest_locked_read_modify_write(tmp_path):
+    # Two writers hammering the same manifest must not lose updates — a lost
+    # documented:true re-runs an entire LLM wiki (parallel-document spec).
+    from concurrent.futures import ThreadPoolExecutor
+
+    from omc.dependency import load_manifest, update_manifest
+
+    home = tmp_path / "omc-home"
+    home.mkdir()
+
+    def add_keys(prefix):
+        for i in range(25):
+
+            def mutate(m, key=f"github.com/{prefix}/repo{i}"):
+                m["dependencies"][key] = {"url": "u", "commits": {}}
+
+            update_manifest(home, mutate)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(add_keys, ["a", "b"]))
+    assert len(load_manifest(home)["dependencies"]) == 50
