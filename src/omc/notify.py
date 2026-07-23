@@ -7,6 +7,8 @@ Detection is per-harness — providers DESCRIBE their wiring
 dispatches on `notifications.backend` ("macos" → osascript;
 "file://<abs path>" → one tab-separated line, tail-friendly). Invariant:
 notifications never break work — failures warn at most; the sink exits 0.
+Providers whose harness posts its own desktop notification (claude) skip
+the macos backend — file backends always log.
 """
 
 from __future__ import annotations
@@ -22,7 +24,8 @@ from pathlib import Path
 
 from .config import store
 from .config.schema import GlobalConfig
-from .errors import ConfigError
+from .errors import ConfigError, OmcError
+from .providers.registry import get_provider
 from .toolctx import ToolContext
 
 GENERIC_BODY = "needs your attention"
@@ -42,9 +45,21 @@ def deliver(
     slug = ctx.env.get("OMC_SLUG") or Path(cwd).resolve().name
     backend = cfg.notifications.backend
     if backend == "macos":
-        _deliver_macos(ctx, slug, body)
+        if not _notifies_natively(provider):
+            _deliver_macos(ctx, slug, body)
     elif backend.startswith("file://"):
         _deliver_file(Path(backend[len("file://") :]), slug, provider, event, body)
+
+
+def _notifies_natively(provider_name: str) -> bool:
+    """macos-backend suppression check: a harness that posts its own clickable
+    desktop notification (claude) makes omc's osascript ping a duplicate.
+    Unknown names (production is argparse-guarded; tests call deliver directly)
+    count as not-native — deliver rather than drop."""
+    try:
+        return get_provider(provider_name).notifies_natively()
+    except OmcError:
+        return False
 
 
 def _applescript_str(s: str) -> str:
