@@ -7,7 +7,10 @@ description: Lifecycle conductor from converged design to pushed branch - spec (
 
 Typed during/after brainstorming, when the design has converged and is
 ready to become a spec. Four phases, strictly in order; each phase is a
-black-box command call. All existing human gates stay interactive.
+black-box command call. /omc:implement IS the user's approval to carry the
+converged design all the way to a pushed branch: do not ask permission
+between phases. The only interactive stops are CRITICAL spec findings
+(see Phase 1) and genuine blockers.
 
 ## Phase 0 — resume check
 
@@ -21,8 +24,16 @@ spec over.
 ## Phase 1 — spec
 
 Invoke the internal `spec` skill. It writes the design doc, hardens it
-section by section with /omc:explain, and ends at the user spec-review
-gate.
+section by section with /omc:explain, and commits it.
+
+Phase 1 → 2 is NOT a gate. After the spec is committed, post a short
+summary of what hardening found and continue straight into the plan
+phase. Stop for the user ONLY if hardening surfaced a CRITICAL issue —
+something that invalidates part of the converged design or forces an
+architectural decision the brainstorm never settled. Cosmetic findings,
+small fixes folded into the spec, and verification notes are not
+critical; mention them in the summary and keep going. The user can always
+interrupt and review the committed spec file at any time.
 
 ## Phase 2 — plan
 
@@ -56,8 +67,8 @@ Phase 2 → 3 is NOT a gate: once the plan is written and pressure-tested,
 start the subagent build immediately. Do not ask which execution approach
 to use (writing-plans offers a choice; this conductor has already made it)
 and do not ask permission to begin — the user typed /omc:implement, that
-IS the instruction to build. The only stops are the human gates the
-sub-skills themselves define (spec review) and genuine blockers.
+IS the instruction to build. The only stops are critical spec findings
+(Phase 1) and genuine blockers.
 
 ## Phase 4 — ship
 

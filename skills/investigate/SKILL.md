@@ -113,9 +113,9 @@ reading the generated GitNexus docs under `.omc/docs/gitnexus/docs/` directly
 (skip silently when absent), design records where the project's
 explain-context points, specific source files only when the docs point at
 them. Workers never do this — the orchestrator is the only thing that
-synthesizes against code. During the loop, further `/omc:explain` calls are
-the preferred way to answer "how does this code work" questions a finding
-raises.
+synthesizes against code. During the loop, `/omc:explain` does double duty —
+it answers the "how does this code work" questions a finding raises AND is how
+you pressure-test and refine the findings themselves (see step 5).
 
 ### 4. State the plan in one sentence
 
@@ -130,7 +130,8 @@ digraph investigate_loop {
   "Local action\n(read code / arch / correlate)" [shape=box];
   "Worker dispatch\n(one query mission)" [shape=box];
   "Receive finding,\nquote evidence" [shape=box];
-  "Confident next step?" [shape=diamond];
+  "Validate + refine finding\nvia /omc:explain" [shape=box];
+  "Finding clear?" [shape=diamond];
   "Answered?" [shape=diamond];
   "Summarise + stop" [shape=doublecircle];
   "Pause, ask user" [shape=box];
@@ -139,14 +140,30 @@ digraph investigate_loop {
   "Decide next mission" -> "Worker dispatch\n(one query mission)" [label="needs env data"];
   "Local action\n(read code / arch / correlate)" -> "Decide next mission";
   "Worker dispatch\n(one query mission)" -> "Receive finding,\nquote evidence";
-  "Receive finding,\nquote evidence" -> "Confident next step?";
-  "Confident next step?" -> "Answered?" [label="yes"];
-  "Confident next step?" -> "Pause, ask user" [label="no / conflicting"];
-  "Pause, ask user" -> "Decide next mission";
+  "Receive finding,\nquote evidence" -> "Validate + refine finding\nvia /omc:explain";
+  "Validate + refine finding\nvia /omc:explain" -> "Finding clear?";
+  "Finding clear?" -> "Answered?" [label="yes — code + evidence agree"];
+  "Finding clear?" -> "Decide next mission" [label="no — re-query / re-read to refine"];
+  "Finding clear?" -> "Pause, ask user" [label="conflicting / unresolvable"];
   "Answered?" -> "Summarise + stop" [label="yes"];
   "Answered?" -> "Decide next mission" [label="no"];
 }
 ```
+
+**Validate every load-bearing finding through `/omc:explain` before you build
+on it — and refine until it is clear.** A worker returns *what the data shows*;
+`/omc:explain` tells you *whether the code can produce that, and what it means*.
+For any finding whose weight rests on system behaviour — a rule fired, a status
+flipped, a value was absent, a record was missing — hand it back to
+`/omc:explain` as a question: "the data shows X; does <subsystem> actually do
+that, and what would cause it?" Then act on the answer — it **confirms** the
+finding, **reframes** it (the real mechanism differs from your read — rewrite
+the finding), or **exposes a gap** (that becomes the next mission). Loop
+finding → explain → refine until the code-mechanism and the evidence tell one
+coherent story; a finding that has not survived that round is a hypothesis, not
+a result — do not report it or base the next mission on it. Workers never do
+this: they interpret only their own slice; reconciling a finding against the
+whole codebase is the orchestrator's job.
 
 ### 6. Worker dispatch
 
@@ -186,6 +203,8 @@ how they want to proceed outside this skill.
 | Worker returned a clear finding, next mission obvious from it | Continue, dispatch next |
 | Two plausible next directions | Pause, present both, ask the user to pick |
 | Conflicting evidence vs an earlier finding | Pause, surface the conflict |
+| Finding leans on how the code behaves and you haven't grounded it | Validate via `/omc:explain`; refine until code + evidence agree before building on it or reporting it |
+| `/omc:explain` reframed the finding | Rewrite the finding to match; re-check anything you'd already built on the old read |
 | Worker returned "no data" / dead end | Pause, ask for a hint or alternative lead |
 | Original question is answered | Stop, summarise, confirm done |
 | About to dispatch but can't roughly predict the result | **Don't.** Pause and ask the user |
@@ -208,6 +227,9 @@ the location) with: environment, original question, lead, ordered findings
 - About to dispatch a worker whose result you can't roughly predict
 - A worker returned its own hypothesis instead of a finding (re-dispatch
   tighter, or read it as "no data")
+- About to report or build on a finding whose code-mechanism you have NOT
+  validated through `/omc:explain` — or `/omc:explain` reframed it and you kept
+  your original wording anyway
 - Three consecutive findings haven't moved your understanding (pause, ask)
 - About to read 5+ source files in one go (narrow the question first)
 - About to "just check one more thing" after the question is answered
@@ -216,6 +238,10 @@ the location) with: environment, original question, lead, ordered findings
 
 - **Letting workers reason about code.** Workers may read code only to
   *interpret* a finding; strategy stays with the orchestrator.
+- **Shipping an unvalidated finding.** A worker's rows are evidence, not a
+  conclusion. Until `/omc:explain` confirms the code produces them (or reframes
+  them), the finding is a hypothesis — refine via explain until clear, then
+  report.
 - **Skipping the env-lock echo.** The user can't catch a wrong-env
   invocation you never printed.
 - **Skipping pre-flight context.** Dispatching before reading the relevant
