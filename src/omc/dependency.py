@@ -298,7 +298,7 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
         )
         return 1
     dest = Path(checkout)
-    cfg = store.load(ctx.home)
+    cfg = store.load_global(ctx.home)
     if cfg is None:
         print("error: omc is not configured — run `omc configure` first.", file=sys.stderr)
         return 1

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Oh My Clanker! Turn a ticket into a prepared worktree with a seeded LLM session."
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = ["questionary>=2.0,<3"]
+dependencies = ["questionary>=2.0,<3", "pyyaml>=6,<7"]
 
 [project.scripts]
 omc = "omc.cli:main"

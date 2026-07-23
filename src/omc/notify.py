@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from .config import store
-from .config.schema import Config
+from .config.schema import GlobalConfig
 from .errors import ConfigError
 from .toolctx import ToolContext
 
@@ -36,7 +36,7 @@ def sink_argv(provider_name: str) -> list[str]:
 
 
 def deliver(
-    cfg: Config, *, ctx: ToolContext, provider: str, event: str, body: str, cwd: str
+    cfg: GlobalConfig, *, ctx: ToolContext, provider: str, event: str, body: str, cwd: str
 ) -> None:
     """Send one notification to the configured backend. Never raises."""
     slug = ctx.env.get("OMC_SLUG") or Path(cwd).resolve().name
@@ -194,7 +194,7 @@ def run_notify(ctx: ToolContext, args: argparse.Namespace) -> int:
     """`omc internal notify` body. Always exit 0 — a notification must never
     fail a session; usage errors (exit 2) are handled by the dispatcher."""
     try:
-        cfg = store.load(ctx.home)
+        cfg = store.load_global(ctx.home)
     except ConfigError:
         return 0
     if cfg is None or not cfg.notifications.enabled:

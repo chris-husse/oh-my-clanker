@@ -2,7 +2,7 @@ import os
 import stat
 
 from omc.config import store
-from omc.config.schema import Config, ProviderConfig
+from omc.config.schema import GlobalConfig, ProviderConfig
 from omc.installer import run_install, run_uninstall, run_update, validate_checkout
 from omc.toolctx import ToolContext
 
@@ -72,7 +72,7 @@ def test_uninstall_removes_home_but_refuses_unsafe(tmp_path, capsys):
     make_stub(bindir, "uv", stdout="ok")
     home = tmp_path / "omchome"
     home.mkdir()
-    (home / "config.json").write_text("{}")
+    (home / "config.yaml").write_text("schema_version: 1\n")
     env = stub_env(bindir, OMC_HOME=str(home))
     assert run_uninstall(ToolContext.from_env(env)) == 0
     assert not home.exists()
@@ -102,9 +102,9 @@ def _update_ctx(tmp_path, *, claude_rc=0):
     ctx = ToolContext.from_env(
         {"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}"}
     )
-    cfg = Config()
+    cfg = GlobalConfig()
     cfg.llm.providers = {"claude": ProviderConfig(), "codex": ProviderConfig()}
-    store.save(ctx.home, cfg)
+    store.save_global(ctx.home, cfg)
     return ctx, uv_calls, claude_calls, codex_calls
 
 
@@ -150,9 +150,9 @@ def test_update_isolates_unknown_provider(tmp_path, capsys):
         {"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}"}
     )
     # Config with unknown provider FIRST, then codex
-    cfg = Config()
+    cfg = GlobalConfig()
     cfg.llm.providers = {"nonexistent-provider": ProviderConfig(), "codex": ProviderConfig()}
-    store.save(ctx.home, cfg)
+    store.save_global(ctx.home, cfg)
     assert run_update(ctx) == 0  # Must succeed despite unknown provider
     assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
     err = capsys.readouterr().err

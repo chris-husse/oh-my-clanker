@@ -4,7 +4,7 @@ import sys
 
 from omc import notify
 from omc.config import store
-from omc.config.schema import Config
+from omc.config.schema import Config, GlobalConfig
 from omc.providers.registry import get_provider
 from omc.toolctx import ToolContext
 
@@ -18,7 +18,7 @@ def _ctx(tmp_path, **env):
 
 
 def _file_cfg(path):
-    cfg = Config()
+    cfg = GlobalConfig()
     cfg.notifications.enabled = True
     cfg.notifications.backend = f"file://{path}"
     return cfg
@@ -202,10 +202,10 @@ def _notify_args(provider, payload=None, event="", message=""):
 
 
 def _saved_cfg(home, *, enabled, log):
-    cfg = Config()
+    cfg = GlobalConfig()
     cfg.notifications.enabled = enabled
     cfg.notifications.backend = f"file://{log}"
-    store.save(home, cfg)
+    store.save_global(home, cfg)
 
 
 def test_run_notify_disabled_is_silent_kill_switch(tmp_path):
@@ -262,7 +262,7 @@ def test_run_notify_survives_broken_or_missing_config(tmp_path):
     ctx = ToolContext.from_env({"OMC_HOME": str(home), "HOME": str(tmp_path)})
     assert notify.run_notify(ctx, _notify_args("claude")) == 0  # no config at all
     home.mkdir(parents=True)
-    (home / "config.json").write_text("{broken")
+    (home / "config.yaml").write_text("{broken")
     assert notify.run_notify(ctx, _notify_args("claude")) == 0  # ConfigError swallowed
 
 

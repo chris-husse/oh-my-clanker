@@ -14,7 +14,7 @@ Run the `gitnexus-ensure` skill. Resolve the primary worktree root
 ## Step 2 — generate the wiki
 
 Determine the provider: omc's configured default (`llm.default` in
-`~/.omc/config.json`; if unreadable, ask rather than guess). gitnexus's wiki
+`~/.omc/config.yaml`; if unreadable, ask rather than guess). gitnexus's wiki
 providers include `claude`, `codex`, and `opencode` natively — it drives the
 LOCAL agent CLI, so this uses the same auth omc already requires. Pass the
 provider EXPLICITLY (never fall through to gitnexus's `openai` default, which

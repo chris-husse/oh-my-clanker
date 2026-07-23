@@ -4,12 +4,82 @@ import json
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 
+import yaml
+
 from ..errors import ConfigError
-from .schema import Config, LLMConfig, NotificationsConfig, ProviderConfig
+from .schema import (
+    Config,
+    GlobalConfig,
+    LLMConfig,
+    NotificationsConfig,
+    ProjectConfig,
+    ProviderConfig,
+    WorktreeConfig,
+)
 
 
-def config_path(home: Path) -> Path:
+def global_config_path(home: Path) -> Path:
+    return home / "config.yaml"
+
+
+def project_config_path(root: Path) -> Path:
+    return root / ".omc" / "config.yaml"
+
+
+def legacy_config_path(home: Path) -> Path:
     return home / "config.json"
+
+
+def _load_yaml(path: Path, cls: type):
+    if not path.exists():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"invalid YAML in {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"invalid config in {path}: expected a mapping")
+    return _hydrate(cls, data, str(path))
+
+
+def _save_yaml(path: Path, cfg) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(asdict(cfg), sort_keys=False))
+
+
+def load_global(home: Path) -> GlobalConfig | None:
+    return _load_yaml(global_config_path(home), GlobalConfig)
+
+
+def save_global(home: Path, cfg: GlobalConfig) -> None:
+    _save_yaml(global_config_path(home), cfg)
+
+
+def load_project(root: Path) -> ProjectConfig | None:
+    return _load_yaml(project_config_path(root), ProjectConfig)
+
+
+def save_project(root: Path, cfg: ProjectConfig) -> None:
+    _save_yaml(project_config_path(root), cfg)
+
+
+def load_legacy(home: Path) -> tuple[GlobalConfig, ProjectConfig] | None:
+    """The old combined ~/.omc/config.json. Read ONLY by `omc configure`,
+    which migrates it into the split YAML files and deletes it."""
+    path = legacy_config_path(home)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"invalid JSON in {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"invalid config in {path}: expected an object")
+    combined = _hydrate(Config, data, str(path))
+    return (
+        GlobalConfig(llm=combined.llm, notifications=combined.notifications),
+        ProjectConfig(worktree=combined.worktree),
+    )
 
 
 def validate_backend(value: str) -> str:
@@ -23,22 +93,28 @@ def validate_backend(value: str) -> str:
     )
 
 
-def load(home: Path) -> Config | None:
-    path = config_path(home)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"invalid JSON in {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ConfigError(f"invalid config in {path}: expected an object")
-    return _hydrate(Config, data, str(path))
-
-
-def save(home: Path, cfg: Config) -> None:
-    home.mkdir(parents=True, exist_ok=True)
-    config_path(home).write_text(json.dumps(asdict(cfg), indent=2) + "\n")
+def validate_worktree_value(name: str, value: object) -> str:
+    """WorktreeConfig values flow from a repo-committed file straight into `git`
+    argv, so they are an option-injection surface (a committed
+    `base_branch: "--upload-pack=/x"` would be parsed by git as an option).
+    Reject anything that isn't a clean single token. Shared by load and set
+    paths so both entry points enforce it."""
+    if not isinstance(value, str):
+        raise ConfigError(f"invalid worktree.{name} {value!r}: expected a string")
+    if value == "":
+        # empty branch_prefix means "no prefix"; an empty base_branch is meaningless
+        if name == "base_branch":
+            raise ConfigError("invalid worktree.base_branch: must not be empty")
+        return value
+    if value.startswith("-"):
+        raise ConfigError(
+            f"invalid worktree.{name} {value!r}: must not start with '-' (looks like a git option)"
+        )
+    if any(c.isspace() or not c.isprintable() for c in value):
+        raise ConfigError(
+            f"invalid worktree.{name} {value!r}: must not contain whitespace or control characters"
+        )
+    return value
 
 
 def set_key(cfg: object, dotted: str, value: str) -> None:
@@ -67,6 +143,15 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
             cfg.backend = validate_backend(value)
             return
         raise ConfigError(f"unknown config key: notifications.{head}")
+    if isinstance(cfg, WorktreeConfig):
+        # values reach git argv — validate (option-injection surface) on the set
+        # path too, exactly as the load path does via _hydrate.
+        if tail:
+            raise ConfigError(f"unknown config key: worktree.{head}.{tail}")
+        if head not in ("branch_prefix", "base_branch"):
+            raise ConfigError(f"unknown config key: worktree.{head}")
+        setattr(cfg, head, validate_worktree_value(head, value))
+        return
     field_names = {f.name for f in fields(cfg)}  # type: ignore[arg-type]
     if head not in field_names:
         raise ConfigError(f"unknown config key: {head}")
@@ -117,4 +202,10 @@ def _hydrate(cls: type, data: dict, path: str):
         if not isinstance(obj.backend, str):
             raise ConfigError(f"invalid value for 'notifications.backend' in {path}")
         validate_backend(obj.backend)
+    if cls is WorktreeConfig:
+        for fname in ("branch_prefix", "base_branch"):
+            try:
+                validate_worktree_value(fname, getattr(obj, fname))
+            except ConfigError as exc:
+                raise ConfigError(f"{exc} in {path}") from exc
     return obj

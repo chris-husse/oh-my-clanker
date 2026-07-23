@@ -42,7 +42,7 @@ get written.
      after action ticks (sync / forced refresh)
 2. **Mechanical fixes** via the existing machinery (with the user's go-ahead):
    - Chain missing/stale → re-run `omc configure`: read the CURRENT default
-     from `~/.omc/config.json` and re-set it
+     from `~/.omc/config.yaml` and re-set it
      (`omc configure --set llm.default=<current>`) — **never `--defaults`,
      which would reset the user's config**. Blocked chain (regular files in
      the way) → walk the user through the migration steps configure printed.

@@ -101,7 +101,7 @@ already-wired worktrees included.
 
 | Command | Does |
 |---|---|
-| `omc configure` | Pick your LLM (and worktree branch naming); writes `~/.omc/config.json` |
+| `omc configure` | Pick your LLM (global `~/.omc/config.yaml`) and the repo's worktree naming (committed `.omc/config.yaml`) |
 | `omc start <context>` | Ticket key, ticket URL, or quoted task description → worktree → seeded session |
 | `omc watch` | Keep the main checkout's base branch + knowledge graph fresh (`--once`, `--interval`, `--enable-documentation`, `--auto-build`, `--rebase`); runs the project's `.omc/hooks/post-watch.sh` (and with `--auto-build` its build stage — streamed to a live log with an in-place progress bar, no timeout) after action ticks |
 | `omc dependency-watch` | Backfill LLM docs for indexed external dependencies that don't have them yet (`--interval`, `--once`) |

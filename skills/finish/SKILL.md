@@ -11,8 +11,9 @@ but any feature branch works.
 ## Step 0 — gate
 
 - cwd is a git repo, on a **feature branch**: not detached HEAD, not the base
-  branch. Determine the base from omc's config (`worktree.base_branch` in
-  `~/.omc/config.json`) when readable; otherwise the repo's default branch
+  branch. Determine the base from the project's omc config
+  (`worktree.base_branch` in the repo's `.omc/config.yaml`) when readable;
+  otherwise the repo's default branch
   (`git remote show origin`). Not on a feature branch → explain and stop.
 - **Stacked branches are not supported**: if commits between
   `merge-base origin/<base> HEAD` and `HEAD` include another unmerged branch's

@@ -65,7 +65,7 @@ def run_update(ctx: ToolContext) -> int:
     from . import gitnexus
 
     dep_rc = gitnexus.update_gitnexus(ctx)
-    cfg = store.load(ctx.home)
+    cfg = store.load_global(ctx.home)
     if cfg is None:
         print("· no config — skipping plugin updates (run `omc configure`)", file=sys.stderr)
         return dep_rc

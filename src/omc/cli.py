@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from . import __version__
-from .config import store
+from .config import resolve, store
 from .errors import OmcError
 from .start import run_start
 from .toolctx import ToolContext
@@ -23,7 +23,10 @@ def build_parser() -> argparse.ArgumentParser:
         "print-install-path", help="Print the installed omc package directory (one line, no banner)"
     )
 
-    p_conf = sub.add_parser("configure", help="Pick your LLM; writes ~/.omc/config.json")
+    p_conf = sub.add_parser(
+        "configure",
+        help="Pick your LLM (~/.omc/config.yaml) and the repo's worktree naming (.omc/config.yaml)",
+    )
     p_conf.add_argument("--defaults", action="store_true", help="Write defaults, no prompts")
     p_conf.add_argument(
         "--set",
@@ -81,9 +84,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_cfg_or_bail(ctx: ToolContext):
-    cfg = store.load(ctx.home)
+    cfg = resolve.load_effective(ctx)
     if cfg is None:
-        print(f"error: omc is not configured — {_CONFIGURE_HINT}.", file=sys.stderr)
+        hint = _CONFIGURE_HINT
+        if store.legacy_config_path(ctx.home).exists():
+            hint += (
+                f" (found legacy {store.legacy_config_path(ctx.home)} — "
+                "`omc configure` migrates it)"
+            )
+        print(f"error: omc is not configured — {hint}.", file=sys.stderr)
         return None
     return cfg
 
