@@ -51,6 +51,18 @@ def test_watch_rebase_flag_default_off():
     assert build_parser().parse_args(["watch", "--rebase"]).rebase is True
 
 
+def test_gate_hints_legacy_migration(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "omchome"
+    monkeypatch.setenv("OMC_HOME", str(home))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    home.mkdir(parents=True)
+    (home / "config.json").write_text('{"schema_version": 1}')
+    assert main(["start", "PROJ-1"]) == 2
+    err = capsys.readouterr().err
+    assert "legacy" in err and "config.json" in err
+
+
 def test_print_install_path_is_machine_pure(capsys):
     rc = main(["print-install-path"])
     assert rc == 0

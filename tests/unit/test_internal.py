@@ -145,9 +145,6 @@ def _chdir(path):
 
 def _gitnexus_env(tmp_path):
     """Real git repo + linked worktree + recording node stub + fake CLI + config."""
-    from omc.config import store
-    from omc.config.schema import Config
-
     repo = tmp_path / "primary"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -170,7 +167,6 @@ def _gitnexus_env(tmp_path):
     cli = home / "dependencies" / "gitnexus" / "gitnexus" / "dist" / "cli" / "index.js"
     cli.parent.mkdir(parents=True)
     cli.write_text("// fake")
-    store.save(home, Config())  # base_branch defaults to "main"
     env = {
         "HOME": str(tmp_path),
         "OMC_HOME": str(home),

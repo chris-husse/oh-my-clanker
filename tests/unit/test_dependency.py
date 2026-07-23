@@ -329,10 +329,10 @@ def test_resolve_ref_scp_form_and_credential_safety(tmp_path):
 def _seed_indexed(ctx, *, with_wiki=True):
     """Manifest entry + checkout as ensure would leave them."""
     from omc.config import store
-    from omc.config.schema import Config
+    from omc.config.schema import GlobalConfig
     from omc.dependency import load_manifest, save_manifest
 
-    store.save(ctx.home, Config())  # llm.default == "claude"
+    store.save_global(ctx.home, GlobalConfig())  # llm.default == "claude"
     dest = ctx.home / "dependencies" / "github.com" / "foo" / "bar" / H
     (dest / ".git").mkdir(parents=True, exist_ok=True)
     if with_wiki:
@@ -376,7 +376,7 @@ def test_document_runs_wiki_mirrors_and_flips_flag(tmp_path, capsys):
 def test_document_without_config_or_index_errors(tmp_path, capsys):
     ctx, _, _ = _ctx(tmp_path)
     _seed_indexed(ctx)
-    (ctx.home / "config.json").unlink()
+    (ctx.home / "config.yaml").unlink()
     assert run_document(ctx, "github.com/foo/bar") == 1
     assert "omc configure" in capsys.readouterr().err
     assert run_document(ctx, "github.com/nope/nope") == 1
@@ -398,10 +398,10 @@ def test_document_rejects_empty_checkout_even_in_a_git_repo(tmp_path, capsys, mo
     # BEFORE building a Path — otherwise Path("")/".git" == "./.git" spuriously
     # passes the guard whenever cwd is a git repo, yielding wrong-repo answers.
     from omc.config import store
-    from omc.config.schema import Config
+    from omc.config.schema import GlobalConfig
 
     ctx, _, _ = _ctx(tmp_path)
-    store.save(ctx.home, Config())
+    store.save_global(ctx.home, GlobalConfig())
     m = load_manifest(ctx.home)
     m["dependencies"]["github.com/foo/bar"] = {
         "url": "https://github.com/foo/bar.git",
@@ -446,13 +446,13 @@ def test_document_wiki_nonzero_rc_keeps_documented_false(tmp_path, capsys):
 
 def test_document_passes_model_when_configured(tmp_path, capsys):
     from omc.config import store
-    from omc.config.schema import Config, LLMConfig, ProviderConfig
+    from omc.config.schema import GlobalConfig, LLMConfig, ProviderConfig
 
     ctx, _, nodecalls = _ctx(tmp_path)
     _seed_indexed(ctx)
-    store.save(
+    store.save_global(
         ctx.home,
-        Config(
+        GlobalConfig(
             llm=LLMConfig(default="claude", providers={"claude": ProviderConfig(model="opus-x")})
         ),
     )

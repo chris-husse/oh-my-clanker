@@ -12,7 +12,7 @@ import json
 import sys
 from pathlib import Path
 
-from .config import store
+from .config import resolve
 from .errors import OmcError
 from .gitnexus import gitnexus_argv, gitnexus_cli
 from .mirror import mirror_snapshot
@@ -36,8 +36,7 @@ def _verdict(payload: dict) -> None:
 
 
 def _rebase_main(ctx: ToolContext, base_arg: str | None) -> int:
-    cfg = store.load(ctx.home)
-    base = base_arg or (cfg.worktree.base_branch if cfg else "main")
+    base = base_arg or resolve.project_config(ctx).worktree.base_branch
 
     root = repo_root(ctx)
     primary = primary_root(ctx)
@@ -145,8 +144,7 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
     if primary is None:
         print("error: not inside a git repository", file=sys.stderr)
         return 2
-    cfg = store.load(ctx.home)
-    base = cfg.worktree.base_branch if cfg else "main"
+    base = resolve.project_config(ctx).worktree.base_branch
     argv = gitnexus_argv(ctx, *rest, "--repo", primary, "--branch", base)
     cp = ctx.run(argv, cwd=primary, capture=False)  # stream JSON straight through
     return cp.returncode
