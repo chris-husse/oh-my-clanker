@@ -40,6 +40,9 @@ markers = [
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+# ruff 0.16 started formatting fenced code blocks inside markdown; the docs
+# tree holds dated design/plan RECORDS whose code snippets must stay verbatim.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

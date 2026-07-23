@@ -78,6 +78,14 @@ class Provider(ABC):
     def install_hint(self) -> str:
         """One-line install command for this provider's CLI."""
 
+    def docs_model_default(self) -> str:
+        """Model for documentation/wiki runs when docs_model is unconfigured.
+
+        The standard-coding-tier floor. "" = pass no model flag and let the
+        provider CLI use its own default coding model (codex/opencode ids are
+        free-text and move fast — pinning one here would rot)."""
+        return ""
+
     @abstractmethod
     def plugin_update_argvs(self) -> list[list[str]]:
         """Commands that update this provider's installed omc plugin, in order.
