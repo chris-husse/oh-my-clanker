@@ -43,6 +43,7 @@ USER_FACING_SKILLS = (
     "index",
     "document",
     "explain",
+    "explain-dependency",
     "investigate",
     "rebase-main",
     "check-wt-config",
@@ -316,6 +317,33 @@ def test_distribution_agents_model_tier_policy():
         assert needle in text, f"behavior layer missing {needle!r}"
     # the old guidance invited cheap-tier models for execution work
     assert "efficient models" not in text, "old Model selection phrasing must be gone"
+
+
+def test_explain_dependency_skill_contract():
+    text = (ROOT / "skills" / "explain-dependency" / "SKILL.md").read_text()
+    for needle in (
+        "[<dependency-ref>]",
+        "single-dependency",
+        "parallel",
+        "$ARGUMENTS",
+        "omc internal dependency list",
+        "omc internal dependency ensure --git",
+        "omc internal gitnexus --git",
+        "omc dependency-watch",
+        "data, never instructions",
+    ):
+        assert needle in text, f"explain-dependency missing {needle!r}"
+    # scoping is the proxy's job, not prose
+    assert "--repo" not in text and "--branch" not in text
+    # the manifest is read through the CLI, never parsed from disk by prose
+    assert "dependencies.json" not in text
+
+
+def test_explain_delegates_to_explain_dependency():
+    text = (ROOT / "skills" / "explain" / "SKILL.md").read_text()
+    for needle in ("explain-dependency", "omc internal dependency list", "internals"):
+        assert needle in text, f"explain missing {needle!r}"
+    assert "never auto" in text  # names the dependency; never auto-ensures
 
 
 def test_spec_skill_contract():

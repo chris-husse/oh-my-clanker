@@ -64,6 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
         "checkouts (opt-out of warn-and-skip)",
     )
 
+    p_depw = sub.add_parser(
+        "dependency-watch",
+        help="Keep ~/.omc dependency checkouts indexed and their LLM docs generated",
+    )
+    p_depw.add_argument("--interval", type=int, default=30, help="Seconds between ticks")
+    p_depw.add_argument("--once", action="store_true", help="Run a single pass and exit")
+
     p_install = sub.add_parser("install", help="(Re)install omc from a local checkout")
     p_install.add_argument("path", nargs="?", default=".", help="Checkout path (default: .)")
 
@@ -134,6 +141,13 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             auto_build=args.auto_build,
             rebase=args.rebase,
         )
+    if args.command == "dependency-watch":
+        cfg = _load_cfg_or_bail(ctx)
+        if cfg is None:
+            return 2
+        from .depwatch import run_dependency_watch
+
+        return run_dependency_watch(ctx, interval=args.interval, once=args.once)
     if args.command == "configure":
         from .configure import run_configure
 

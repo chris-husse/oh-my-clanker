@@ -38,9 +38,12 @@ def gitnexus_root(ctx: ToolContext) -> Path:
     return ctx.home / "dependencies" / "gitnexus"
 
 
-def _redact_userinfo(url: str) -> str:
+def redact_userinfo(url: str) -> str:
     # Never echo credentials embedded in a remote URL.
     return re.sub(r"//[^/@]*@", "//[REDACTED]@", url)
+
+
+_redact_userinfo = redact_userinfo  # back-compat alias
 
 
 def _run_tool(
@@ -83,7 +86,7 @@ def update_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN)
     cp = ctx.run([git, "-C", str(root), "remote", "get-url", "origin"])
     origin = (cp.stdout or "").strip()
     if cp.returncode != 0 or origin != approved_origin:
-        shown = _redact_userinfo(origin) or "<unknown>"
+        shown = redact_userinfo(origin) or "<unknown>"
         print(
             f"error: {root} origin is {shown!r}, not the approved GitNexus source — "
             "refusing to update",
