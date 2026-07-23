@@ -50,6 +50,12 @@ class Provider(ABC):
         Pure like everything here — the caller writes the files."""
         return {}
 
+    def notifies_natively(self) -> bool:
+        """True when this harness posts its own desktop notification for
+        attention events — omc's macos backend then stays silent to avoid
+        duplicates. File backends always log regardless."""
+        return False
+
     def headless_stream_argv(
         self,
         prompt: str,

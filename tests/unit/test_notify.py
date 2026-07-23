@@ -134,7 +134,7 @@ def test_macos_backend_runs_osascript_on_darwin_only(tmp_path, monkeypatch):
     notify.deliver(
         cfg,
         ctx=FakeCtx(),
-        provider="claude",
+        provider="codex",
         event="e",
         body='say "hi" \\ there',
         cwd=str(tmp_path),
@@ -144,7 +144,7 @@ def test_macos_backend_runs_osascript_on_darwin_only(tmp_path, monkeypatch):
     # body/title are escaped AppleScript string literals — quotes/backslashes are data
     assert argv[2] == ('display notification "say \\"hi\\" \\\\ there" with title "omc: s-1"')
     monkeypatch.setattr(sys, "platform", "linux")
-    notify.deliver(cfg, ctx=FakeCtx(), provider="claude", event="e", body="b", cwd=str(tmp_path))
+    notify.deliver(cfg, ctx=FakeCtx(), provider="codex", event="e", body="b", cwd=str(tmp_path))
     assert len(calls) == 1  # non-darwin: no-op
 
 
@@ -158,7 +158,7 @@ def test_macos_backend_oserror_is_swallowed(tmp_path, monkeypatch):
     cfg = Config()
     monkeypatch.setattr(sys, "platform", "darwin")
     notify.deliver(
-        cfg, ctx=BrokenCtx(), provider="claude", event="e", body="b", cwd=str(tmp_path)
+        cfg, ctx=BrokenCtx(), provider="codex", event="e", body="b", cwd=str(tmp_path)
     )  # must not raise
 
 
@@ -175,7 +175,7 @@ def test_macos_backend_timeout_is_swallowed(tmp_path, monkeypatch):
     cfg = Config()
     monkeypatch.setattr(sys, "platform", "darwin")
     notify.deliver(
-        cfg, ctx=HangCtx(), provider="claude", event="e", body="b", cwd=str(tmp_path)
+        cfg, ctx=HangCtx(), provider="codex", event="e", body="b", cwd=str(tmp_path)
     )  # must not raise
 
 
@@ -191,7 +191,7 @@ def test_macos_backend_cleans_control_chars(tmp_path, monkeypatch):
     cfg = Config()
     monkeypatch.setattr(sys, "platform", "darwin")
     notify.deliver(
-        cfg, ctx=FakeCtx(), provider="claude", event="e", body="line1\nline2", cwd=str(tmp_path)
+        cfg, ctx=FakeCtx(), provider="codex", event="e", body="line1\nline2", cwd=str(tmp_path)
     )
     (argv,) = calls
     assert argv[2] == 'display notification "line1 line2" with title "omc: s-1"'
@@ -340,3 +340,68 @@ def test_wire_worktree_survives_non_utf8_settings(tmp_path, capsys):
     assert _wire(tmp_path) == []  # must not raise
     assert target.read_bytes() == b"\xff\xfe{not utf8"  # untouched
     assert "could not write" in capsys.readouterr().err
+
+
+def test_macos_backend_suppressed_for_natively_notifying_provider(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeCtx:
+        env = {"OMC_SLUG": "s-1"}
+
+        def run(self, argv, **kwargs):
+            calls.append(list(argv))
+
+    cfg = Config()
+    cfg.notifications.enabled = True  # backend stays "macos"
+    monkeypatch.setattr(sys, "platform", "darwin")
+    notify.deliver(cfg, ctx=FakeCtx(), provider="claude", event="e", body="b", cwd=str(tmp_path))
+    assert calls == []  # Claude Code posts its own alert — omc stays silent
+
+
+def test_macos_backend_unknown_provider_still_delivers(tmp_path, monkeypatch):
+    # deliver() is argparse-guarded in production, but stays defensive:
+    # an unknown name means "not known to notify natively" — deliver.
+    calls = []
+
+    class FakeCtx:
+        env = {"OMC_SLUG": "s-1"}
+
+        def run(self, argv, **kwargs):
+            calls.append(list(argv))
+
+    cfg = Config()
+    cfg.notifications.enabled = True
+    monkeypatch.setattr(sys, "platform", "darwin")
+    notify.deliver(cfg, ctx=FakeCtx(), provider="mystery", event="e", body="b", cwd=str(tmp_path))
+    assert len(calls) == 1 and calls[0][0] == "osascript"
+
+
+def test_macos_backend_delivers_for_opencode(tmp_path, monkeypatch):
+    # opencode has no native desktop channel — omc's alert must keep firing.
+    calls = []
+
+    class FakeCtx:
+        env = {"OMC_SLUG": "s-1"}
+
+        def run(self, argv, **kwargs):
+            calls.append(list(argv))
+
+    cfg = Config()
+    cfg.notifications.enabled = True
+    monkeypatch.setattr(sys, "platform", "darwin")
+    notify.deliver(cfg, ctx=FakeCtx(), provider="opencode", event="e", body="b", cwd=str(tmp_path))
+    assert len(calls) == 1 and calls[0][0] == "osascript"
+
+
+def test_file_backend_still_logs_natively_notifying_provider(tmp_path):
+    # Suppression is macos-only: the tail feed / E2E surface keeps claude lines.
+    log = tmp_path / "n.log"
+    notify.deliver(
+        _file_cfg(log),
+        ctx=_ctx(tmp_path, OMC_SLUG="s-1"),
+        provider="claude",
+        event="Stop",
+        body="turn complete",
+        cwd=str(tmp_path),
+    )
+    assert log.read_text().split("\t")[2:] == ["claude", "Stop", "turn complete\n"]

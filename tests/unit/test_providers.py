@@ -216,3 +216,11 @@ def test_codex_and_opencode_stream_defaults_are_identity():
         p = get_provider(name)
         assert p.headless_stream_argv("x", model="") == p.headless_argv("x", model="")
         assert p.decode_stream_line("anything") == ["anything"]
+
+
+def test_notifies_natively_flags():
+    # claude: the harness posts its own clickable desktop notification;
+    # codex/opencode: no native channel — omc's alert is their only one.
+    assert get_provider("claude").notifies_natively() is True
+    assert get_provider("codex").notifies_natively() is False
+    assert get_provider("opencode").notifies_natively() is False

@@ -92,6 +92,13 @@ class ClaudeProvider(Provider):
         settings = {"hooks": {"Notification": [group], "Stop": [group]}}
         return {".claude/settings.local.json": json.dumps(settings, indent=2) + "\n"}
 
+    def notifies_natively(self):
+        # Claude Code posts its own clickable, session-focusing notification
+        # for permission prompts / idle / turn end (observed live 2026-07-23);
+        # omc's osascript ping would duplicate it as a dead "omc: <slug>"
+        # alert, so the macos backend suppresses itself for claude.
+        return True
+
     def title_env(self):
         return {"CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"}
 
