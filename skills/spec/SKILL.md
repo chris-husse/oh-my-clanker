@@ -37,7 +37,12 @@ Repeat steps 2–3 until explain stops surfacing real issues. Surface genuine
 architectural decisions to the user as explicit follow-up questions — never
 make silent choices on their behalf.
 
-## Step 5 — gate
+## Step 5 — commit & report
 
-Commit the spec, then ask the user to review it before the plan phase
-begins. Do not proceed without their approval.
+Commit the spec and post a short summary of what hardening found and
+changed. When run under /omc:implement, do NOT wait for user review:
+continue to the next phase unless hardening surfaced a CRITICAL issue —
+one that invalidates part of the converged design or forces an
+architectural decision the brainstorm never settled (those go to the user
+as explicit questions, per Step 4). Invoked standalone, end here and hand
+the committed spec back to the user.
