@@ -12,12 +12,14 @@ first-indexed branch own the default store, so queries stay deterministic.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import shutil
 import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -109,6 +111,33 @@ def load_manifest(home: Path) -> dict:
     data.setdefault("version", 1)
     data.setdefault("dependencies", {})
     return data
+
+
+@contextmanager
+def _manifest_lock(home: Path):
+    """Serialize manifest read-modify-write ACROSS PROCESSES: dependency watch
+    documents up to 8 dependencies in parallel, and two subprocesses saving
+    near-simultaneously would lose one flip (a lost documented:true re-runs an
+    entire LLM wiki). flock on a sibling lockfile; fcntl is stdlib on omc's
+    platforms (macOS/Linux)."""
+    home.mkdir(parents=True, exist_ok=True)
+    with open(home / "dependencies.json.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def update_manifest(home: Path, mutate) -> dict:
+    """Locked read-modify-write: load fresh, apply ``mutate(manifest)``, save.
+    Returns the saved manifest. All manifest WRITERS go through here; readers
+    stay lock-free (they tolerate staleness by design)."""
+    with _manifest_lock(home):
+        manifest = load_manifest(home)
+        mutate(manifest)
+        save_manifest(home, manifest)
+        return manifest
 
 
 def save_manifest(home: Path, data: dict) -> None:
@@ -247,23 +276,28 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
         detail = _redact((cp.stderr or cp.stdout or "").strip())[:400]
         print(f"error: gitnexus analyze failed: {detail}", file=sys.stderr)
         return 1
-    # Re-load right before mutating: clone+index spent minutes, during which a
-    # concurrent writer (e.g. dependency-watch flipping documented:true) may have
-    # rewritten the manifest. Saving the stale in-memory snapshot would revert it.
-    manifest = load_manifest(ctx.home)
-    dep = manifest["dependencies"].setdefault(ref.key, {"url": ref.url, "commits": {}})
-    dep["url"] = ref.url
-    c = dep["commits"].setdefault(commit, {})
-    c.update(
-        {
-            "checkout": str(dest),
-            "docs": str(docs),
-            "indexed": True,
-            "documented": bool(c.get("documented")),
-            "created": c.get("created") or _now_iso(),
-        }
-    )
-    save_manifest(ctx.home, manifest)
+    # Locked read-modify-write: clone+index spent minutes, during which a
+    # concurrent writer (e.g. a parallel document flipping documented:true) may
+    # have rewritten the manifest — and other writers may race the save itself.
+    documented = False
+
+    def _record(manifest: dict) -> None:
+        nonlocal documented
+        dep = manifest["dependencies"].setdefault(ref.key, {"url": ref.url, "commits": {}})
+        dep["url"] = ref.url
+        c = dep["commits"].setdefault(commit, {})
+        c.update(
+            {
+                "checkout": str(dest),
+                "docs": str(docs),
+                "indexed": True,
+                "documented": bool(c.get("documented")),
+                "created": c.get("created") or _now_iso(),
+            }
+        )
+        documented = c["documented"]
+
+    update_manifest(ctx.home, _record)
     _verdict(
         {
             "ok": True,
@@ -273,7 +307,7 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
             "checkout": str(dest),
             "docs": str(docs),
             "indexed": True,
-            "documented": c["documented"],
+            "documented": documented,
         }
     )
     return 0
@@ -322,9 +356,9 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
     # path straight from the key (host/owner/.../repo) without re-parsing a URL.
     docs = Path(entry.get("docs") or (ctx.home / "gitnexus" / Path(key) / commit / "docs"))
     mirror_dir(wiki, docs)
-    manifest = load_manifest(ctx.home)
-    manifest["dependencies"][key]["commits"][commit]["documented"] = True
-    save_manifest(ctx.home, manifest)
+    update_manifest(
+        ctx.home, lambda m: m["dependencies"][key]["commits"][commit].update(documented=True)
+    )
     _verdict(
         {
             "ok": True,

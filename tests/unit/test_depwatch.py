@@ -313,3 +313,56 @@ def test_failed_adoption_never_claims_finished(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "still pending" in err
     assert "Finished documenting" not in err
+
+
+def test_documents_missing_dependencies_in_parallel(tmp_path, capsys):
+    # Choreography that only completes when documents run CONCURRENTLY: the
+    # sorted-FIRST dep's document stub blocks until a marker that only the
+    # sorted-LAST dep's stub creates. Sequential execution (aaa first) could
+    # never create the marker and would exit 1 -> a ✗ line.
+    from omc.dependency import load_manifest, save_manifest
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = bindir / "omc.calls"
+    marker = bindir / "ccc.marker"
+    omc = bindir / "omc"
+    omc.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{calls}"\n'
+        'case "$@" in\n'
+        f'  *aaa*) i=0; while [ ! -f "{marker}" ]; do sleep 0.1; i=$((i+1)); '
+        "[ $i -gt 100 ] && exit 1; done ;;\n"
+        f'  *ccc*) touch "{marker}" ;;\n'
+        "esac\nexit 0\n"
+    )
+    omc.chmod(omc.stat().st_mode | stat.S_IXUSR)
+    home = tmp_path / "omc-home"
+    home.mkdir()
+    m = load_manifest(home)
+    for name in ("aaa", "bbb", "ccc"):
+        m["dependencies"][f"github.com/{name}/{name}"] = {
+            "url": f"https://github.com/{name}/{name}.git",
+            "commits": {
+                H: {
+                    "checkout": str(home / "dependencies" / "github.com" / name / name / H),
+                    "docs": str(home / "gitnexus" / "github.com" / name / name / H / "docs"),
+                    "indexed": True,
+                    "documented": False,
+                    "created": "2026-07-23T00:00:00+00:00",
+                }
+            },
+        }
+    save_manifest(home, m)
+    env = {"HOME": str(tmp_path), "PATH": f"{bindir}:{os.environ['PATH']}"}
+    ctx = ToolContext(home=home, env=env)
+    assert run_dependency_watch(ctx, once=True) == 0
+    logged = calls.read_text()
+    for name in ("aaa", "bbb", "ccc"):
+        assert f"internal dependency document --git github.com/{name}/{name}@{H}" in logged
+    err = capsys.readouterr().err
+    # aaa's wait was satisfied -> concurrency happened (a sequential run would
+    # time aaa out -> exit 1 -> a "✗ failed" line). The pending-summary line's
+    # "see ✗ lines above" glyph is expected: the stub never flips the manifest.
+    assert "✗ failed" not in err
+    assert "documenting 3 dependencies" in err
