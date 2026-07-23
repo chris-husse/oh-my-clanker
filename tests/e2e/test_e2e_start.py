@@ -21,6 +21,10 @@ def test_start_headless_creates_worktree_and_seeds(container, provider):
     rc2, wtout = run_in(container, ["wt", "list", "--format=json"], cwd=repo)
     assert rc2 == 0 and "feature/proj-1" in wtout, wtout
 
+    # the busy-lock probe ran: filelock touched the lock file in the shared .git
+    rc3, lockout = run_in(container, ["test", "-f", ".git/omc-watch-busy.lock"], cwd=repo)
+    assert rc3 == 0, f"busy-lock file missing in primary .git: {lockout}"
+
     verdict = judge(
         container,
         provider,

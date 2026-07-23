@@ -18,6 +18,7 @@ from .shells.registry import detect_shell
 from .slug import fetch_slug
 from .terminals import detect_terminal
 from .toolctx import ToolContext
+from .watchlock import busy_lock, wait_until_idle
 from .wtconfig import repo_root
 
 
@@ -64,6 +65,7 @@ def run_start(
     *,
     dry_run: bool = False,
     headless: bool = False,
+    no_mutex: bool = False,
 ) -> int:
     name = cfg.llm.default
     _say(f"→ probing tools (git, wt, {name})")
@@ -109,6 +111,14 @@ def run_start(
             notify_desc = "disabled"
         _print_plan(branch, base, wt_argv, title_seq, session_argv, shell_argv, notify_desc)
         return 0
+
+    if not no_mutex:
+        # Never HOLD the lock — verify it is free (momentary acquire-and-release)
+        # so we never snapshot a primary that `omc watch` is mid-way through
+        # updating. None = not in a repo: nothing to guard.
+        lock = busy_lock(ctx)
+        if lock is not None:
+            wait_until_idle(lock, say=_say)
 
     _say(f"→ creating worktree {branch} (base origin/{base})")
     worktree.sync_base(ctx, base)

@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from .agentsmd import chain_healthy, ensure_agents_chain, is_omc_link
@@ -30,6 +31,7 @@ from .mirror import mirror_dir
 from .providers.registry import docs_model_for, get_provider
 from .skills_source import skill_prompt
 from .toolctx import ToolContext
+from .watchlock import WATCH_BAIL_MSG, acquire_instance, watch_locks
 from .wtconfig import ensure_wt_config, primary_root, repo_root
 
 
@@ -412,6 +414,7 @@ def run_watch(
     enable_documentation: bool = False,
     auto_build: bool = False,
     rebase: bool = False,
+    clear_mutex: bool = False,
 ) -> int:
     root = repo_root(ctx)
     if root is None:
@@ -433,6 +436,16 @@ def run_watch(
         )
         return 1
     ensure_wt_config(ctx, root)
+    locks = watch_locks(ctx, cwd=root)
+    if locks is None:
+        # Unreachable inside a repo in practice; doctrine says warn, never wedge.
+        _say("✗ could not resolve the watch lock dir — running without the mutex")
+        instance = busy = None
+    else:
+        instance, busy = locks
+        if not acquire_instance(instance, clear=clear_mutex):
+            print(WATCH_BAIL_MSG, file=sys.stderr)
+            return 1
     _say(
         f"→ watching {root} (base {cfg.worktree.base_branch}, every {interval}s"
         f"{', documentation enabled' if enable_documentation else ''}) — Ctrl-C stops"
@@ -441,23 +454,28 @@ def run_watch(
     chain_last: str | None = None
     try:
         while True:
-            chain_last = _chain_tick(ctx, root, chain_last)
-            last = _tick(
-                ctx,
-                cfg,
-                root,
-                enable_documentation=enable_documentation,
-                force_refresh=once,
-                last=last,
-                rebase=rebase,
-            )
-            if last in ("synced", "refreshed"):
-                _post_watch_hook(ctx, root, last)
-                if auto_build:
-                    _auto_build(ctx, cfg, root)
+            # Busy lock held for the WHOLE busy portion (tick + hooks): free ⇔ idle.
+            with busy if busy is not None else nullcontext():
+                chain_last = _chain_tick(ctx, root, chain_last)
+                last = _tick(
+                    ctx,
+                    cfg,
+                    root,
+                    enable_documentation=enable_documentation,
+                    force_refresh=once,
+                    last=last,
+                    rebase=rebase,
+                )
+                if last in ("synced", "refreshed"):
+                    _post_watch_hook(ctx, root, last)
+                    if auto_build:
+                        _auto_build(ctx, cfg, root)
             if once:
                 return 0
             time.sleep(interval)
     except KeyboardInterrupt:
         _say("· stopped")
         return 0
+    finally:
+        if instance is not None and instance.is_locked:
+            instance.release()
