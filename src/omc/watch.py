@@ -17,13 +17,13 @@ import re
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from contextlib import nullcontext
 from pathlib import Path
 
 from .agentsmd import chain_healthy, ensure_agents_chain, is_omc_link
 from .buildprogress import ProgressTracker, sentinel_line
+from .cli.progress_bar import BarThread
 from .config.schema import Config
 from .errors import OmcError
 from .gitnexus import ANALYZE_ARGS, gitnexus_argv, gitnexus_cli
@@ -68,38 +68,6 @@ _HOOK_TIMEOUT = 600  # seconds — a stuck project hook must not wedge the loop
 def _make_live_log(prefix: str) -> tuple[object, str]:
     fd, path = tempfile.mkstemp(prefix=prefix, suffix=".log")
     return os.fdopen(fd, "w", encoding="utf-8"), path
-
-
-class _BarThread:
-    """Redraws the progress bar once per second on stderr, in place (\\r).
-    TTY-gated: constructing on a non-TTY yields a no-op. Watch narration is
-    sequential — nothing else writes to stderr while a stage streams."""
-
-    def __init__(self, tracker: ProgressTracker, out=None) -> None:
-        self._tracker = tracker
-        self._out = out if out is not None else sys.stderr
-        self._enabled = bool(getattr(self._out, "isatty", lambda: False)())
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        if not self._enabled:
-            return
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def _run(self) -> None:
-        while not self._stop.wait(1.0):
-            self._out.write("\r" + self._tracker.render())
-            self._out.flush()
-
-    def stop(self) -> None:
-        if not self._enabled or self._thread is None:
-            return
-        self._stop.set()
-        self._thread.join(timeout=2)
-        self._out.write("\r\x1b[K")  # clear the bar line before normal narration resumes
-        self._out.flush()
 
 
 def _post_watch_hook(ctx: ToolContext, root: str, outcome: str) -> None:
@@ -192,7 +160,7 @@ def _auto_build(ctx: ToolContext, cfg: Config, root: str) -> None:
             collected.append(text)
             tracker.feed(text)
 
-    bar = _BarThread(tracker)
+    bar = BarThread(tracker)
     status: str | None = None
     rc: int | None = None
     bar.start()

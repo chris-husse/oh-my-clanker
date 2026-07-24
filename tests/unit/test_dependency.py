@@ -506,3 +506,169 @@ def test_update_manifest_locked_read_modify_write(tmp_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(add_keys, ["a", "b"]))
     assert len(load_manifest(home)["dependencies"]) == 50
+
+
+# ─── PageCountTracker ────────────────────────────────────────────────
+
+
+def _tree(dirpath, nodes):
+    dirpath.mkdir(parents=True, exist_ok=True)
+    (dirpath / "first_module_tree.json").write_text(json.dumps(nodes))
+
+
+def test_tracker_indeterminate_without_tree(tmp_path):
+    from omc.dependency import PageCountTracker
+
+    t = PageCountTracker(tmp_path)
+    t.refresh()
+    assert t.percent is None
+    assert t.state() == (None, 0)
+
+
+def test_tracker_counts_modules_pages_and_overview(tmp_path):
+    from omc.dependency import PageCountTracker
+
+    # 3 modules (a, its child b, c) + 1 overview page = 4 total
+    _tree(tmp_path, [{"slug": "a", "children": [{"slug": "b"}]}, {"slug": "c"}])
+    (tmp_path / "a.md").write_text("x")
+    (tmp_path / "b.md").write_text("x")
+    t = PageCountTracker(tmp_path)
+    assert t.beat() == (4, 2)
+    assert t.percent == 50
+
+
+def test_tracker_corrupt_tree_degrades_to_indeterminate(tmp_path):
+    from omc.dependency import PageCountTracker
+
+    _tree(tmp_path, [{"slug": "a"}])
+    (tmp_path / "first_module_tree.json").write_text("{not json")
+    t = PageCountTracker(tmp_path)
+    t.refresh()  # must not raise
+    assert t.percent is None
+
+
+def test_tracker_invalid_utf8_degrades_to_indeterminate(tmp_path):
+    from omc.dependency import PageCountTracker
+
+    (tmp_path / "first_module_tree.json").write_bytes(b"\xff\xfe\x80")
+    t = PageCountTracker(tmp_path)
+    t.refresh()  # must not raise (UnicodeDecodeError is a ValueError, not OSError)
+    assert t.percent is None
+
+
+def test_tracker_clamps_overshoot(tmp_path):
+    from omc.dependency import PageCountTracker
+
+    _tree(tmp_path, [{"slug": "a"}])  # total = 1 module + 1 overview = 2
+    for name in ("a.md", "overview.md", "stale-extra.md"):
+        (tmp_path / name).write_text("x")
+    t = PageCountTracker(tmp_path)
+    t.refresh()
+    assert t.percent == 100  # 3 pages / 2 expected — clamped, never >100
+
+
+# ─── run_document: resume line, bar, stall guard ─────────────────────
+
+
+def test_document_announces_resume_when_pages_exist(tmp_path, capsys):
+    ctx, _, _ = _ctx(tmp_path)
+    # with_wiki=False: _seed_indexed's default writes overview.md, which would
+    # skew the done-count; build the wiki dir by hand instead.
+    dest = _seed_indexed(ctx, with_wiki=False)
+    wiki = dest / ".gitnexus" / "wiki"
+    _tree(wiki, [{"slug": "a"}, {"slug": "b"}, {"slug": "c"}])  # 3 modules + overview = 4
+    (wiki / "a.md").write_text("x")
+    (wiki / "b.md").write_text("x")
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 0
+    assert "· resuming — 2/4 pages already on disk" in capsys.readouterr().err
+
+
+def test_document_no_resume_line_on_fresh_run(tmp_path, capsys):
+    ctx, _, _ = _ctx(tmp_path)
+    _seed_indexed(ctx)  # wiki dir exists with overview.md but no module tree
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 0
+    assert "resuming" not in capsys.readouterr().err
+
+
+def test_document_stall_kill_exits_1_and_keeps_documented_false(tmp_path, capsys, monkeypatch):
+    import omc.dependency as dep
+
+    ctx, _, _ = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    monkeypatch.setattr(dep, "_WIKI_STALL_SECONDS", 0.3)
+    # Replace the node stub with a silent sleeper: no output, no page writes.
+    node = tmp_path / "bin" / "node"
+    node.write_text("#!/bin/sh\nsleep 30\n")
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 1
+    err = capsys.readouterr().err
+    assert "stalled — no progress" in err
+    entry = load_manifest(ctx.home)["dependencies"]["github.com/foo/bar"]["commits"][H]
+    assert entry["documented"] is False
+
+
+def _progress_values(capsys):
+    out = capsys.readouterr().out
+    vals = []
+    verdict_seen = False
+    for ln in out.splitlines():
+        if ln.startswith("OMC_PROGRESS "):
+            assert not verdict_seen, "progress line after the verdict"
+            vals.append(json.loads(ln.split(" ", 1)[1])["percent"])
+        elif ln.startswith("OMC_DEPENDENCY "):
+            verdict_seen = True
+    assert verdict_seen
+    return vals
+
+
+def test_document_reports_initial_percent_when_resuming(tmp_path, capsys):
+    ctx, _, _ = _ctx(tmp_path)
+    dest = _seed_indexed(ctx, with_wiki=False)
+    wiki = dest / ".gitnexus" / "wiki"
+    _tree(wiki, [{"slug": "a"}, {"slug": "b"}, {"slug": "c"}])  # 3 + overview = 4
+    (wiki / "a.md").write_text("x")
+    (wiki / "b.md").write_text("x")
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 0
+    vals = _progress_values(capsys)
+    assert vals[0] == 50  # 2/4 known at start
+    assert vals[-1] == 100  # deterministic completion signal
+
+
+def test_document_reports_only_final_100_on_fresh_run(tmp_path, capsys):
+    ctx, _, _ = _ctx(tmp_path)
+    _seed_indexed(ctx)  # wiki exists, no tree -> percent unknown throughout
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 0
+    assert _progress_values(capsys) == [100]
+
+
+def test_document_emits_progress_as_pages_land(tmp_path, capsys, monkeypatch):
+    import omc.dependency as dep
+
+    ctx, _, _ = _ctx(tmp_path)
+    dest = _seed_indexed(ctx, with_wiki=False)
+    wiki = dest / ".gitnexus" / "wiki"
+    _tree(wiki, [{"slug": "a"}, {"slug": "b"}, {"slug": "c"}])
+    (wiki / "a.md").write_text("x")  # 1/4 at start
+    monkeypatch.setattr(dep, "_WIKI_POLL_SECONDS", 0.05)
+    # node stub: write one more page mid-run (cwd is the checkout), then linger
+    # long enough for a 0.05s poll to observe it.
+    node = tmp_path / "bin" / "node"
+    node.write_text("#!/bin/sh\nprintf x > .gitnexus/wiki/b.md\nsleep 0.4\nexit 0\n")
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 0
+    vals = _progress_values(capsys)
+    assert vals[0] == 25 and vals[-1] == 100
+    assert 50 in vals  # the mid-run beat saw b.md land
+
+
+def test_document_stall_emits_no_100(tmp_path, capsys, monkeypatch):
+    import omc.dependency as dep
+
+    ctx, _, _ = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    monkeypatch.setattr(dep, "_WIKI_STALL_SECONDS", 0.3)
+    monkeypatch.setattr(dep, "_WIKI_POLL_SECONDS", 0.05)
+    node = tmp_path / "bin" / "node"
+    node.write_text("#!/bin/sh\nsleep 30\n")
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 1
+    out = capsys.readouterr().out
+    assert 'OMC_PROGRESS {"percent": 100}' not in out
+    assert "OMC_DEPENDENCY" not in out

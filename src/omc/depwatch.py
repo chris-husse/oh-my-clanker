@@ -15,12 +15,17 @@ documented) on stdout.
 
 from __future__ import annotations
 
+import contextlib
+import json
+import os
 import re
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .cli.progress_bar import MultiBarThread, render_bar
 from .dependency import load_manifest, parse_git_url
 from .errors import OmcError
 from .toolctx import ToolContext
@@ -83,7 +88,8 @@ def _spawn(ctx: ToolContext, argv: list[str]) -> None:
         _say(f"✗ cannot run {argv[0]}: {exc}")
         return
     if cp.returncode != 0:
-        _say(f"✗ failed (exit {cp.returncode}): {(cp.stderr or '').strip()[:200]}")
+        detail = (cp.stderr or "").strip()[:200]
+        _say(f"✗ failed (exit {cp.returncode}): {detail}")
     else:
         _say("✓ done")
 
@@ -172,19 +178,88 @@ def _tick(ctx: ToolContext, attempted: set[tuple[str, str]]) -> int:
     return actions
 
 
+class _DocumentJob:
+    """One document child: percent parsed from its OMC_PROGRESS lines, full
+    output teed to a log file, exit code from the pool future's ctx.stream."""
+
+    def __init__(self, ref: str) -> None:
+        self.ref = ref
+        fd, self.log_path = tempfile.mkstemp(prefix="omc-dep-document-", suffix=".log")
+        self.log = os.fdopen(fd, "w", encoding="utf-8")
+        self.percent: int | None = None
+        self.rc: int | None = None
+        self._start = time.monotonic()
+        self._spin = 0
+
+    def feed(self, line: str) -> None:
+        self.log.write(line + "\n")
+        self.log.flush()
+        if line.startswith("OMC_PROGRESS "):
+            # malformed/foreign progress lines are ignored, never fatal
+            try:
+                pct = json.loads(line.split(" ", 1)[1])["percent"]
+            except (ValueError, KeyError, TypeError):
+                return
+            if isinstance(pct, int) and 0 <= pct <= 100:
+                self.percent = pct
+
+    def row(self) -> str:
+        spin = self._spin
+        if self.percent is None:
+            self._spin += 1
+        return f"{self.ref} {render_bar(self.percent, time.monotonic() - self._start, spin=spin)}"
+
+    def final_line(self) -> str:
+        if self.rc == 0:
+            return f"✓ done {self.ref} (log: {self.log_path})"
+        return f"✗ failed (exit {self.rc}) {self.ref} — log: {self.log_path}"
+
+
 def _document_batch(ctx: ToolContext, refs: list[str]) -> int:
     """Run the tick's document actions, up to _DOCUMENT_JOBS concurrently.
-    Threads only wait on subprocesses; narration interleaves but per-line."""
+    Children are fully piped: each job's output tees to its own log file and
+    its OMC_PROGRESS lines feed a per-dependency bar block (TTY only —
+    headless runs get per-job start/finish lines instead)."""
     if not refs:
         return 0
     if len(refs) > 1:
         _say(f"→ documenting {len(refs)} dependencies (up to {_DOCUMENT_JOBS} in parallel)")
+    jobs = {ref: _DocumentJob(ref) for ref in refs}
+    tty = bool(getattr(sys.stderr, "isatty", lambda: False)())
+    if not tty:
+        for job in jobs.values():
+            _say(f"→ omc internal dependency document --git {job.ref} — log: {job.log_path}")
+    bar = MultiBarThread(lambda: [job.row() for job in jobs.values()])
+    bar.start()
 
     def _document(ref: str) -> None:
-        _spawn(ctx, ["omc", "internal", "dependency", "document", "--git", ref])
+        job = jobs[ref]
+        # Contain a missing/unlaunchable omc (watch doctrine: warn+skip, never crash)
+        try:
+            job.rc = ctx.stream(
+                ["omc", "internal", "dependency", "document", "--git", ref],
+                on_line=job.feed,
+            )
+        except OSError as exc:
+            # Recovery write must not itself crash the watch loop: a full disk
+            # would make this write raise, escape pool.map and take the loop down
+            # (violating warn-and-skip). Suppress — the exit code still records it.
+            with contextlib.suppress(OSError):
+                job.log.write(f"{exc}\n")
+            job.rc = -1
+        finally:
+            try:
+                job.log.close()
+            except OSError:
+                pass
 
-    with ThreadPoolExecutor(max_workers=min(_DOCUMENT_JOBS, len(refs))) as pool:
-        list(pool.map(_document, refs))
+    try:
+        with ThreadPoolExecutor(max_workers=min(_DOCUMENT_JOBS, len(refs))) as pool:
+            list(pool.map(_document, refs))
+    finally:
+        bar.stop()
+    for job in jobs.values():
+        _say(job.final_line())
     return len(refs)
 
 

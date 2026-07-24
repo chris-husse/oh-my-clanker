@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +69,125 @@ class ToolContext:
             kwargs["text"] = True
             kwargs["stdin"] = subprocess.DEVNULL
         return subprocess.run(list(argv), **kwargs)  # noqa: S603 - argv list, no shell
+
+    def run_supervised(
+        self,
+        argv: Sequence[str],
+        *,
+        heartbeat: Callable[[], object],
+        stall_after: float = 300.0,
+        poll: float = 1.0,
+        cwd: str | os.PathLike[str] | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], bool]:
+        """Run argv captured like run(), supervised for LIVENESS, not deadline:
+        the child (its whole process group — LLM grandchildren included) is
+        killed only after ``stall_after`` seconds with NO progress, where
+        progress = the heartbeat() token changed OR any output bytes arrived.
+        No overall timeout — a healthy wiki run may take 40+ minutes.
+        Returns (completed, stalled). POSIX-only (killpg), like this module.
+
+        heartbeat runs on the supervising thread once per ``poll``; its
+        exceptions count as "no change" — a broken heartbeat must neither
+        kill a healthy child nor crash the supervisor."""
+        kwargs: dict[str, object] = {
+            "env": {**self.child_env(), **(extra_env or {})},
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "stdin": subprocess.DEVNULL,
+            "text": True,
+            "errors": "replace",
+            "start_new_session": True,  # own process group so killpg is precise
+        }
+        if cwd is not None:
+            kwargs["cwd"] = cwd
+        proc = subprocess.Popen(list(argv), **kwargs)  # noqa: S603 - argv list, no shell
+        chunks: dict[str, list[str]] = {"out": [], "err": []}
+        activity = [0]  # bytes seen across both pipes; += is read-modify-write,
+        # NOT atomic — but a lost update is harmless (add-only counter; at worst
+        # one poll window sees "no change" and the stall clock keeps running).
+
+        def pump(pipe, key: str) -> None:
+            try:
+                for raw in pipe:
+                    chunks[key].append(raw)
+                    activity[0] += len(raw)
+            finally:
+                pipe.close()
+
+        readers = [
+            threading.Thread(target=pump, args=(p, k), daemon=True)
+            for p, k in ((proc.stdout, "out"), (proc.stderr, "err"))
+        ]
+        # The child runs in its own session/group (start_new_session), so a
+        # terminal SIGINT never reaches it and a KeyboardInterrupt escaping the
+        # supervise loop (time.sleep / heartbeat) would exit the parent while the
+        # gitnexus+LLM tree kept running detached — burning money. Wrap the whole
+        # supervise-and-reap section: on ANY BaseException (Ctrl-C included) kill
+        # the group and re-raise. pgid == proc.pid via start_new_session, valid
+        # whether or not the leader has been reaped.
+        try:
+            for t in readers:
+                t.start()
+            stalled = False
+            last_token: object = object()  # sentinel: never equal to a real token
+            last_activity = -1
+            stamp = time.monotonic()
+            while proc.poll() is None:
+                time.sleep(poll)
+                try:
+                    token = heartbeat()
+                except Exception:  # noqa: BLE001 - heartbeat failure is not the child's fault
+                    token = last_token
+                if token != last_token or activity[0] != last_activity:
+                    last_token, last_activity = token, activity[0]
+                    stamp = time.monotonic()
+                elif time.monotonic() - stamp >= stall_after:
+                    stalled = True
+                    # SIGKILL, not TERM-then-KILL: the gitnexus child tree installs no
+                    # graceful handlers (plain fs.writeFile throughout), so TERM buys
+                    # nothing. A page truncated mid-write is the same pre-existing risk
+                    # a user Ctrl-C has today; resume-skip tolerates it.
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass  # child won the race and exited; the stall verdict stands
+                    break
+            # Supervision ended when the DIRECT child exited, but a descendant may
+            # still hold the inherited pipe fds and wedge silently — bare joins would
+            # block forever, re-opening the "never completes" bug this feature fixes.
+            # Bound the join by stall_after; if a reader is still alive, treat it as a
+            # stall, kill the group once more, then join unbounded (pipes close after
+            # the group dies). The leader is already reaped here, so os.getpgid fails;
+            # start_new_session makes pgid == the child's pid, so killpg(proc.pid,...).
+            for t in readers:
+                t.join(timeout=stall_after)
+            if any(t.is_alive() for t in readers):
+                stalled = True
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass  # group already gone; the stall verdict stands
+                for t in readers:
+                    t.join()
+            rc = proc.wait()
+        except BaseException:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass  # group already gone; nothing left to reap
+            else:
+                # Reap the leader so it does not linger as a zombie; the group is
+                # already dead, so this returns promptly.
+                with contextlib.suppress(OSError):
+                    proc.wait()
+            raise
+        return (
+            subprocess.CompletedProcess(
+                list(argv), rc, "".join(chunks["out"]), "".join(chunks["err"])
+            ),
+            stalled,
+        )
 
     def stream(
         self,

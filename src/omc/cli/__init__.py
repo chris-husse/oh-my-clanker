@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__
-from .config import resolve, store
-from .errors import OmcError
-from .start import run_start
-from .toolctx import ToolContext
+from .. import __version__
+from ..config import resolve, store
+from ..errors import OmcError
+from ..start import run_start
+from ..toolctx import ToolContext
 
 _CONFIGURE_HINT = "run `omc configure` first"
 
@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     # `internal` is hidden skill<->CLI plumbing: intercepted before argparse so it
     # never appears in --help; machine-readable stdout, no banner.
     if raw and raw[0] == "internal":
-        from .internal import run_internal
+        from ..internal import run_internal
 
         return run_internal(raw[1:])
     args = build_parser().parse_args(raw)
@@ -137,12 +137,12 @@ def main(argv: list[str] | None = None) -> int:
 
 def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
     if args.command == "version":
-        from .installsrc import version_string
+        from ..installsrc import version_string
 
         print(version_string(ctx.env))
         return 0
     if args.command == "print-install-path":
-        from .installsrc import package_root
+        from ..installsrc import package_root
 
         print(package_root())
         return 0
@@ -162,7 +162,7 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
         cfg = _load_cfg_or_bail(ctx)
         if cfg is None:
             return 2
-        from .watch import run_watch
+        from ..watch import run_watch
 
         return run_watch(
             ctx,
@@ -179,29 +179,29 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             cfg = _load_cfg_or_bail(ctx)
             if cfg is None:
                 return 2
-            from .depwatch import run_dependency_watch
+            from ..depwatch import run_dependency_watch
 
             return run_dependency_watch(ctx, interval=args.interval, once=args.once)
         if args.dep_command == "list":
-            from .depwatch import run_dependency_list
+            from ..depwatch import run_dependency_list
 
             return run_dependency_list(ctx.home)
         print("usage: omc dependency {watch|list}", file=sys.stderr)
         return 2
     if args.command == "configure":
-        from .configure import run_configure
+        from ..configure import run_configure
 
         return run_configure(ctx, defaults=args.defaults, sets=args.set)
     if args.command == "install":
-        from .installer import run_install
+        from ..installer import run_install
 
         return run_install(ctx, args.path)
     if args.command == "update":
-        from .installer import run_update
+        from ..installer import run_update
 
         return run_update(ctx)
     if args.command == "uninstall":
-        from .installer import run_uninstall
+        from ..installer import run_uninstall
 
         return run_uninstall(ctx)
     raise OmcError(f"unknown command {args.command!r}")

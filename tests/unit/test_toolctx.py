@@ -1,8 +1,16 @@
+import os
 import sys
+import time
 
 import pytest
 
 from omc.toolctx import ToolContext, tool_version
+
+
+def _ctx(tmp_path):
+    return ToolContext(
+        home=tmp_path / "home", env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]}
+    )
 
 
 def test_from_env_defaults(tmp_path):
@@ -125,3 +133,109 @@ def test_stream_callback_exception_propagates(tmp_path):
 
     with pytest.raises(RuntimeError, match="callback failed on one"):
         ctx.stream([sys.executable, "-c", code], on_line=boom)
+
+
+def test_supervised_kills_stalled_child(tmp_path):
+    ctx = _ctx(tmp_path)
+    t0 = time.monotonic()
+    cp, stalled = ctx.run_supervised(
+        ["sleep", "30"], heartbeat=lambda: 0, stall_after=0.4, poll=0.05
+    )
+    assert stalled is True
+    assert cp.returncode != 0
+    assert time.monotonic() - t0 < 10  # killed long before sleep 30 finishes
+
+
+def test_supervised_output_counts_as_progress(tmp_path):
+    ctx = _ctx(tmp_path)
+    script = "for i in 1 2 3 4 5 6; do echo tick; sleep 0.2; done"
+    cp, stalled = ctx.run_supervised(
+        ["sh", "-c", script], heartbeat=lambda: 0, stall_after=0.5, poll=0.05
+    )
+    assert stalled is False
+    assert cp.returncode == 0
+    assert cp.stdout.count("tick") == 6
+
+
+def test_supervised_heartbeat_counts_as_progress(tmp_path):
+    ctx = _ctx(tmp_path)
+    beats = iter(range(10_000))
+    cp, stalled = ctx.run_supervised(
+        ["sleep", "1.2"], heartbeat=lambda: next(beats), stall_after=0.5, poll=0.05
+    )
+    assert stalled is False
+    assert cp.returncode == 0
+
+
+def test_supervised_broken_heartbeat_never_kills_an_active_child(tmp_path):
+    ctx = _ctx(tmp_path)
+
+    def boom():
+        raise RuntimeError("heartbeat exploded")
+
+    script = "for i in 1 2 3 4 5 6; do echo tick; sleep 0.2; done"
+    cp, stalled = ctx.run_supervised(
+        ["sh", "-c", script], heartbeat=boom, stall_after=0.5, poll=0.05
+    )
+    assert stalled is False  # output alone kept it alive; heartbeat error contained
+    assert cp.returncode == 0
+
+
+def test_supervised_broken_heartbeat_still_kills_silent_child(tmp_path):
+    ctx = _ctx(tmp_path)
+
+    def boom():
+        raise RuntimeError("heartbeat exploded")
+
+    t0 = time.monotonic()
+    cp, stalled = ctx.run_supervised(["sleep", "30"], heartbeat=boom, stall_after=0.4, poll=0.05)
+    assert stalled is True  # containment must not disable the kill path
+    assert cp.returncode != 0
+    assert time.monotonic() - t0 < 10
+
+
+def test_supervised_leaked_pipe_holder_does_not_hang(tmp_path):
+    ctx = _ctx(tmp_path)
+    t0 = time.monotonic()
+    # The leader exits cleanly but backgrounds a child that inherits the pipe
+    # fds and sleeps — the reader joins must not block on that leaked fd.
+    cp, stalled = ctx.run_supervised(
+        ["sh", "-c", "sleep 30 & exit 0"],
+        heartbeat=lambda: 0,
+        stall_after=0.4,
+        poll=0.05,
+    )
+    assert time.monotonic() - t0 < 10  # returned, did not hang on the leaked fd
+    assert stalled is True
+    # returncode is 0 here — the leader exited cleanly; assert on time + stalled
+
+
+def test_supervised_kills_child_group_when_interrupted(tmp_path):
+    import pytest
+
+    ctx = _ctx(tmp_path)
+    pidfile = tmp_path / "child.pid"
+
+    def interrupt_once():
+        if pidfile.exists():
+            raise KeyboardInterrupt  # simulates terminal Ctrl-C reaching the supervisor
+        return 0
+
+    with pytest.raises(KeyboardInterrupt):
+        ctx.run_supervised(
+            ["sh", "-c", f'echo $$ > "{pidfile}"; sleep 30'],
+            heartbeat=interrupt_once,
+            stall_after=30,
+            poll=0.05,
+        )
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break  # child group is dead — the interrupt cleanup killed it
+        time.sleep(0.05)
+    else:
+        os.kill(pid, 9)  # cleanup so the suite doesn't leak a sleeper
+        raise AssertionError("child survived KeyboardInterrupt")
