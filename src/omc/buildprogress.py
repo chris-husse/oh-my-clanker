@@ -1,10 +1,12 @@
-"""Build-progress engine: pure line-fed percent extraction + bar rendering.
+"""Build-progress engine: pure line-fed percent extraction.
 
 Consumed by `omc watch --auto-build` (live bar while a build stage streams)
 and by `omc internal build-progress <logfile>` (standalone follow-mode
 viewer, Task 5). Parsers are an ordered registry — adding a build system is
 one entry + tests. Latest match wins; no match yet renders an indeterminate
-bouncing bar with elapsed time only.
+bouncing bar with elapsed time only. Bar rendering itself lives in
+`omc.cli.progress_bar`; this module keeps the parsers, `follow_log`, and the
+sentinel.
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+
+from .cli.progress_bar import render_bar
 
 
 # Ordered registry: (name, pattern, to_percent). First matching parser in
@@ -44,13 +48,6 @@ SENTINEL_RE = re.compile(r"^--- omc: stage finished \(rc (-?\d+|\?)\) ---$")
 
 def sentinel_line(rc: int | None) -> str:
     return _SENTINEL_FMT.format(rc="?" if rc is None else rc)
-
-
-def _format_elapsed(seconds: float) -> str:
-    total = int(seconds)
-    h, rem = divmod(total, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 class ProgressTracker:
@@ -85,18 +82,10 @@ class ProgressTracker:
         return (self._clock() if now is None else now) - self._start
 
     def render(self, now: float | None = None, width: int = 18) -> str:
-        clock_part = f"({_format_elapsed(self.elapsed(now))})"
-        pct = self._percent
-        if pct is None:
-            # bouncing <=> marker; advances one slot per redraw
-            pos = self._spin % (width - 3)
-            self._spin += 1
-            bar = " " * pos + "<=>" + " " * (width - 3 - pos)
-            return f"[{bar}]  --% {clock_part}"
-        filled = round(width * pct / 100)
-        bar = "=" * width if pct >= 100 else ("=" * filled + ">").ljust(width)[:width]
-        # a fresh 0% still shows the arrow head: ">" alone at filled == 0
-        return f"[{bar}] {pct:3d}% {clock_part}"
+        spin = self._spin
+        if self._percent is None:
+            self._spin += 1  # bounce advances one slot per redraw, as before
+        return render_bar(self._percent, self.elapsed(now), width=width, spin=spin)
 
 
 def follow_log(path_str: str, *, poll: float = 0.5, out=None) -> int:

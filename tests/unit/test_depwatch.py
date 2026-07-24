@@ -297,6 +297,38 @@ def test_cli_bare_dependency_is_usage_error(tmp_path, monkeypatch, capsys):
     assert main(["dependency"]) == 2
 
 
+def test_document_job_logs_output_and_parses_progress(tmp_path, capsys):
+    ctx, calls = _ctx(tmp_path)
+    omc = tmp_path / "bin" / "omc"
+    omc.write_text(
+        f'#!/bin/sh\necho "$@" >> "{calls}"\n'
+        "echo 'OMC_PROGRESS {\"percent\": 42}'\n"
+        "echo NARRATION >&2\n"
+        "echo 'OMC_PROGRESS not-json'\n"  # malformed: must be ignored, not crash
+        "exit 0\n"
+    )
+    _seed_manifest(ctx.home, indexed=True, documented=False)
+    assert run_dependency_watch(ctx, once=True) == 0
+    err = capsys.readouterr().err
+    assert "✓ done github.com/foo/bar@" in err
+    assert "log: " in err
+    log_path = err.split("log: ", 1)[1].split()[0].rstrip(")")
+    logged = open(log_path).read()
+    assert 'OMC_PROGRESS {"percent": 42}' in logged and "NARRATION" in logged
+    assert "\x1b[" not in err  # non-TTY: no ANSI bar bytes
+
+
+def test_document_job_failure_names_exit_and_log(tmp_path, capsys):
+    ctx, calls = _ctx(tmp_path)
+    omc = tmp_path / "bin" / "omc"
+    omc.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\nexit 3\n')
+    _seed_manifest(ctx.home, indexed=True, documented=False)
+    assert run_dependency_watch(ctx, once=True) == 0
+    err = capsys.readouterr().err
+    assert "✗ failed (exit 3) github.com/foo/bar@" in err
+    assert "log: " in err
+
+
 def test_failed_adoption_never_claims_finished(tmp_path, capsys):
     # The no-op stub's ensure leaves the manifest empty, so the pass's only
     # "action" produced nothing adopted — the announcement must say pending,
