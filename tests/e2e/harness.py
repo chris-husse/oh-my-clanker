@@ -38,15 +38,63 @@ def require_token(provider: str) -> None:
         )
 
 
+# Auth failures surface INSIDE the container, printed by a provider CLI that omc
+# spawns itself — run_in's argv is usually ["omc", ...], so the failing provider
+# cannot be read off the command. These signatures are provider-specific strings,
+# so a match identifies the provider on its own; no provider argument is needed.
+#
+# VERIFIED strings only, captured from live container runs (the first is also
+# recorded in docker/PLUGIN-NOTES.md). codex and opencode have no entries because
+# their auth-failure output has never been observed here — do not guess one, and
+# never broaden these to a fragment like "OAuth", "401", or "Authentication
+# failed": the stub Jira MCP's auth-error mode emits "Authentication failed (HTTP
+# 401): OAuth token expired or revoked" on purpose, and a loose matcher would fire
+# on it and break test_slug_mcp_unauthenticated.
+_AUTH_FAILURES = (
+    (
+        "Not logged in",
+        "claude has no credentials in the container — "
+        f"{_TOKEN_GUIDANCE['claude']} (start from `cp env.example .env`).",
+    ),
+    (
+        "OAuth access token is invalid",
+        "claude rejected CLAUDE_CODE_OAUTH_TOKEN as expired or malformed — "
+        "re-run `claude setup-token` and replace it in .env.",
+    ),
+)
+
+
+def detect_auth_failure(output: str) -> str | None:
+    """Map a container CLI's auth-failure output to its remediation.
+
+    Pure: text in, guidance or None out. run_in calls this on every exec so a bad
+    credential fails at the point of use with the fix attached, instead of
+    surfacing as an unrelated assertion three tests later.
+    """
+    for signature, remediation in _AUTH_FAILURES:
+        if signature in output:
+            return remediation
+    return None
+
+
 def run_in(container, argv, *, env=None, cwd=None, timeout=600):
-    """Exec argv in the container; returns (rc, combined-output)."""
+    """Exec argv in the container; returns (rc, combined-output).
+
+    A provider auth failure anywhere in that output fails the test right here,
+    with the remediation — otherwise it resurfaces later as a confusing
+    assertion about missing text, blamed on whichever test ran first.
+    """
     cmd = shlex.join(argv)
     if cwd:
         cmd = f"cd {shlex.quote(cwd)} && {cmd}"
     wrapped = ["timeout", str(timeout), "bash", "-lc", cmd]
     envs = {k: v for k, v in (env or {}).items()}
     result = container.get_wrapped_container().exec_run(wrapped, environment=envs or None)
-    return result.exit_code, result.output.decode(errors="replace")
+    output = result.output.decode(errors="replace")
+    remediation = detect_auth_failure(output)
+    if remediation is not None:
+        pytest.fail(f"provider auth failed in container: {remediation}\n\n{output}")
+    return result.exit_code, output
 
 
 def configure_omc(container, provider: str) -> None:
