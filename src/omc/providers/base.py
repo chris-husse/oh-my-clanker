@@ -93,8 +93,10 @@ class Provider(ABC):
         return ""
 
     @abstractmethod
-    def plugin_update_argvs(self) -> list[list[str]]:
+    def plugin_update_argvs(self, marketplace_source: str | None = None) -> list[list[str]]:
         """Commands that update this provider's installed omc plugin, in order.
 
-        [] means no scriptable update path is known yet — `omc update` says so
-        and moves on. Builders stay pure (no I/O)."""
+        ``marketplace_source`` (owner/repo or a local path) lets a provider
+        self-heal a missing marketplace registration; providers that don't need
+        it ignore the argument. [] means no scriptable update path is known yet.
+        Builders stay pure (no I/O)."""

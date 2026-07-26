@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .config import resolve
 from .errors import OmcError
-from .gitnexus import gitnexus_argv, gitnexus_cli
+from .gitnexus import ensure_gitnexus, gitnexus_argv, gitnexus_cli
 from .mirror import mirror_snapshot
 from .providers.registry import provider_names
 from .toolctx import ToolContext
@@ -23,7 +23,7 @@ from .wtconfig import WT_TEMPLATE, primary_root, repo_root
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] | wt-template"
     " | notify --provider NAME [--event E] [--message M] [payload]"
-    " | gitnexus [--git REF] <query|context|impact|cypher> [args…]"
+    " | gitnexus [--git REF] <ensure|query|context|impact|cypher> [args…]"
     " | dependency <ensure|document|list> [args…]"
     " | build-progress LOGFILE}"
 )
@@ -98,6 +98,8 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
     that dependency checkout pinned to omc-pin — READ-ONLY: unknown/unindexed
     refs error with the ensure hint, never clone.
     """
+    if rest == ["ensure"]:
+        return ensure_gitnexus(ctx)
     dep_ref: str | None = None
     if rest[:1] == ["--git"]:
         if len(rest) < 2:
@@ -109,7 +111,8 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
         return 2
     if not gitnexus_cli(ctx).is_file():
         print(
-            "error: GitNexus is not installed — run /omc:index once in a session first",
+            "error: GitNexus is not installed — run `omc update` (or `omc start`/`omc watch`) "
+            "to install it",
             file=sys.stderr,
         )
         return 1

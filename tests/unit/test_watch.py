@@ -58,13 +58,17 @@ def _push_remote_edit(origin, tmp_path):
 
 
 def _ctx_with_node_stub(tmp_path, home):
-    """Real git on PATH + a recording `node` stub + a fake built gitnexus CLI."""
+    """Real git on PATH + recording `node`/`wt`/`claude` stubs + a fake built CLI."""
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     calls = bindir / "node.calls"
     node = bindir / "node"
     node.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\necho ok\nexit 0\n')
     node.chmod(node.stat().st_mode | stat.S_IXUSR)
+    for name in ("wt", "claude"):
+        stub = bindir / name
+        stub.write_text(f'#!/bin/sh\necho "{name} 1.0"\nexit 0\n')
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
     cli = home / "dependencies" / "gitnexus" / "gitnexus" / "dist" / "cli" / "index.js"
     cli.parent.mkdir(parents=True)
     cli.write_text("// fake built CLI")
@@ -153,7 +157,9 @@ def test_tick_refuses_off_branch(tmp_path, capsys):
     assert _run_once(repo, ctx) == 0
     err = capsys.readouterr().err
     assert "not on main" in err
-    assert not calls.exists()
+    # node IS invoked once now (ensure_gitnexus's health probe), but never for
+    # a reindex on this off-branch skip.
+    assert "analyze" not in (calls.read_text() if calls.exists() else "")
     assert not (repo / "new.txt").exists()  # never yanked the checkout
 
 
@@ -164,7 +170,9 @@ def test_tick_refuses_dirty_tree(tmp_path, capsys):
     ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     assert "dirty" in capsys.readouterr().err
-    assert not calls.exists()
+    # node IS invoked once now (ensure_gitnexus's health probe), but never for
+    # a reindex on this dirty-tree skip.
+    assert "analyze" not in (calls.read_text() if calls.exists() else "")
 
 
 def _tick_rebase(ctx, repo, last=None):
@@ -321,18 +329,67 @@ def test_watch_rebase_flag_threads_through(tmp_path, capsys):
     assert (repo / "f.txt").read_text() == "uncommitted edit\n"
 
 
-def test_watch_requires_gitnexus_cli(tmp_path, capsys):
+def test_watch_installs_gitnexus_when_missing(tmp_path, monkeypatch):
+    import omc.watch as watch_mod
+
     _, repo = _repo_with_origin(tmp_path)
-    env = {"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "empty"), "PATH": os.environ["PATH"]}
+    # Stub git/wt/claude/node for require_tools + the loop's own gitnexus
+    # calls; no gitnexus CLI on disk.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("wt", "claude", "node"):
+        stub = bindir / name
+        stub.write_text(f'#!/bin/sh\necho "{name} 1.0"\nexit 0\n')
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    env = {
+        "HOME": str(tmp_path),
+        "OMC_HOME": str(tmp_path / "home"),
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+    }
     ctx = ToolContext.from_env(env)
+    calls = []
+    monkeypatch.setattr(watch_mod, "ensure_gitnexus", lambda c: calls.append(True) or 0)
+    # --once still forces an analyze; the node stub makes it a no-op.
     old = os.getcwd()
     os.chdir(repo)
     try:
         rc = run_watch(ctx, Config(), interval=1, once=True, enable_documentation=False)
     finally:
         os.chdir(old)
-    assert rc == 1
-    assert "/omc:index" in capsys.readouterr().err  # points at the installer path
+    assert calls == [True]  # ensure_gitnexus was invoked
+    assert rc == 0
+
+
+def test_watch_aborts_when_gitnexus_install_fails(tmp_path, monkeypatch):
+    import omc.watch as watch_mod
+
+    from ._mutexproc import flock_free
+
+    _, repo = _repo_with_origin(tmp_path)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("wt", "claude"):
+        stub = bindir / name
+        stub.write_text(f'#!/bin/sh\necho "{name} 1.0"\nexit 0\n')
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    env = {
+        "HOME": str(tmp_path),
+        "OMC_HOME": str(tmp_path / "home"),
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+    }
+    ctx = ToolContext.from_env(env)
+    monkeypatch.setattr(watch_mod, "ensure_gitnexus", lambda c: 1)  # install fails
+
+    old = os.getcwd()
+    os.chdir(repo)
+    try:
+        rc = run_watch(ctx, Config(), interval=1, once=True, enable_documentation=False)
+    finally:
+        os.chdir(old)
+    assert rc == 1  # aborted on the failed prerequisite
+    # a failed prerequisite must leave no lock behind — it never even reaches
+    # watch_locks()/acquire_instance().
+    assert flock_free(repo / ".git" / "omc-watch.lock")
 
 
 def _run_loop(repo, ctx, ticks, between=None):
@@ -629,7 +686,9 @@ def test_auto_build_unconfigured_skips_llm_entirely(tmp_path, capsys):
     calls = _stub_claude(tmp_path, "should never run")
     assert _run_once_auto_build(repo, ctx) == 0
     assert "· no project build stage configured — skipping auto-build" in capsys.readouterr().err
-    assert not calls.exists()  # the provider binary was NEVER invoked
+    # claude IS invoked once now (require_tools's --version probe), but never
+    # for an actual build (which always passes -p).
+    assert "-p" not in (calls.read_text() if calls.exists() else "")
 
 
 def test_no_auto_build_flag_means_no_build(tmp_path, capsys):
@@ -639,7 +698,9 @@ def test_no_auto_build_flag_means_no_build(tmp_path, capsys):
     calls = _stub_claude(tmp_path, "should never run")
     assert _run_once(repo, ctx) == 0  # plain --once, no auto_build
     assert "auto-build" not in capsys.readouterr().err
-    assert not calls.exists()
+    # claude IS invoked once now (require_tools's --version probe), but never
+    # for an actual build (which always passes -p).
+    assert "-p" not in (calls.read_text() if calls.exists() else "")
 
 
 def test_auto_build_announces_log_path_up_front(tmp_path, capsys):

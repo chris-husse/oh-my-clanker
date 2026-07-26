@@ -144,6 +144,30 @@ def test_plugin_update_argvs_are_pure_and_per_provider():
     assert get_provider("opencode").plugin_update_argvs() == []  # not scriptable yet
 
 
+def test_claude_plugin_update_prepends_marketplace_add():
+    from omc.providers.claude import ClaudeProvider
+
+    argvs = ClaudeProvider().plugin_update_argvs("chris-husse/oh-my-clanker")
+    assert argvs[0] == ["claude", "plugin", "marketplace", "add", "chris-husse/oh-my-clanker"]
+    assert ["claude", "plugin", "marketplace", "update", "oh-my-clanker"] in argvs
+    assert ["claude", "plugin", "update", "omc@oh-my-clanker"] in argvs
+
+
+def test_claude_plugin_update_without_source_omits_add():
+    from omc.providers.claude import ClaudeProvider
+
+    argvs = ClaudeProvider().plugin_update_argvs()
+    assert not any("add" in a for a in argvs)  # no source → no marketplace add
+
+
+def test_codex_ignores_marketplace_source():
+    from omc.providers.codex import CodexProvider
+
+    assert CodexProvider().plugin_update_argvs("anything") == [
+        ["codex", "plugin", "marketplace", "upgrade"]
+    ]
+
+
 # Captured from a real `claude -p --output-format stream-json --verbose` run
 # (2026-07-19 probe) — shapes, not verbatim transcripts.
 _SJ_ASSISTANT_TEXT = (

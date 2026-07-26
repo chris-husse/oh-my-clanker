@@ -298,7 +298,8 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
         return 1
     if not gitnexus_cli(ctx).is_file():
         print(
-            "error: GitNexus is not installed — run /omc:index once in a session first",
+            "error: GitNexus is not installed — run `omc update` (or `omc start`/`omc watch`) "
+            "to install it",
             file=sys.stderr,
         )
         return 1

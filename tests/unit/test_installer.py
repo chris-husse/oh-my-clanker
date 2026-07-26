@@ -1,12 +1,23 @@
 import os
 import stat
 
+import pytest
+
 from omc.config import store
 from omc.config.schema import GlobalConfig, ProviderConfig
+from omc.errors import OmcError
 from omc.installer import run_install, run_uninstall, run_update, validate_checkout
 from omc.toolctx import ToolContext
 
 from ._stubs import make_stub, stub_env
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gitnexus(monkeypatch):
+    # Installer tests exercise require_tools + the plugin loop, not the real
+    # clone/build. Keep update_gitnexus a no-op success here. A per-test
+    # monkeypatch.setattr overrides this autouse default.
+    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: 0)
 
 
 def _checkout(tmp_path):
@@ -87,7 +98,11 @@ def test_uninstall_removes_home_but_refuses_unsafe(tmp_path, capsys):
 def _stub(bindir, name, rc=0):
     calls = bindir / f"{name}.calls"
     exe = bindir / name
-    exe.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\nexit {rc}\n')
+    # --version always succeeds (require_tools probe); other subcommands use rc.
+    exe.write_text(
+        f'#!/bin/sh\necho "$@" >> "{calls}"\n'
+        f'case "$1" in --version) exit 0 ;; *) exit {rc} ;; esac\n'
+    )
     exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
     return calls
 
@@ -98,6 +113,8 @@ def _update_ctx(tmp_path, *, claude_rc=0):
     uv_calls = _stub(bindir, "uv")
     claude_calls = _stub(bindir, "claude", rc=claude_rc)
     codex_calls = _stub(bindir, "codex")
+    _stub(bindir, "wt")  # require_tools probes git/wt/provider
+    _stub(bindir, "git")  # deterministic --version for the probe
     home = tmp_path / "omc-home"
     ctx = ToolContext.from_env(
         {"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}"}
@@ -122,7 +139,43 @@ def test_update_isolates_provider_failures(tmp_path, capsys):
     assert run_update(ctx) == 0  # a broken provider never fails the update
     assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
     err = capsys.readouterr().err
-    assert "claude" in err and "✗" in err  # failure narrated
+    assert "claude" in err
+    assert err.count("✗") == 1  # only the FINAL argv decides pass/fail — benign
+    # marketplace add/update failures must not each print their own ✗
+
+
+def test_update_aborts_when_required_tool_missing(tmp_path, monkeypatch):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "uv")
+    _stub(bindir, "claude")  # default provider present…
+    _stub(bindir, "git")
+    # Enforce the ordering invariant: require_tools must gate BEFORE the
+    # GitNexus install, so update_gitnexus must never run on the abort path.
+    monkeypatch.setattr(
+        "omc.gitnexus.update_gitnexus",
+        lambda ctx: pytest.fail(
+            "update_gitnexus ran despite the missing-tool abort — "
+            "require_tools must gate BEFORE the GitNexus install"
+        ),
+    )
+    # …but wt points at a nonexistent binary → require_tools raises. (A bare
+    # `wt` would resolve to a real install on a dev machine's PATH.)
+    home = tmp_path / "omc-home"
+    ctx = ToolContext.from_env(
+        {
+            "HOME": str(tmp_path),
+            "OMC_HOME": str(home),
+            "OMC_WT_BIN": str(bindir / "no-such-wt"),
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+        }
+    )
+    cfg = GlobalConfig()
+    cfg.llm.providers = {"claude": ProviderConfig()}
+    store.save_global(ctx.home, cfg)
+    with pytest.raises(OmcError) as exc:
+        run_update(ctx)
+    assert "wt" in str(exc.value)
 
 
 def test_update_without_config_skips_plugins(tmp_path, capsys):
@@ -140,11 +193,30 @@ def test_update_without_config_skips_plugins(tmp_path, capsys):
     assert "skipping plugin updates" in capsys.readouterr().err
 
 
+def test_update_registers_marketplace_before_updating(tmp_path):
+    ctx, uv_calls, claude_calls, codex_calls = _update_ctx(tmp_path)
+    assert run_update(ctx) == 0
+    recorded = claude_calls.read_text()
+    assert "plugin marketplace add" in recorded  # self-heal registration
+    assert "plugin marketplace update oh-my-clanker" in recorded
+    assert "plugin update omc@oh-my-clanker" in recorded
+    # "before updating" is the point of this test — assert order, not just presence.
+    assert recorded.index("plugin marketplace add") < recorded.index(
+        "plugin update omc@oh-my-clanker"
+    )
+
+
 def test_update_isolates_unknown_provider(tmp_path, capsys):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     _stub(bindir, "uv")
     codex_calls = _stub(bindir, "codex")
+    # require_tools probes the DEFAULT provider (claude) + git/wt, not the
+    # configured (unknown) providers — stub those so the probe passes and the
+    # test still exercises unknown-provider isolation in the plugin loop.
+    _stub(bindir, "claude")
+    _stub(bindir, "wt")
+    _stub(bindir, "git")
     home = tmp_path / "omc-home"
     ctx = ToolContext.from_env(
         {"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}"}

@@ -5,45 +5,21 @@ description: Internal — used by the gitnexus-* skills; not meant for direct in
 
 # omc gitnexus-ensure (internal)
 
-GitNexus is omc's managed code-knowledge-graph dependency. It is never a PATH
-binary — it runs as `node <CLI>` where:
+GitNexus is omc's managed code-knowledge-graph dependency, installed and built
+by the Python CLI. It runs as `node <CLI>` where:
 
-```
-CLI = ~/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js
-```
+    CLI = ~/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js
 
 (`~/.omc` is `$OMC_HOME` when that env var is set.)
 
-## Step 1 — healthy already?
+## Ensure it
 
-`node <CLI> --version` succeeds → report the version and end. Done.
+Run:
 
-(Updating an already-healthy install is `omc update`'s job — deterministic,
-forces `main`. This skill only installs/repairs.)
+    omc internal gitnexus ensure
 
-## Step 2 — install (approved source ONLY)
-
-The ONLY source ever cloned or accepted is:
-
-```
-https://github.com/chris-husse/GitNexus.git
-```
-
-- Destination `~/.omc/dependencies/gitnexus` already contains a git clone →
-  check `git -C <dest> remote get-url origin`. Anything other than the
-  approved URL → **REFUSE and stop** ("origin is X, not the approved GitNexus
-  source") — never re-point, never build an unapproved tree. Approved →
-  `git -C <dest> fetch origin --prune && git -C <dest> checkout main` and pull.
-- No clone → `git clone https://github.com/chris-husse/GitNexus.git <dest>`.
-
-## Step 3 — build (two-step; order matters)
-
-1. `gitnexus-shared/` is a plain sibling package, NOT an npm workspace — the
-   main build compiles it with ITS OWN `node_modules/.bin/tsc`, so install its
-   deps FIRST: `cd <dest>/gitnexus-shared && npm install --no-audit --no-fund`.
-2. `cd <dest>/gitnexus && npm ci && npm run build`.
-
-## Step 4 — verify
-
-`node <CLI> --version` must now succeed; report the version. If it doesn't,
-surface the build output and stop — never claim success on a broken build.
+This installs GitNexus when missing (approved-source clone from
+`https://github.com/chris-husse/GitNexus.git` + the two-step npm build) and is a
+silent no-op when the CLI is already healthy. It refuses any existing clone
+whose origin is not the approved source. Report what it prints; on a non-zero
+exit, surface its output and stop — never claim success on a broken build.

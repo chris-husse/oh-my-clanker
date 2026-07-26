@@ -26,8 +26,9 @@ from .buildprogress import ProgressTracker, sentinel_line
 from .cli.progress_bar import BarThread
 from .config.schema import Config
 from .errors import OmcError
-from .gitnexus import ANALYZE_ARGS, gitnexus_argv, gitnexus_cli
+from .gitnexus import ANALYZE_ARGS, ensure_gitnexus, gitnexus_argv
 from .mirror import mirror_dir
+from .probe import require_tools
 from .providers.registry import docs_model_for, get_provider
 from .skills_source import skill_prompt
 from .toolctx import ToolContext
@@ -396,13 +397,12 @@ def run_watch(
             file=sys.stderr,
         )
         return 1
-    if not gitnexus_cli(ctx).is_file():
-        print(
-            "error: GitNexus is not installed yet — run /omc:index once in a session "
-            "first (it installs GitNexus), then start omc watch.",
-            file=sys.stderr,
-        )
-        return 1
+    # Prerequisites fail fast BEFORE the mutex (a miss must leave no lock);
+    # the warn-and-skip doctrine applies only to ticks, never to boot checks.
+    require_tools(ctx, cfg)  # git/wt/provider — raises OmcError on a miss
+    rc = ensure_gitnexus(ctx)
+    if rc:
+        return rc
     ensure_wt_config(ctx, root)
     locks = watch_locks(ctx, cwd=root)
     if locks is None:

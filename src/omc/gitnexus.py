@@ -1,9 +1,8 @@
 """Shared GitNexus CLI location + invocation helpers.
 
-Install/ensure stays in skill prose (gitnexus-ensure); Python only LOCATES the
-built CLI and drives the deterministic commands watch/rebase-main need, and
-updates an existing managed clone (`omc update`); first install stays in skill
-prose.
+Python owns install/heal (`ensure_gitnexus`) and install-or-update of the
+managed clone (`update_gitnexus`), plus locating the built CLI and driving the
+deterministic commands watch/rebase-main need.
 """
 
 from __future__ import annotations
@@ -69,19 +68,19 @@ def _cli_version(ctx: ToolContext) -> str | None:
     return (cp.stdout or "").strip() or None if cp.returncode == 0 else None
 
 
-def update_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN) -> int:
-    """Deterministic update of the managed GitNexus clone (`omc update`).
-
-    Forces main — the clone is not a dev workspace. First install stays in
-    the gitnexus-ensure skill; a missing clone is a skip, not an error.
-    """
-    root = gitnexus_root(ctx)
+def _clone_if_missing(ctx: ToolContext, root: Path, approved_origin: str) -> int:
+    """Ensure <root> is a clone of the approved origin. Clone when absent;
+    refuse (never re-point) when an existing clone has a different origin."""
     git = ctx.git_bin
     if not (root / ".git").exists():
-        print(
-            "GitNexus not installed — /omc:index installs it on first use; skipping.",
-            file=sys.stderr,
-        )
+        root.parent.mkdir(parents=True, exist_ok=True)
+        cp = ctx.run([git, "clone", approved_origin, str(root)])
+        if cp.returncode != 0:
+            print(
+                f"error: GitNexus clone failed: {(cp.stderr or '').strip()[:400]}",
+                file=sys.stderr,
+            )
+            return 1
         return 0
     cp = ctx.run([git, "-C", str(root), "remote", "get-url", "origin"])
     origin = (cp.stdout or "").strip()
@@ -93,34 +92,12 @@ def update_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN)
             file=sys.stderr,
         )
         return 1
-    old = _cli_version(ctx)
-    cp = ctx.run([git, "-C", str(root), "fetch", "origin", "--prune"])
-    if cp.returncode != 0:
-        print(f"error: GitNexus fetch failed: {(cp.stderr or '').strip()[:400]}", file=sys.stderr)
-        return 1
-    head = ctx.run([git, "-C", str(root), "rev-parse", "HEAD"])
-    remote = ctx.run([git, "-C", str(root), "rev-parse", "origin/main"])
-    if (
-        head.returncode == 0
-        and remote.returncode == 0
-        and head.stdout.strip() == remote.stdout.strip()
-    ):
-        print(f"✓ GitNexus up to date{f' ({old})' if old else ''}", file=sys.stderr)
-        return 0
-    print("→ updating GitNexus…", file=sys.stderr)
-    for argv in (
-        [git, "-C", str(root), "checkout", "main"],
-        [git, "-C", str(root), "merge", "--ff-only", "origin/main"],
-    ):
-        cp = ctx.run(argv)
-        if cp.returncode != 0:
-            print(
-                f"error: GitNexus {' '.join(argv[3:])} failed: {(cp.stderr or '').strip()[:400]}",
-                file=sys.stderr,
-            )
-            return 1
-    # Two-step build; order matters (gitnexus-shared is a plain sibling package
-    # compiled by the main build with its own node_modules).
+    return 0
+
+
+def _build(ctx: ToolContext, root: Path) -> int:
+    """Two-step npm build; order matters (gitnexus-shared is a plain sibling
+    package compiled by the main build with its own node_modules)."""
     for argv, cwd in (
         (["npm", "install", "--no-audit", "--no-fund"], root / "gitnexus-shared"),
         (["npm", "ci"], root / "gitnexus"),
@@ -137,6 +114,77 @@ def update_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN)
                 file=sys.stderr,
             )
             return 1
+    return 0
+
+
+def ensure_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN) -> int:
+    """Install/heal the managed GitNexus clone. Silent no-op when the CLI is
+    already healthy (the common path start/watch hit every run). Does NOT
+    fetch/ff main — updating a healthy install is `omc update`'s job."""
+    if _cli_version(ctx) is not None:
+        return 0  # healthy: silent no-op
+    root = gitnexus_root(ctx)
+    rc = _clone_if_missing(ctx, root, approved_origin)
+    if rc:
+        return rc
+    rc = _build(ctx, root)
+    if rc:
+        return rc
+    ver = _cli_version(ctx)
+    if ver is None:
+        print(
+            "error: GitNexus built but the CLI won't report --version — not claiming success",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"✓ GitNexus installed ({ver})", file=sys.stderr)
+    return 0
+
+
+def update_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN) -> int:
+    """Deterministic install-or-update of the managed GitNexus clone
+    (`omc update`). Installs when missing, else forces main and rebuilds."""
+    root = gitnexus_root(ctx)
+    # A fresh install must always build: an origin that carries a prebuilt
+    # tree would otherwise land at origin/main with a working CLI and falsely
+    # short-circuit as "up to date" before the first build ever runs.
+    freshly_cloned = not (root / ".git").exists()
+    rc = _clone_if_missing(ctx, root, approved_origin)
+    if rc:
+        return rc
+    git = ctx.git_bin
+    old = _cli_version(ctx)
+    cp = ctx.run([git, "-C", str(root), "fetch", "origin", "--prune"])
+    if cp.returncode != 0:
+        print(f"error: GitNexus fetch failed: {(cp.stderr or '').strip()[:400]}", file=sys.stderr)
+        return 1
+    head = ctx.run([git, "-C", str(root), "rev-parse", "HEAD"])
+    remote = ctx.run([git, "-C", str(root), "rev-parse", "origin/main"])
+    if (
+        head.returncode == 0
+        and remote.returncode == 0
+        and head.stdout.strip() == remote.stdout.strip()
+        and old is not None
+        and not freshly_cloned
+    ):
+        print(f"✓ GitNexus up to date{f' ({old})' if old else ''}", file=sys.stderr)
+        return 0
+    verb = "installing" if freshly_cloned else "updating"
+    print(f"→ {verb} GitNexus…", file=sys.stderr)
+    for argv in (
+        [git, "-C", str(root), "checkout", "main"],
+        [git, "-C", str(root), "merge", "--ff-only", "origin/main"],
+    ):
+        cp = ctx.run(argv)
+        if cp.returncode != 0:
+            print(
+                f"error: GitNexus {' '.join(argv[3:])} failed: {(cp.stderr or '').strip()[:400]}",
+                file=sys.stderr,
+            )
+            return 1
+    rc = _build(ctx, root)
+    if rc:
+        return rc
     new = _cli_version(ctx)
     if new is None:
         print(
@@ -144,8 +192,11 @@ def update_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN)
             file=sys.stderr,
         )
         return 1
-    print(
-        f"✓ GitNexus updated{f': {old} → {new}' if old and old != new else f' ({new})'}",
-        file=sys.stderr,
-    )
+    if freshly_cloned:
+        print(f"✓ GitNexus installed ({new})", file=sys.stderr)
+    else:
+        print(
+            f"✓ GitNexus updated{f': {old} → {new}' if old and old != new else f' ({new})'}",
+            file=sys.stderr,
+        )
     return 0
