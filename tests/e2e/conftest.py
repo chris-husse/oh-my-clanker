@@ -48,6 +48,27 @@ def _target_arch() -> str:
     return _DOCKER_ARCH.get(machine, machine)
 
 
+def _forward_tokens(c):
+    """Forward whatever provider credentials the host has into the container.
+    Absent vars are simply not forwarded — require_token does the gating."""
+    for var in ALL_TOKEN_VARS:
+        if os.environ.get(var):
+            c = c.with_env(var, os.environ[var])
+    return c
+
+
+def _finish_container_setup(c):
+    """Post-start steps every container needs, in order."""
+    # finish plugin registration (needs network; baked layer may have been offline)
+    c.get_wrapped_container().exec_run(["bash", "/repo/docker/setup-plugins.sh"])
+    # codex >=0.144 doesn't use a bare OPENAI_API_KEY env — it needs an explicit
+    # stdin login that writes ~/.codex/auth.json (real users run this themselves).
+    if os.environ.get("OPENAI_API_KEY"):
+        c.get_wrapped_container().exec_run(
+            ["bash", "-c", "printenv OPENAI_API_KEY | codex login --with-api-key"]
+        )
+
+
 @pytest.fixture(scope="session")
 def e2e_image():
     cfg_dir = _isolate_docker_config()
@@ -70,20 +91,10 @@ def e2e_image():
 def container(e2e_image):
     from testcontainers.core.container import DockerContainer
 
-    c = DockerContainer(e2e_image).with_command("sleep infinity")
-    for var in ALL_TOKEN_VARS:
-        if os.environ.get(var):
-            c = c.with_env(var, os.environ[var])
+    c = _forward_tokens(DockerContainer(e2e_image).with_command("sleep infinity"))
     try:
         c.start()
-        # finish plugin registration (needs network; baked layer may have been offline)
-        c.get_wrapped_container().exec_run(["bash", "/repo/docker/setup-plugins.sh"])
-        # codex >=0.144 doesn't use a bare OPENAI_API_KEY env — it needs an explicit
-        # stdin login that writes ~/.codex/auth.json (real users run this themselves).
-        if os.environ.get("OPENAI_API_KEY"):
-            c.get_wrapped_container().exec_run(
-                ["bash", "-c", "printenv OPENAI_API_KEY | codex login --with-api-key"]
-            )
+        _finish_container_setup(c)
         yield c
     finally:
         c.stop()
@@ -97,21 +108,14 @@ def container_with_artifacts(e2e_image):
 
     artifacts = REPO_ROOT / "tests" / "e2e" / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
-    c = (
+    c = _forward_tokens(
         DockerContainer(e2e_image)
         .with_command("sleep infinity")
         .with_volume_mapping(str(artifacts), "/artifacts", "rw")
     )
-    for var in ALL_TOKEN_VARS:
-        if os.environ.get(var):
-            c = c.with_env(var, os.environ[var])
     try:
         c.start()
-        c.get_wrapped_container().exec_run(["bash", "/repo/docker/setup-plugins.sh"])
-        if os.environ.get("OPENAI_API_KEY"):
-            c.get_wrapped_container().exec_run(
-                ["bash", "-c", "printenv OPENAI_API_KEY | codex login --with-api-key"]
-            )
+        _finish_container_setup(c)
         yield c
     finally:
         c.stop()
