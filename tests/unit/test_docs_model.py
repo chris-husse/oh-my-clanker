@@ -16,16 +16,16 @@ def _cfg(**provider_kwargs):
 
 
 def test_provider_docs_defaults():
-    assert get_provider("claude").docs_model_default() == "claude-sonnet-5"
+    assert get_provider("claude").docs_model_default() == "sonnet"
     # codex/opencode ids are deliberately free-text -> CLI default coding model
     assert get_provider("codex").docs_model_default() == ""
     assert get_provider("opencode").docs_model_default() == ""
 
 
 def test_docs_model_for_falls_back_to_provider_default():
-    assert docs_model_for(_cfg(), "claude") == "claude-sonnet-5"
+    assert docs_model_for(_cfg(), "claude") == "sonnet"
     # the SESSION model must never leak into docs resolution
-    assert docs_model_for(_cfg(model="claude-fable-5"), "claude") == "claude-sonnet-5"
+    assert docs_model_for(_cfg(model="claude-fable-5"), "claude") == "sonnet"
 
 
 def test_docs_model_for_configured_value_wins():

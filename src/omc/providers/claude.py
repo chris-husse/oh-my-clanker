@@ -10,10 +10,12 @@ class ClaudeProvider(Provider):
     name = "claude"
 
     def models(self):
-        return ["claude-fable-5", "claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"]
+        # CLI aliases — resolved to the latest model in each family by the
+        # claude binary; haiku excluded per tier policy (never used).
+        return ["fable", "opus", "sonnet"]
 
     def docs_model_default(self) -> str:
-        return "claude-sonnet-5"  # standard coding tier — the docs floor
+        return "sonnet"  # standard coding tier — the docs floor
 
     def headless_argv(self, prompt, *, model, allowed_tools=None, session_name=""):
         # Prompt must come RIGHT AFTER -p: --allowed-tools is variadic and would
