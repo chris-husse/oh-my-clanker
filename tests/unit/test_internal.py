@@ -175,6 +175,19 @@ def _gitnexus_env(tmp_path):
     return repo, wt, calls, env
 
 
+def test_gitnexus_ensure_calls_ensure_gitnexus(monkeypatch, tmp_path):
+    import omc.internal as internal
+
+    seen = []
+    monkeypatch.setattr(internal, "ensure_gitnexus", lambda ctx: seen.append(True) or 0)
+    # ensure runs with no repo and no CLI present — must not hit the
+    # CLI-present guard or primary-root resolution.
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert internal.run_internal(["gitnexus", "ensure"]) == 0
+    assert seen == [True]
+
+
 def test_gitnexus_proxy_injects_scoping_and_runs_from_primary(tmp_path, monkeypatch):
     repo, wt, calls, env = _gitnexus_env(tmp_path)
     for k, v in env.items():
@@ -215,7 +228,7 @@ def test_gitnexus_proxy_errors_helpfully_without_the_cli(tmp_path, capsys, monke
     finally:
         os.chdir(old)
     assert rc == 1
-    assert "/omc:index" in capsys.readouterr().err  # install hint
+    assert "omc update" in capsys.readouterr().err  # install hint
 
 
 def test_internal_build_progress_usage_and_dispatch(tmp_path, capsys):

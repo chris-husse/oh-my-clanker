@@ -43,6 +43,16 @@ def _no_agents_chain(monkeypatch):
     monkeypatch.setattr("omc.start.ensure_agents_chain", lambda ctx, root: "ok")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_gitnexus(monkeypatch):
+    """These tests use HOME=tmp_path with the real system PATH (real git,
+    possibly real node) so run_start's mutex/probe semantics can be exercised
+    against a real repo. Without this, run_start's ensure_gitnexus prerequisite
+    would attempt a real clone+build of GitNexus, which is orthogonal to the
+    mutex under test — neutralize it."""
+    monkeypatch.setattr("omc.start.ensure_gitnexus", lambda ctx: 0)
+
+
 def _hold(path, seconds):
     p = subprocess.Popen(
         [sys.executable, "-c", _HOLDER, str(path), str(seconds)],

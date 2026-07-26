@@ -141,10 +141,10 @@ def test_start_skill_contract():
 def test_gitnexus_ensure_contract():
     text = (ROOT / "skills" / "gitnexus-ensure" / "SKILL.md").read_text()
     assert "https://github.com/chris-husse/GitNexus.git" in text  # the ONLY source
-    assert "REFUSE" in text  # unapproved origins are refused, never re-pointed
-    assert text.index("gitnexus-shared") < text.index("npm ci"), (
-        "shared sibling deps must install before the main build"
-    )
+    # The skill is a thin wrapper: it delegates install/build/origin-refusal to
+    # Python (covered by tests/unit/test_gitnexus_update.py), not restates them.
+    assert "omc internal gitnexus ensure" in text
+    assert "refuses" in text  # still mentions the approved-source guarantee in prose
 
 
 def test_gitnexus_index_contract():

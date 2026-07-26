@@ -11,6 +11,7 @@ from . import notify, worktree
 from .agentsmd import ensure_agents_chain
 from .config.schema import Config
 from .errors import OmcError
+from .gitnexus import ensure_gitnexus
 from .plugin import ensure_plugin
 from .probe import require_tools
 from .providers.registry import get_provider
@@ -72,6 +73,11 @@ def run_start(
     require_tools(ctx, cfg)
     plugin_status = ensure_plugin(ctx, cfg, check_only=dry_run)
     _say(f"→ omc plugin for {name}: {plugin_status}")
+
+    if not dry_run:
+        rc = ensure_gitnexus(ctx)
+        if rc:
+            raise OmcError("GitNexus is required but could not be installed")
 
     root = repo_root(ctx)
     if root is not None:

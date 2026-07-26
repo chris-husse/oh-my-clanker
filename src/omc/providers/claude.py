@@ -107,10 +107,15 @@ class ClaudeProvider(Provider):
     def install_hint(self):
         return "npm install -g @anthropic-ai/claude-code"
 
-    def plugin_update_argvs(self):
-        # Marketplace snapshot first, then the plugin; claude docs: "restart
-        # required to apply" — running sessions keep the old plugin.
-        return [
+    def plugin_update_argvs(self, marketplace_source: str | None = None):
+        # Self-heal the marketplace registration first (best-effort — a re-add
+        # of an existing marketplace is benign), then snapshot + update. Claude
+        # docs: "restart required to apply" — running sessions keep the old plugin.
+        argvs = []
+        if marketplace_source:
+            argvs.append(["claude", "plugin", "marketplace", "add", marketplace_source])
+        argvs += [
             ["claude", "plugin", "marketplace", "update", "oh-my-clanker"],
             ["claude", "plugin", "update", "omc@oh-my-clanker"],
         ]
+        return argvs

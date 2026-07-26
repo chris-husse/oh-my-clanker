@@ -2,7 +2,7 @@ import os
 import stat
 import subprocess
 
-from omc.gitnexus import update_gitnexus
+from omc.gitnexus import ensure_gitnexus, update_gitnexus
 from omc.toolctx import ToolContext
 
 
@@ -64,11 +64,138 @@ def _advance_origin(seed):
     _git("push", "-q", "origin", "main", cwd=seed)
 
 
-def test_skips_when_not_installed(tmp_path, capsys):
+def test_ensure_noops_silently_when_healthy(tmp_path, capsys):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    origin, _, dest = _seed_clone(tmp_path, home)
+    # _seed_clone wrote a fake built CLI; the node stub reports 9.9.9, so the
+    # CLI is "healthy" — ensure must not clone or build, and must stay silent.
+    assert ensure_gitnexus(ctx, approved_origin=str(origin)) == 0
+    recorded = calls.read_text() if calls.exists() else ""
+    assert "npm" not in recorded  # no build on the healthy path
+    assert capsys.readouterr().err == ""  # silent when healthy
+
+
+def test_ensure_installs_when_missing(tmp_path, capsys):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    origin = tmp_path / "gitnexus-origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(
+        ["git", "-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/main"], check=True
+    )
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", "-q", str(origin), str(seed)], check=True)
+    _git("config", "user.email", "t@t", cwd=seed)
+    _git("config", "user.name", "t", cwd=seed)
+    (seed / "gitnexus-shared").mkdir()
+    (seed / "gitnexus-shared" / "package.json").write_text("{}")
+    (seed / "gitnexus").mkdir()
+    (seed / "gitnexus" / "package.json").write_text("{}")
+    _git("add", ".", cwd=seed)
+    _git("commit", "-qm", "c1", cwd=seed)
+    _git("branch", "-M", "main", cwd=seed)
+    _git("push", "-q", "-u", "origin", "main", cwd=seed)
+    # NO managed clone at home/dependencies/gitnexus yet — ensure must create it.
+    dest = home / "dependencies" / "gitnexus"
+    assert not dest.exists()
+    # The node stub always reports 9.9.9, so post-build verify passes once the
+    # build "creates" dist/cli/index.js. The npm stub is a no-op, so seed the
+    # CLI the way _seed_clone does, to stand in for `npm run build` output.
+    # ensure clones first; then we let the build stub run. To make the post-
+    # build --version succeed, the CLI file must exist after clone: create it
+    # here by having the origin seed carry it.
+    (seed / "gitnexus" / "dist" / "cli").mkdir(parents=True)
+    (seed / "gitnexus" / "dist" / "cli" / "index.js").write_text("// built")
+    _git("add", ".", cwd=seed)
+    _git("commit", "-qm", "add cli", cwd=seed)
+    _git("push", "-q", "origin", "main", cwd=seed)
+
+    assert ensure_gitnexus(ctx, approved_origin=str(origin)) == 0
+    assert (dest / ".git").exists()  # cloned
+    recorded = calls.read_text()
+    npm = [ln for ln in recorded.splitlines() if ln.startswith("npm")]
+    assert "install" in npm[0] and "gitnexus-shared" in npm[0]
+    assert npm[1].startswith("npm ci")
+    assert "run build" in npm[2]
+    assert "installed" in capsys.readouterr().err.lower()
+
+
+def test_ensure_reports_build_without_cli(tmp_path, capsys):
     home = tmp_path / "home"
     ctx, _ = _make_ctx(tmp_path, home)
-    assert update_gitnexus(ctx) == 0
-    assert "/omc:index" in capsys.readouterr().err
+    origin = tmp_path / "gitnexus-origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(
+        ["git", "-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/main"], check=True
+    )
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", "-q", str(origin), str(seed)], check=True)
+    _git("config", "user.email", "t@t", cwd=seed)
+    _git("config", "user.name", "t", cwd=seed)
+    # Origin carries the package layout but NO dist/cli/index.js: the no-op npm
+    # stub "builds" successfully yet the CLI never materializes, so the post-
+    # build --version verify must fail rather than claim success.
+    for pkg in ("gitnexus-shared", "gitnexus"):
+        (seed / pkg).mkdir()
+        (seed / pkg / "package.json").write_text("{}")
+    _git("add", ".", cwd=seed)
+    _git("commit", "-qm", "c1", cwd=seed)
+    _git("branch", "-M", "main", cwd=seed)
+    _git("push", "-q", "-u", "origin", "main", cwd=seed)
+    assert ensure_gitnexus(ctx, approved_origin=str(origin)) == 1
+    assert "won't report --version" in capsys.readouterr().err
+
+
+def test_ensure_refuses_wrong_origin(tmp_path, capsys):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    _seed_clone(tmp_path, home)
+    # A present clone whose origin differs from approved, but make the CLI look
+    # BROKEN so ensure reaches the clone/verify path: point node at a bad rc.
+    dest = home / "dependencies" / "gitnexus"
+    (dest / "gitnexus" / "dist" / "cli" / "index.js").unlink()  # CLI missing -> unhealthy
+    assert ensure_gitnexus(ctx, approved_origin="https://example.com/other.git") == 1
+    assert "refusing" in capsys.readouterr().err
+    assert "npm" not in (calls.read_text() if calls.exists() else "")  # never built
+
+
+def test_ensure_build_failure_is_nonzero(tmp_path, capsys):
+    home = tmp_path / "home"
+    ctx, _ = _make_ctx(tmp_path, home, npm_rc=1)
+    origin, _, dest = _seed_clone(tmp_path, home)
+    (dest / "gitnexus" / "dist" / "cli" / "index.js").unlink()  # unhealthy -> must build
+    assert ensure_gitnexus(ctx, approved_origin=str(origin)) == 1
+    assert "failed" in capsys.readouterr().err
+
+
+def test_update_installs_when_missing(tmp_path, capsys):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    origin = tmp_path / "gitnexus-origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(
+        ["git", "-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/main"], check=True
+    )
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", "-q", str(origin), str(seed)], check=True)
+    _git("config", "user.email", "t@t", cwd=seed)
+    _git("config", "user.name", "t", cwd=seed)
+    for pkg in ("gitnexus-shared", "gitnexus"):
+        (seed / pkg).mkdir()
+        (seed / pkg / "package.json").write_text("{}")
+    (seed / "gitnexus" / "dist" / "cli").mkdir(parents=True)
+    (seed / "gitnexus" / "dist" / "cli" / "index.js").write_text("// built")
+    _git("add", ".", cwd=seed)
+    _git("commit", "-qm", "c1", cwd=seed)
+    _git("branch", "-M", "main", cwd=seed)
+    _git("push", "-q", "-u", "origin", "main", cwd=seed)
+    dest = home / "dependencies" / "gitnexus"
+    assert not dest.exists()
+
+    assert update_gitnexus(ctx, approved_origin=str(origin)) == 0
+    assert (dest / ".git").exists()  # installed, not skipped
+    assert "npm" in calls.read_text()  # built
 
 
 def test_refuses_wrong_origin(tmp_path, capsys):

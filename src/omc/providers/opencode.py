@@ -55,8 +55,9 @@ export const OmcNotify = async ({{ $ }}) => ({{
     def install_hint(self):
         return "npm install -g opencode-ai"
 
-    def plugin_update_argvs(self):
+    def plugin_update_argvs(self, marketplace_source: str | None = None):
         # opencode manages its plugin cache itself (git-ref entry in
         # opencode.json); no scriptable update verified yet — see
-        # docker/PLUGIN-NOTES.md (Task 9 investigation).
+        # docker/PLUGIN-NOTES.md (Task 9 investigation). marketplace_source is
+        # unused: no scriptable marketplace add exists for opencode.
         return []

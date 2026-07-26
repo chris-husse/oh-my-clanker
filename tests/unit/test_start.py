@@ -14,6 +14,17 @@ from ._stubs import make_stub, stub_env
 OK_VERDICT = 'OMC_SLUG {"ok": true, "slug": "proj-1-fix-login"}'
 
 
+@pytest.fixture(autouse=True)
+def _no_real_gitnexus(monkeypatch):
+    # full_env stubs git/wt/claude for require_tools but has no node/CLI on
+    # PATH — ensure_gitnexus would try a real clone+build. Keep it a no-op
+    # success here; tests that care about the call itself override this
+    # locally with their own monkeypatch.setattr.
+    import omc.start as start_mod
+
+    monkeypatch.setattr(start_mod, "ensure_gitnexus", lambda ctx: 0)
+
+
 def _make_git_stub(bindir):
     """git stub that's argv-aware just enough for run_start's needs: --version
     (require_tools' probe) answers like a real git; rev-parse (repo_root, now
@@ -63,6 +74,38 @@ def test_dry_run_prints_plan(tmp_path, capsys):
     assert "session argv:" in out and "/omc:start PROJ-1" in out
     assert "-n" in out and "proj-1-fix-login" in out  # session named after slug
     assert "title seq:" in out
+
+
+def test_start_ensures_gitnexus(tmp_path, capsys, monkeypatch):
+    import omc.start as start_mod
+
+    seen = []
+    monkeypatch.setattr(start_mod, "ensure_gitnexus", lambda ctx: seen.append(True) or 0)
+    ctx = full_env(tmp_path)
+    (tmp_path / "wtree").mkdir()
+    rc = run_start(ctx, Config(), "PROJ-1", headless=True)
+    assert rc == 0
+    assert seen == [True]  # ensure ran on the real path
+
+
+def test_start_dry_run_skips_gitnexus_ensure(tmp_path, monkeypatch):
+    import omc.start as start_mod
+
+    seen = []
+    monkeypatch.setattr(start_mod, "ensure_gitnexus", lambda ctx: seen.append(True) or 0)
+    ctx = full_env(tmp_path)
+    rc = run_start(ctx, Config(), "PROJ-1", dry_run=True)
+    assert rc == 0
+    assert seen == []  # dry-run makes no changes
+
+
+def test_start_aborts_when_gitnexus_install_fails(tmp_path, monkeypatch):
+    import omc.start as start_mod
+
+    monkeypatch.setattr(start_mod, "ensure_gitnexus", lambda ctx: 1)
+    ctx = full_env(tmp_path)
+    with pytest.raises(OmcError):
+        run_start(ctx, Config(), "PROJ-1", headless=True)
 
 
 def test_probe_failure_lists_misses(tmp_path):

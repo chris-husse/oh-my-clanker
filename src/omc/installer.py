@@ -8,6 +8,8 @@ from pathlib import Path
 
 from .config import store
 from .errors import OmcError
+from .plugin import marketplace_source
+from .probe import require_tools
 from .providers.registry import get_provider
 from .toolctx import ToolContext
 
@@ -59,19 +61,25 @@ def run_update(ctx: ToolContext) -> int:
     rc = _uv(ctx, "tool", "upgrade", "omc")
     if rc != 0:
         return rc
+    # Load config up front. When configured, the tool probe is a FATAL gate
+    # (git/wt/provider) that runs BEFORE the GitNexus install — a machine
+    # without `wt` aborts the update before anything is cloned/built.
+    cfg = store.load_global(ctx.home)
+    if cfg is not None:
+        require_tools(ctx, cfg)  # git/wt/provider — raises OmcError on a miss
     # Managed dependencies (GitNexus). Module-attribute import so tests can
     # monkeypatch omc.gitnexus.update_gitnexus; a failure here must fail the
     # command (unlike the best-effort plugin loop below).
     from . import gitnexus
 
     dep_rc = gitnexus.update_gitnexus(ctx)
-    cfg = store.load_global(ctx.home)
     if cfg is None:
         print("· no config — skipping plugin updates (run `omc configure`)", file=sys.stderr)
         return dep_rc
+    source = marketplace_source(ctx.env)
     for name in cfg.llm.providers:
         try:
-            argvs = get_provider(name).plugin_update_argvs()
+            argvs = get_provider(name).plugin_update_argvs(source)
         except OmcError as exc:
             print(f"✗ {name}: {exc} — continuing", file=sys.stderr)
             continue
@@ -79,18 +87,21 @@ def run_update(ctx: ToolContext) -> int:
             print(f"· {name}: no scriptable plugin update yet — update it in-app", file=sys.stderr)
             continue
         ok = True
-        for argv in argvs:
+        for i, argv in enumerate(argvs):
+            is_last = i == len(argvs) - 1
             try:
                 cp = ctx.run(argv)
             except OSError as exc:
                 print(f"✗ {name}: {argv[0]} not runnable ({exc}) — continuing", file=sys.stderr)
                 ok = False
                 break
-            if cp.returncode != 0:
+            if cp.returncode != 0 and is_last:
                 detail = (cp.stderr or cp.stdout or "").strip()[:200]
                 print(f"✗ {name}: {' '.join(argv)} failed: {detail} — continuing", file=sys.stderr)
                 ok = False
                 break
+            # non-last (marketplace add/update) failures are benign self-heal
+            # steps — never abort the sequence or mark failure.
         if ok:
             print(f"✓ {name}: plugin updated", file=sys.stderr)
     return dep_rc

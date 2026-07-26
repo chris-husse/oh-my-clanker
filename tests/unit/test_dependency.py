@@ -216,7 +216,7 @@ def test_ensure_requires_full_hash_and_cli(tmp_path, capsys):
     assert run_ensure(ctx, "https://github.com/foo/bar.git", "abc123") == 1  # short hash
     (ctx.home / "dependencies" / "gitnexus").rename(tmp_path / "gone")
     assert run_ensure(ctx, "https://github.com/foo/bar.git", H) == 1
-    assert "/omc:index" in capsys.readouterr().err  # install hint
+    assert "omc update" in capsys.readouterr().err  # install hint
 
 
 def test_ensure_reloads_manifest_before_save_no_lost_update(tmp_path, capsys):
