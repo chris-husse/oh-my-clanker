@@ -119,7 +119,7 @@ def test_once_with_documentation_refreshes_docs_even_when_up_to_date(tmp_path, c
     assert "analyze" in recorded and "wiki --provider claude" in recorded
     # docs floor is passed explicitly (never the session model, and explicit
     # so gitnexus's own cached model can't resurrect a stale choice)
-    assert "--model claude-sonnet-5" in recorded
+    assert "--model sonnet" in recorded
 
 
 def test_tick_syncs_and_reindexes(tmp_path, capsys):

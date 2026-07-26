@@ -462,7 +462,7 @@ def test_document_ignores_session_model_uses_docs_floor(tmp_path, capsys):
     )
     assert run_document(ctx, "github.com/foo/bar") == 0
     log = nodecalls.read_text()
-    assert "--model claude-sonnet-5" in log
+    assert "--model sonnet" in log
     assert "claude-fable-5" not in log
 
 
