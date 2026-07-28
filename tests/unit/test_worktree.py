@@ -31,7 +31,7 @@ def test_sync_base_fetches(tmp_path):
     calls = make_recording_stub(bindir, "git")
     ctx = ToolContext.from_env(stub_env(bindir))
     assert sync_base(ctx, "main") is True
-    assert calls.read_text().strip() == "fetch origin main"
+    assert calls.read_text().strip() == "fetch --recurse-submodules=no origin main"
 
 
 def test_sync_base_failure_is_nonfatal(tmp_path, capsys):
@@ -40,6 +40,21 @@ def test_sync_base_failure_is_nonfatal(tmp_path, capsys):
     ctx = ToolContext.from_env(stub_env(bindir))
     assert sync_base(ctx, "main") is False
     assert "warning" in capsys.readouterr().err
+
+
+def test_sync_base_failure_redacts_credentials(tmp_path, capsys):
+    bindir = tmp_path / "bin"
+    make_recording_stub(
+        bindir,
+        "git",
+        rc=1,
+        stdout="fatal: unable to access https://oauth2:t0ken@host/x.git/ 403",
+    )
+    ctx = ToolContext.from_env(stub_env(bindir))
+    assert sync_base(ctx, "main") is False
+    err = capsys.readouterr().err
+    assert "t0ken" not in err
+    assert "[REDACTED]" in err
 
 
 def test_create_worktree_fresh(tmp_path):

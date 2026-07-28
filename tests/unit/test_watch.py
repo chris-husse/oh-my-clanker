@@ -2,6 +2,7 @@ import os
 import re
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 from omc.config.schema import Config
@@ -392,8 +393,24 @@ def test_watch_aborts_when_gitnexus_install_fails(tmp_path, monkeypatch):
     assert flock_free(repo / ".git" / "omc-watch.lock")
 
 
+class _WatchClock:
+    """Stand-in for watch.py's `time` binding that fakes ONLY the loop's
+    interval sleep. Assigning to the global module's `time.sleep` leaks the
+    fake into toolctx.run_supervised's poll and the progress-bar threads
+    (they sleep too): they steal loop ticks (early stop → flaky narration
+    counts) and can raise the stop-KeyboardInterrupt outside run_watch's
+    handler, aborting the whole pytest session."""
+
+    def __init__(self, sleep):
+        self.sleep = sleep
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 def _run_loop(repo, ctx, ticks, between=None):
-    """Run the real loop, faking sleep: `between(i)` runs after tick i; stop after `ticks`."""
+    """Run the real loop, faking watch's interval sleep: `between(i)` runs
+    after tick i; stop after `ticks`."""
     import omc.watch as watch_mod
 
     count = {"n": 0}
@@ -405,14 +422,14 @@ def _run_loop(repo, ctx, ticks, between=None):
         if count["n"] >= ticks:
             raise KeyboardInterrupt
 
-    old_sleep, watch_mod.time.sleep = watch_mod.time.sleep, fake_sleep
+    old_time, watch_mod.time = watch_mod.time, _WatchClock(fake_sleep)
     old_cwd = os.getcwd()
     os.chdir(repo)
     try:
         return run_watch(ctx, Config(), interval=1, once=False, enable_documentation=False)
     finally:
         os.chdir(old_cwd)
-        watch_mod.time.sleep = old_sleep
+        watch_mod.time = old_time
 
 
 def test_loop_says_up_to_date_once_then_waits_quietly(tmp_path, capsys):
@@ -851,3 +868,119 @@ def test_watch_clear_mutex_flag_parses():
     args = build_parser().parse_args(["watch", "--clear-mutex"])
     assert args.clear_mutex is True
     assert build_parser().parse_args(["watch"]).clear_mutex is False
+
+
+def test_fetch_error_keeps_cause_drops_progress():
+    from omc.watch import _fetch_error
+
+    stderr = (
+        "From kakarot.chorse.space:gcx/backend/hummingbird-bridge\n"
+        " * branch                main       -> FETCH_HEAD\n"
+        "Fetching submodule git/event-schemas\n"
+        "fatal: unable to access 'https://kakarot.chorse.space/gcx/git/event-schemas.git/':"
+        " The requested URL returned error: 403\n"
+    )
+    out = _fetch_error(stderr)
+    assert out.startswith("fatal: unable to access")
+    assert "Fetching submodule" not in out and "FETCH_HEAD" not in out
+
+
+def test_fetch_error_redacts_embedded_credentials():
+    from omc.watch import _fetch_error
+
+    out = _fetch_error("fatal: unable to access 'https://oauth2:t0ken@host/x.git/': 403\n")
+    assert "t0ken" not in out
+    assert "[REDACTED]" in out
+
+
+def test_fetch_error_caps_length():
+    from omc.watch import _fetch_error
+
+    assert len(_fetch_error("fatal: " + "x" * 1000)) <= 300
+
+
+def test_fetch_error_falls_back_to_last_line():
+    from omc.watch import _fetch_error
+
+    assert _fetch_error("something odd\nlast line\n") == "last line"
+
+
+def test_fetch_error_empty_stderr():
+    from omc.watch import _fetch_error
+
+    assert _fetch_error("") == ""
+
+
+def _repo_with_submodule(tmp_path):
+    """Origin + watching clone with an initialized submodule. Callers break
+    the submodule origin afterwards so any recursive fetch must fail."""
+    sub_src = tmp_path / "subsrc"
+    sub_src.mkdir()
+    subprocess.run(["git", "init", "-q", str(sub_src)], check=True)
+    _git("config", "user.email", "t@t", cwd=sub_src)
+    _git("config", "user.name", "t", cwd=sub_src)
+    (sub_src / "s.txt").write_text("one\n")
+    _git("add", ".", cwd=sub_src)
+    _git("commit", "-qm", "sub c1", cwd=sub_src)
+
+    origin, repo = _repo_with_origin(tmp_path)
+    # git >= 2.38 blocks file-protocol submodule CLONES unless allowed
+    _git("-c", "protocol.file.allow=always", "submodule", "add", str(sub_src), "sub", cwd=repo)
+    _git("commit", "-qm", "add submodule", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    return origin, repo, sub_src
+
+
+def _push_remote_gitlink_bump(origin, sub_src, tmp_path, marker):
+    """Advance origin/main with a commit that moves the submodule pointer —
+    plumbing only, so the pushing clone never initializes the submodule."""
+    (sub_src / "s.txt").write_text(f"{marker}\n")
+    _git("add", ".", cwd=sub_src)
+    _git("commit", "-qm", f"sub {marker}", cwd=sub_src)
+    new_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=sub_src, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    other = tmp_path / f"other-{marker}"
+    subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+    _git("config", "user.email", "o@o", cwd=other)
+    _git("config", "user.name", "o", cwd=other)
+    _git("update-index", "--add", "--cacheinfo", f"160000,{new_sha},sub", cwd=other)
+    _git("commit", "-qm", f"bump submodule {marker}", cwd=other)
+    _git("push", "-q", "origin", "main", cwd=other)
+
+
+def _break_submodule_origin(repo, tmp_path):
+    """Any fetch inside the submodule now fails: unreachable origin URL."""
+    _git("remote", "set-url", "origin", str(tmp_path / "nonexistent"), cwd=repo / "sub")
+
+
+def test_tick_syncs_gitlink_bump_without_fetching_submodules(tmp_path, capsys):
+    from omc.watch import _tick
+
+    origin, repo, sub_src = _repo_with_submodule(tmp_path)
+    _push_remote_gitlink_bump(origin, sub_src, tmp_path, "two")
+    _break_submodule_origin(repo, tmp_path)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    token = _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False)
+    err = capsys.readouterr().err
+    assert token == "synced", err
+    assert "fetch failed" not in err
+
+
+def test_tick_stale_submodule_pointer_does_not_wedge_dirty_gate(tmp_path, capsys):
+    from omc.watch import _tick
+
+    origin, repo, sub_src = _repo_with_submodule(tmp_path)
+    _push_remote_gitlink_bump(origin, sub_src, tmp_path, "two")
+    _break_submodule_origin(repo, tmp_path)
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert (
+        _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False) == "synced"
+    )
+    # first sync moved the gitlink; the submodule working dir is now stale
+    # (' M sub') — a second remote bump must STILL sync, not skip as dirty
+    _push_remote_gitlink_bump(origin, sub_src, tmp_path, "three")
+    token = _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False)
+    err = capsys.readouterr().err
+    assert token == "synced", err
+    assert "dirty" not in err

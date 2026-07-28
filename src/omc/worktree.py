@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 
+from .gitnexus import redact_userinfo
 from .toolctx import ToolContext
 
 
@@ -31,12 +32,14 @@ def sync_base(ctx: ToolContext, base: str) -> bool:
     failure so a stale cut is never silent.
     """
     try:
-        cp = ctx.run([ctx.git_bin, "fetch", "origin", base])
+        # Never recurse into submodules: sync_base needs only origin/<base>
+        # refs (see the watch tick's fetch for the full rationale).
+        cp = ctx.run([ctx.git_bin, "fetch", "--recurse-submodules=no", "origin", base])
     except OSError as exc:
         print(f"warning: could not fetch origin/{base}: {exc}", file=sys.stderr)
         return False
     if cp.returncode != 0:
-        detail = (cp.stderr or cp.stdout or "").strip()
+        detail = redact_userinfo((cp.stderr or cp.stdout or "").strip())
         print(f"warning: 'git fetch origin {base}' failed: {detail}", file=sys.stderr)
         return False
     return True

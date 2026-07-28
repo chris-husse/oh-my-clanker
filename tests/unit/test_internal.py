@@ -356,3 +356,34 @@ def test_gitnexus_proxy_git_still_rejects_bad_verbs(tmp_path, capsys, monkeypatc
         assert run_internal(["gitnexus", "--git"]) == 2
     finally:
         os.chdir(old)
+
+
+def test_rebase_main_fetch_never_recurses_into_submodules(tmp_path, capsys, monkeypatch):
+    """The brief's fixture repro (broken submodule origin visible from a
+    linked worktree via shared .git/modules) PASSED before the implementation
+    change: on git 2.54.0, on-demand submodule recursion does not trigger from
+    a linked worktree, so that red/green signal never fires. Per the brief's
+    Step 2 fallback, assert the fetch argv directly with a recording
+    ToolContext stub instead."""
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _advance_main(primary)
+
+    from omc.toolctx import ToolContext
+
+    calls: list[list[str]] = []
+    real_run = ToolContext.run
+
+    def spy(self, argv, **kwargs):
+        calls.append(list(argv))
+        return real_run(self, argv, **kwargs)
+
+    monkeypatch.setattr(ToolContext, "run", spy)
+
+    rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
+
+    assert rc == 0, verdict
+    assert verdict["ok"] is True
+    fetch_calls = [c for c in calls if len(c) > 1 and c[1] == "fetch"]
+    assert fetch_calls, calls
+    assert "--recurse-submodules=no" in fetch_calls[0]

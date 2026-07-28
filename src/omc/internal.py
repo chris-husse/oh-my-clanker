@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .config import resolve
 from .errors import OmcError
-from .gitnexus import ensure_gitnexus, gitnexus_argv, gitnexus_cli
+from .gitnexus import ensure_gitnexus, gitnexus_argv, gitnexus_cli, redact_userinfo
 from .mirror import mirror_snapshot
 from .providers.registry import provider_names
 from .toolctx import ToolContext
@@ -54,10 +54,13 @@ def _rebase_main(ctx: ToolContext, base_arg: str | None) -> int:
         )
         return 0
 
-    cp = ctx.run([ctx.git_bin, "fetch", "origin", base])
+    # Never recurse into submodules: rebase-main needs only origin/<base>
+    # refs (see the watch tick's fetch for the full rationale).
+    cp = ctx.run([ctx.git_bin, "fetch", "--recurse-submodules=no", "origin", base])
     if cp.returncode != 0:
         print(
-            f"error: git fetch origin {base} failed: {(cp.stderr or '').strip()}", file=sys.stderr
+            f"error: git fetch origin {base} failed: {redact_userinfo((cp.stderr or '').strip())}",
+            file=sys.stderr,
         )
         return 1
 

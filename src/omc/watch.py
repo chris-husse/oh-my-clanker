@@ -26,7 +26,7 @@ from .buildprogress import ProgressTracker, sentinel_line
 from .cli.progress_bar import BarThread
 from .config.schema import Config
 from .errors import OmcError
-from .gitnexus import ANALYZE_ARGS, ensure_gitnexus, gitnexus_argv
+from .gitnexus import ANALYZE_ARGS, ensure_gitnexus, gitnexus_argv, redact_userinfo
 from .mirror import mirror_dir
 from .probe import require_tools
 from .providers.registry import docs_model_for, get_provider
@@ -38,6 +38,16 @@ from .wtconfig import ensure_wt_config, primary_root, repo_root
 
 def _say(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
+
+
+def _fetch_error(stderr: str) -> str:
+    """Compress git-fetch stderr to its cause. Git narrates progress first
+    ('From …', 'Fetching submodule …') and puts the fatal:/error: lines LAST —
+    a head-slice shows only noise and cuts the cause mid-URL."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    causes = [ln for ln in lines if ln.startswith(("fatal:", "error:"))]
+    text = " ".join(causes) if causes else (lines[-1] if lines else "")
+    return redact_userinfo(text)[:300]
 
 
 def _out(ctx: ToolContext, argv: list[str], cwd: str) -> str:
@@ -300,9 +310,13 @@ def _tick(
             f"off-branch:{branch}",
             f"· not on {base} (on {branch!r}) — leaving the checkout alone",
         )
-    cp = ctx.run([ctx.git_bin, "fetch", "origin", base], cwd=root)
+    # fetch.recurseSubmodules defaults to on-demand: a fetched gitlink bump
+    # makes git fetch the submodules too, whose URLs may need credentials this
+    # loop doesn't have (observed: SSH superproject, https submodules). The
+    # loop only needs origin/<base> refs — never recurse.
+    cp = ctx.run([ctx.git_bin, "fetch", "--recurse-submodules=no", "origin", base], cwd=root)
     if cp.returncode != 0:
-        return quiet("fetch-failed", f"✗ fetch failed: {(cp.stderr or '').strip()[:200]}")
+        return quiet("fetch-failed", f"✗ fetch failed: {_fetch_error(cp.stderr or '')}")
     behind = _out(ctx, [ctx.git_bin, "rev-list", "--count", f"HEAD..origin/{base}"], root)
     ahead = _out(ctx, [ctx.git_bin, "rev-list", "--count", f"origin/{base}..HEAD"], root)
     if behind in ("", "0"):
@@ -362,7 +376,14 @@ def _tick(
     # -uno: only TRACKED modifications endanger an ff-merge (untracked files —
     # e.g. the wt.toml starter ensure_wt_config just seeded — must not block a
     # sync; a genuinely colliding untracked file makes the merge itself refuse).
-    if _out(ctx, [ctx.git_bin, "status", "--porcelain", "-uno"], root):
+    # --ignore-submodules=all: a synced gitlink bump leaves the submodule dir
+    # stale (' M sub') forever; ff-merge succeeds regardless (git never touches
+    # submodule content), so staleness must not wedge the loop in dirty-skip.
+    if _out(
+        ctx,
+        [ctx.git_bin, "status", "--porcelain", "-uno", "--ignore-submodules=all"],
+        root,
+    ):
         return quiet("dirty", "· working tree is dirty — skipping sync")
     old = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
     cp = ctx.run([ctx.git_bin, "merge", "--ff-only", f"origin/{base}"], cwd=root)
