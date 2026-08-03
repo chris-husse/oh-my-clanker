@@ -104,6 +104,44 @@ def test_rebase_main_rebases_and_mirrors_snapshot(tmp_path, capsys):
     assert not (wt / ".gitnexus" / "extraneous").exists()
 
 
+def test_rebase_main_never_runs_gitnexus_index(tmp_path, capsys):
+    """Indexing is omc watch's EXCLUSIVE feature. rebase-main used to register
+    the copied snapshot (`gitnexus index` in the worktree), which minted a
+    same-named registry entry frozen at cut time per worktree — never
+    unregistered, and stale-entry lookups then reported "N commits behind"
+    while the primary index was current. Even with a healthy built CLI
+    present, rebase-main must not invoke gitnexus at all."""
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _advance_main(primary)
+    (primary / ".gitnexus").mkdir()
+    (primary / ".gitnexus" / "graph.db").write_text("fresh")
+    # Derive the CLI path from the real locator so this trap stays armed even
+    # if the managed-install layout ever moves.
+    from omc.gitnexus import gitnexus_cli
+    from omc.toolctx import ToolContext
+
+    cli = gitnexus_cli(ToolContext.from_env({"OMC_HOME": str(tmp_path / "omchome")}))
+    cli.parent.mkdir(parents=True)
+    cli.write_text("// fake built CLI")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = bindir / "node.calls"
+    node = bindir / "node"
+    node.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\necho ok\nexit 0\n')
+    node.chmod(node.stat().st_mode | stat.S_IXUSR)
+    old_path = os.environ["PATH"]
+    os.environ["PATH"] = f"{bindir}:{old_path}"
+    try:
+        rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
+    finally:
+        os.environ["PATH"] = old_path
+
+    assert rc == 0 and verdict["ok"] is True
+    assert ".gitnexus" in verdict["synced"]  # mirroring stays
+    assert not calls.exists()  # registration goes: node never invoked
+
+
 def test_rebase_main_conflict_bails_rc3_and_leaves_rebase_paused(tmp_path, capsys):
     _, primary = _setup_primary_with_origin(tmp_path)
     wt = _add_worktree(primary, tmp_path)
