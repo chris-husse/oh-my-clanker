@@ -7,6 +7,7 @@ deterministic commands watch/rebase-main need.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -35,6 +36,35 @@ def gitnexus_argv(ctx: ToolContext, *args: str) -> list[str]:
 
 def gitnexus_root(ctx: ToolContext) -> Path:
     return ctx.home / "dependencies" / "gitnexus"
+
+
+def flat_store_branch(root: Path) -> str | None:
+    """Branch stamped in the flat (default) GitNexus store, or None.
+
+    None covers: store absent, meta unreadable/unparseable, branch field
+    missing/empty/non-string. All of those are states GitNexus's adoption
+    rule resolves on the next analyze — only a non-empty FOREIGN stamp
+    (see store_inverted) needs the heal.
+    """
+    meta = Path(root) / ".gitnexus" / "meta.json"
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    branch = data.get("branch") if isinstance(data, dict) else None
+    return branch if isinstance(branch, str) and branch else None
+
+
+def store_inverted(root: Path, base: str) -> bool:
+    """True when the flat store belongs to a branch other than ``base``.
+
+    GitNexus keys its default store to the branch a repo was FIRST indexed
+    on; analyzes on any other branch land in .gitnexus/branches/<slug>/,
+    which the MCP server, staleness hints, and `wiki` never read. Inverted
+    means: incremental refreshes are being delivered where nothing looks.
+    """
+    owner = flat_store_branch(root)
+    return owner is not None and owner != base
 
 
 def redact_userinfo(url: str) -> str:

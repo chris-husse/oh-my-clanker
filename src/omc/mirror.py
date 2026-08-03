@@ -16,6 +16,23 @@ from .errors import OmcError
 # The ONLY directories the snapshot mirror will ever touch, relative to a root.
 SNAPSHOT_DIRS = (".gitnexus", ".omc/docs")
 
+# Where watch mirrors the generated wiki inside a root. Fixed relative path —
+# clear_docs_mirror deletes ONLY this, by construction.
+DOCS_MIRROR_REL = Path(".omc/docs/gitnexus/docs")
+
+
+def clear_docs_mirror(root: Path) -> bool:
+    """Delete the generated-docs mirror under ``root``; True when removed.
+
+    Used by the watch heal: docs generated from an inverted (frozen) graph
+    cite deleted files as current — stale docs are worse than absent docs.
+    """
+    target = Path(root) / DOCS_MIRROR_REL
+    if not target.is_dir():
+        return False
+    shutil.rmtree(target)
+    return True
+
 
 def mirror_dir(src: Path, dst: Path) -> None:
     """Make ``dst`` an exact copy of ``src`` (extraneous files deleted)."""
