@@ -56,3 +56,21 @@ def test_mirror_snapshot_refuses_same_root(tmp_path):
     (root / ".gitnexus").mkdir(parents=True)
     with pytest.raises(OmcError, match="same"):
         mirror_snapshot(root, root)
+
+
+def test_clear_docs_mirror_removes_and_reports(tmp_path):
+    from omc.mirror import DOCS_MIRROR_REL, clear_docs_mirror
+
+    target = tmp_path / DOCS_MIRROR_REL
+    target.mkdir(parents=True)
+    (target / "page.md").write_text("stale")
+    assert clear_docs_mirror(tmp_path) is True
+    assert not target.exists()
+    # parent dirs (.omc/docs/gitnexus) are left alone
+    assert target.parent.is_dir()
+
+
+def test_clear_docs_mirror_absent_is_noop(tmp_path):
+    from omc.mirror import clear_docs_mirror
+
+    assert clear_docs_mirror(tmp_path) is False

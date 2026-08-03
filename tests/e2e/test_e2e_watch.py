@@ -137,3 +137,69 @@ def test_watch_auto_build_runs_stage_via_shim_provider(container):
     assert rc == 0, out
     assert "running project build stage via claude" in out, out
     assert "auto-build passed" in out, out
+
+
+_CLI = "/root/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js"
+
+
+def test_watch_once_heals_feature_branch_owned_index(container):
+    configure_omc(container, "claude")
+    repo = make_work_repo(container, path="/work/heal-repo")
+    # Arrange the inversion: FIRST index runs on a feature branch, so the
+    # flat store is stamped with it; then the branch dies.
+    rc, out = run_in(container, ["git", "switch", "-qc", "feature/first"], cwd=repo)
+    assert rc == 0, out
+    rc, out = run_in(
+        container,
+        ["node", _CLI, "analyze", "--skip-agents-md", "--skip-skills"],
+        cwd=repo,
+        timeout=300,
+    )
+    assert rc == 0, f"seed analyze failed:\n{out[:1500]}"
+    rc, out = run_in(
+        container,
+        ["bash", "-c", f"grep -o '\"branch\"[^,]*' {repo}/.gitnexus/meta.json"],
+    )
+    assert "feature/first" in out, f"seed did not stamp the flat store:\n{out}"
+    # stale docs mirror that the heal must clear
+    rc, _ = run_in(
+        container,
+        [
+            "bash",
+            "-c",
+            f"mkdir -p {repo}/.omc/docs/gitnexus/docs && "
+            f"echo stale > {repo}/.omc/docs/gitnexus/docs/x.md",
+        ],
+    )
+    assert rc == 0
+    rc, out = run_in(container, ["git", "switch", "-q", "main"], cwd=repo)
+    assert rc == 0, out
+    rc, out = run_in(container, ["git", "branch", "-qD", "feature/first"], cwd=repo)
+    assert rc == 0, out
+
+    rc, out = run_in(container, ["omc", "watch", "--once"], cwd=repo, timeout=300)
+    assert rc == 0, f"watch --once failed:\n{out[:2000]}"
+    assert "destroying and rebuilding" in out, out
+    assert "index rebuilt for main" in out, out
+    assert "docs mirror cleared" in out, out
+
+    # flat store now belongs to main at HEAD; no shadow branch store; registry advanced
+    check = (
+        "import json, subprocess, sys\n"
+        f"meta = json.load(open('{repo}/.gitnexus/meta.json'))\n"
+        f"head = subprocess.run(['git', '-C', '{repo}', 'rev-parse', 'HEAD'],"
+        " capture_output=True, text=True).stdout.strip()\n"
+        "assert meta['branch'] == 'main', meta['branch']\n"
+        "assert meta['lastCommit'] == head, (meta['lastCommit'], head)\n"
+        "reg = json.load(open('/root/.gitnexus/registry.json'))\n"
+        "entries = reg if isinstance(reg, list) else reg.get('repos', [])\n"
+        f"entry = [e for e in entries if e.get('path') == '{repo}']\n"
+        "assert entry and entry[0]['lastCommit'] == head, entry\n"
+        "print('HEAL-OK')\n"
+    )
+    rc, out = run_in(container, ["python3", "-c", check])
+    assert rc == 0 and "HEAL-OK" in out, out
+    rc, _ = run_in(container, ["bash", "-c", f"ls {repo}/.gitnexus/branches 2>/dev/null | grep ."])
+    assert rc != 0, "shadow branch store survived the heal"
+    rc, _ = run_in(container, ["test", "-e", f"{repo}/.omc/docs/gitnexus/docs/x.md"])
+    assert rc != 0, "stale docs mirror survived the heal"

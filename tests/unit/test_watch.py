@@ -1,7 +1,9 @@
+import json
 import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 from omc.config.schema import Config
@@ -393,26 +395,39 @@ def test_watch_aborts_when_gitnexus_install_fails(tmp_path, monkeypatch):
 
 
 def _run_loop(repo, ctx, ticks, between=None):
-    """Run the real loop, faking sleep: `between(i)` runs after tick i; stop after `ticks`."""
+    """Run the real loop, faking sleep: `between(i)` runs after tick i; stop after `ticks`.
+
+    Patching watch_mod.time.sleep mutates the SHARED time module, so every
+    time.sleep in the process lands here — including subprocess's polling
+    sleeps under require_tools' threaded version probes. Count (and stop) only
+    the loop's own between-tick sleep, identified by its caller module;
+    anything else gets the real sleep. Without the filter, foreign sleeps bump
+    the counter before tick 1 or raise the loop-stopping KeyboardInterrupt
+    outside run_watch's handler, aborting the whole pytest session under load.
+    """
     import omc.watch as watch_mod
 
     count = {"n": 0}
+    real_sleep = watch_mod.time.sleep
 
-    def fake_sleep(_seconds):
+    def fake_sleep(seconds):
+        if sys._getframe(1).f_globals.get("__name__") != "omc.watch":
+            return real_sleep(seconds)
         count["n"] += 1
         if between:
             between(count["n"])
         if count["n"] >= ticks:
             raise KeyboardInterrupt
+        return None
 
-    old_sleep, watch_mod.time.sleep = watch_mod.time.sleep, fake_sleep
+    watch_mod.time.sleep = fake_sleep
     old_cwd = os.getcwd()
     os.chdir(repo)
     try:
         return run_watch(ctx, Config(), interval=1, once=False, enable_documentation=False)
     finally:
         os.chdir(old_cwd)
-        watch_mod.time.sleep = old_sleep
+        watch_mod.time.sleep = real_sleep
 
 
 def test_loop_says_up_to_date_once_then_waits_quietly(tmp_path, capsys):
@@ -851,3 +866,170 @@ def test_watch_clear_mutex_flag_parses():
     args = build_parser().parse_args(["watch", "--clear-mutex"])
     assert args.clear_mutex is True
     assert build_parser().parse_args(["watch"]).clear_mutex is False
+
+
+def _seed_inverted_store(repo, owner="feature/omc-v1"):
+    d = repo / ".gitnexus"
+    d.mkdir(exist_ok=True)
+    (d / "meta.json").write_text(json.dumps({"branch": owner, "lastCommit": "old"}))
+
+
+def _seed_docs_mirror(repo):
+    docs = repo / ".omc" / "docs" / "gitnexus" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "stale.md").write_text("cites deleted files")
+    return docs
+
+
+def _ctx_with_healing_node_stub(tmp_path, home, *, clean_removes=True, analyze_stamps="main"):
+    """Like _ctx_with_node_stub, but `node` simulates GitNexus side effects:
+    clean removes .gitnexus, analyze writes a meta stamped `analyze_stamps`,
+    wiki generates .gitnexus/wiki (so the docs-mirror tail has something real
+    to mirror). Knobs simulate the failure modes (clean that silently fails,
+    analyze that stamps the wrong branch)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    calls = bindir / "node.calls"
+    clean_cmd = "rm -rf .gitnexus" if clean_removes else ":"
+    node = bindir / "node"
+    node.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{calls}"\n'
+        'case "$*" in\n'
+        f'  *" clean --force") {clean_cmd} ;;\n'
+        '  *" analyze --skip-agents-md --skip-skills") mkdir -p .gitnexus; '
+        f'printf \'{{"branch":"{analyze_stamps}",'
+        '"lastCommit":"new"}\' > .gitnexus/meta.json ;;\n'
+        '  *" wiki --provider"*) mkdir -p .gitnexus/wiki; '
+        "printf 'regenerated from the healed graph' > .gitnexus/wiki/index.md ;;\n"
+        "esac\n"
+        "echo ok\nexit 0\n"
+    )
+    node.chmod(node.stat().st_mode | stat.S_IXUSR)
+    for name in ("wt", "claude"):
+        stub = bindir / name
+        stub.write_text(f'#!/bin/sh\necho "{name} 1.0"\nexit 0\n')
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    cli = home / "dependencies" / "gitnexus" / "gitnexus" / "dist" / "cli" / "index.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("// fake built CLI")
+    env = {
+        "HOME": str(tmp_path),
+        "OMC_HOME": str(home),
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+    }
+    return ToolContext.from_env(env), calls
+
+
+def test_refresh_heals_inverted_store(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_inverted_store(repo)
+    docs = _seed_docs_mirror(repo)
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "owned by 'feature/omc-v1', not 'main' — destroying and rebuilding" in err
+    assert "✓ index rebuilt for main" in err
+    assert "docs mirror cleared — run omc watch --once --enable-documentation" in err
+    recorded = calls.read_text()
+    assert "clean --force" in recorded
+    assert "analyze --skip-agents-md --skip-skills" in recorded
+    # clean ran BEFORE analyze
+    assert recorded.index("clean --force") < recorded.index("analyze")
+    # post-conditions actually hold
+    assert json.loads((repo / ".gitnexus" / "meta.json").read_text())["branch"] == "main"
+    assert not docs.exists()
+    # healed path must not ALSO run the incremental analyze (exactly one analyze)
+    assert recorded.count("analyze --skip-agents-md --skip-skills") == 1
+
+
+def test_refresh_healthy_store_stays_incremental(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_inverted_store(repo, owner="main")  # owner == base: NOT inverted
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0
+    recorded = calls.read_text()
+    assert "clean --force" not in recorded
+    assert "analyze --skip-agents-md --skip-skills" in recorded
+    assert "destroying and rebuilding" not in capsys.readouterr().err
+
+
+def test_heal_clean_failure_warns_and_skips(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_inverted_store(repo)
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", clean_removes=False)
+    assert _run_once(repo, ctx) == 0  # warn-and-skip: exit code stays 0
+    err = capsys.readouterr().err
+    assert "✗ clean did not remove the index" in err
+    recorded = calls.read_text()
+    assert "clean --force" in recorded
+    assert "analyze" not in recorded  # aborted before rebuild
+
+
+def test_heal_wrong_stamp_never_claims_success(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_inverted_store(repo)
+    ctx, _ = _ctx_with_healing_node_stub(
+        tmp_path, tmp_path / "home", analyze_stamps="feature/omc-v1"
+    )
+    assert _run_once(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "✗ rebuilt index is not owned by 'main' — not claiming success" in err
+    assert "✓ index rebuilt" not in err
+
+
+def test_heal_with_documentation_regenerates_wiki(tmp_path, capsys):
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_inverted_store(repo)
+    docs = _seed_docs_mirror(repo)
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx, enable_documentation=True) == 0
+    recorded = calls.read_text()
+    assert "clean --force" in recorded
+    assert "wiki --provider claude" in recorded
+    err = capsys.readouterr().err
+    assert "docs mirror cleared — run omc watch" not in err  # hint only when docs are OFF
+    # the mirror is REBUILT from the healed graph, not left holding stale pages
+    assert "✓ documentation refreshed" in err
+    assert (docs / "index.md").read_text() == "regenerated from the healed graph"
+    assert not (docs / "stale.md").exists()
+
+
+def test_heal_without_a_docs_mirror_omits_the_regenerate_hint(tmp_path, capsys):
+    """The hint is a claim about the filesystem ("cleared") — it must not print
+    when there was no mirror to clear."""
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_inverted_store(repo)  # deliberately no docs mirror
+    ctx, _ = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "✓ index rebuilt for main" in err
+    assert "docs mirror cleared — run omc watch" not in err
+
+
+def test_heal_survives_an_undeletable_docs_mirror(tmp_path, capsys, monkeypatch):
+    """Watch doctrine: a tick action warns and skips, it NEVER raises out of the
+    loop (run_watch catches only KeyboardInterrupt). A stuck docs mirror must
+    also not abort the rebuild — the index is the thing watch exists to keep
+    fresh, and the next documentation-enabled run re-mirrors over the leftovers."""
+    import omc.watch as watch_mod
+
+    _, repo = _repo_with_origin(tmp_path)
+    _seed_inverted_store(repo)
+    _seed_docs_mirror(repo)
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+
+    def boom(_root):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(watch_mod, "clear_docs_mirror", boom)
+    assert _run_once(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "✗ could not delete the stale docs mirror: permission denied" in err
+    assert "✓ index rebuilt for main" in err  # heal continued past the mirror failure
+    # never contradict the warning: the stale mirror is still there
+    assert "docs mirror cleared — run omc watch" not in err
+    assert (repo / ".omc" / "docs" / "gitnexus" / "docs" / "stale.md").exists()
+    recorded = calls.read_text()
+    assert "clean --force" in recorded
+    assert "analyze --skip-agents-md --skip-skills" in recorded

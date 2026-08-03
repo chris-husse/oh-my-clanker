@@ -26,8 +26,14 @@ from .buildprogress import ProgressTracker, sentinel_line
 from .cli.progress_bar import BarThread
 from .config.schema import Config
 from .errors import OmcError
-from .gitnexus import ANALYZE_ARGS, ensure_gitnexus, gitnexus_argv
-from .mirror import mirror_dir
+from .gitnexus import (
+    ANALYZE_ARGS,
+    ensure_gitnexus,
+    flat_store_branch,
+    gitnexus_argv,
+    store_inverted,
+)
+from .mirror import DOCS_MIRROR_REL, clear_docs_mirror, mirror_dir
 from .probe import require_tools
 from .providers.registry import docs_model_for, get_provider
 from .skills_source import skill_prompt
@@ -209,14 +215,71 @@ def _auto_build(ctx: ToolContext, cfg: Config, root: str) -> None:
         _say(f"✗ auto-build failed ({status}) — log: {log_path}")
 
 
-def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentation: bool) -> None:
-    _say("→ refreshing GitNexus index (incremental)")
+def _heal_store(ctx: ToolContext, root: str, base: str) -> tuple[bool, bool]:
+    """Destroy and rebuild the GitNexus index when the flat (default) store
+    belongs to a branch other than `base` — the flat-store inversion: GitNexus
+    keys the default store to the FIRST-indexed branch, so incremental analyze
+    lands in a side store the MCP server, staleness hints, and `wiki` never
+    read. `gitnexus clean` exits 0 even when deletion fails, so every step is
+    judged by its POST-CONDITION on the flat meta, never by exit code. The
+    stale docs mirror is deleted unconditionally: docs generated from the
+    frozen graph cite deleted files as current.
+
+    Returns (healed, mirror_cleared). The second flag is what the caller's
+    "docs mirror cleared" hint is allowed to claim — it stays False when there
+    was no mirror and when deleting it failed."""
+    rootp = Path(root)
+    owner = flat_store_branch(rootp)
+    _say(f"✗ GitNexus index is owned by {owner!r}, not {base!r} — destroying and rebuilding")
+    mirror_cleared = False
+    try:
+        mirror_cleared = clear_docs_mirror(rootp)
+        if mirror_cleared:
+            _say("· stale docs mirror deleted")
+    except OSError as exc:
+        # rmtree can fail (permissions, a racing reader) and run_watch's loop
+        # catches only KeyboardInterrupt — an escaping OSError would kill the
+        # watcher. Warn and CONTINUE: the index is what watch exists to keep
+        # fresh, and the next documentation-enabled run re-mirrors over the
+        # leftovers via mirror_dir.
+        _say(f"✗ could not delete the stale docs mirror: {exc}")
+    cp = ctx.run(gitnexus_argv(ctx, "clean", "--force"), cwd=root)
+    if flat_store_branch(rootp) is not None:
+        _say(f"✗ clean did not remove the index: {(cp.stderr or cp.stdout or '').strip()[:400]}")
+        return False, mirror_cleared
     cp = ctx.run(gitnexus_argv(ctx, *ANALYZE_ARGS), cwd=root)
     if cp.returncode != 0:
-        _say(f"✗ analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
-        return
-    _say("✓ index refreshed")
+        _say(f"✗ full analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
+        return False, mirror_cleared
+    if flat_store_branch(rootp) != base:
+        _say(f"✗ rebuilt index is not owned by {base!r} — not claiming success")
+        return False, mirror_cleared
+    _say(f"✓ index rebuilt for {base}")
+    return True, mirror_cleared
+
+
+def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentation: bool) -> None:
+    base = cfg.worktree.base_branch
+    mirror_cleared = False
+    if store_inverted(Path(root), base):
+        healed, mirror_cleared = _heal_store(ctx, root, base)
+        if not healed:
+            return  # warned inside; warn-and-skip, next tick retries
+    else:
+        _say("→ refreshing GitNexus index (incremental)")
+        cp = ctx.run(gitnexus_argv(ctx, *ANALYZE_ARGS), cwd=root)
+        if cp.returncode != 0:
+            _say(f"✗ analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
+            return
+        _say("✓ index refreshed")
     if not enable_documentation:
+        # Only when the mirror ACTUALLY went away: a heal with no mirror has
+        # nothing to regenerate, and a failed deletion would have this line
+        # contradict its own warning.
+        if mirror_cleared:
+            _say(
+                "· docs mirror cleared — run omc watch --once --enable-documentation to regenerate"
+            )
         return
     name = cfg.llm.default
     wiki_args = ["wiki", "--provider", name]
@@ -232,7 +295,7 @@ def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentatio
         return
     wiki = Path(root) / ".gitnexus" / "wiki"
     if wiki.is_dir():
-        mirror_dir(wiki, Path(root) / ".omc" / "docs" / "gitnexus" / "docs")
+        mirror_dir(wiki, Path(root) / DOCS_MIRROR_REL)
         _say("✓ documentation refreshed → .omc/docs/gitnexus/docs")
 
 
