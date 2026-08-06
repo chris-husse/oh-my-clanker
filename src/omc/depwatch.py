@@ -145,6 +145,8 @@ def _tick(ctx: ToolContext, attempted: set[tuple[str, str]]) -> int:
         actions += 1
     for key, dep in sorted(deps.items()):
         for commit, entry in dep.get("commits", {}).items():
+            if entry.get("broken"):
+                continue  # parked: a human re-ensure re-arms it, never the loop
             if not entry.get("indexed"):
                 if ("ensure", f"{key}@{commit}") in attempted:
                     continue
@@ -211,7 +213,7 @@ class _DocumentJob:
 
     def final_line(self) -> str:
         if self.rc == 0:
-            return f"✓ done {self.ref} (log: {self.log_path})"
+            return f"✓ done {self.ref}"
         return f"✗ failed (exit {self.rc}) {self.ref} — log: {self.log_path}"
 
 
@@ -252,6 +254,11 @@ def _document_batch(ctx: ToolContext, refs: list[str]) -> int:
                 job.log.close()
             except OSError:
                 pass
+            if job.rc == 0:
+                # success: the log carried live progress only — drop it. A
+                # failure's log is the diagnosis artifact and is kept.
+                with contextlib.suppress(OSError):
+                    os.unlink(job.log_path)
 
     try:
         with ThreadPoolExecutor(max_workers=min(_DOCUMENT_JOBS, len(refs))) as pool:
@@ -263,19 +270,23 @@ def _document_batch(ctx: ToolContext, refs: list[str]) -> int:
     return len(refs)
 
 
-def _manifest_status(home: Path) -> tuple[int, int, int]:
-    """(dependencies, commits, remaining). Remaining counts manifest commit
-    entries not yet indexed AND documented, plus disk checkouts the manifest
-    doesn't know (a failed adoption must not read as completion)."""
+def _manifest_status(home: Path) -> tuple[int, int, int, int]:
+    """(dependencies, commits, remaining, broken). Remaining counts manifest
+    commit entries not yet indexed AND documented — excluding parked ones,
+    which are reported separately — plus disk checkouts the manifest doesn't
+    know (a failed adoption must not read as completion)."""
     try:
         deps = load_manifest(home).get("dependencies", {})
     except OmcError:
-        return 0, 0, 0
+        return 0, 0, 0, 0
     commits = [e for dep in deps.values() for e in dep.get("commits", {}).values()]
-    remaining = sum(1 for e in commits if not (e.get("indexed") and e.get("documented")))
+    broken = sum(1 for e in commits if e.get("broken"))
+    remaining = sum(
+        1 for e in commits if not e.get("broken") and not (e.get("indexed") and e.get("documented"))
+    )
     known = {e.get("checkout") for e in commits}
     remaining += sum(1 for checkout in _scan_disk(home) if str(checkout) not in known)
-    return len(deps), len(commits), remaining
+    return len(deps), len(commits), remaining, broken
 
 
 def _pass(ctx: ToolContext, *, once: bool) -> int:
@@ -289,18 +300,24 @@ def _pass(ctx: ToolContext, *, once: bool) -> int:
         if actions == 0:
             break
     if total:
-        ndeps, ncommits, remaining = _manifest_status(ctx.home)
-        if remaining == 0:
+        ndeps, ncommits, remaining, broken = _manifest_status(ctx.home)
+        if remaining == 0 and broken == 0:
             dep_word = "dependency" if ndeps == 1 else "dependencies"
             commit_word = "commit" if ncommits == 1 else "commits"
             _say(
                 "✓ Finished documenting all dependencies! "
                 f"({ndeps} {dep_word}, {ncommits} {commit_word})"
             )
+        elif remaining == 0:
+            _say(
+                f"· pass complete — {broken} item(s) broken (see omc dependency list); not retrying"
+            )
         else:
             retry = "re-run to retry" if once else "retrying next tick"
+            note = f", {broken} broken (see omc dependency list)" if broken else ""
             _say(
-                f"· pass complete — {remaining} item(s) still pending (see ✗ lines above); {retry}"
+                f"· pass complete — {remaining} item(s) still pending "
+                f"(see ✗ lines above){note}; {retry}"
             )
     return total
 
@@ -317,7 +334,14 @@ def run_dependency_watch(ctx: ToolContext, *, interval: int = 30, once: bool = F
             actions = _pass(ctx, once=once)
             if actions == 0:
                 if not last_idle:
-                    _say("· all dependencies reconciled — waiting for work")
+                    _, _, _, broken = _manifest_status(ctx.home)
+                    if broken:
+                        _say(
+                            f"· idle — {broken} broken item(s) parked "
+                            "(see omc dependency list); waiting for work"
+                        )
+                    else:
+                        _say("· all dependencies reconciled — waiting for work")
                 last_idle = True
             else:
                 last_idle = False
@@ -342,7 +366,7 @@ def run_dependency_list(home: Path) -> int:
             commit[:7],
             entry.get("ref") or "-",
             "✓" if entry.get("indexed") else "✗",
-            "✓" if entry.get("documented") else "✗",
+            "broken" if entry.get("broken") else ("✓" if entry.get("documented") else "✗"),
             (entry.get("created") or "")[:10] or "-",
         )
         for key, dep in sorted(deps.items())

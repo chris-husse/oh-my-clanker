@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -73,6 +74,33 @@ def redact_userinfo(url: str) -> str:
 
 
 _redact_userinfo = redact_userinfo  # back-compat alias
+
+
+def child_death(rc: int | None) -> str:
+    """How a child ended: 'killed by SIGSEGV (signal 11)' or 'exit 3'."""
+    if rc is not None and rc < 0:
+        try:
+            return f"killed by {signal.Signals(-rc).name} (signal {-rc})"
+        except ValueError:
+            return f"killed by signal {-rc}"
+    return f"exit {rc}"
+
+
+def describe_child_failure(cp, redact=lambda s: s) -> str:
+    """Diagnosis of a failed gitnexus child: how it died + what it said.
+
+    Signal deaths are named — a corrupt lbug store SIGSEGVs node before any
+    error line, so the signal IS the evidence. Both streams are shown:
+    `stderr or stdout` used to swallow whichever stream carried the real
+    error whenever the other held banner noise.
+    """
+    streams = [
+        (label, redact((text or "").strip())[:400])
+        for label, text in (("stderr", cp.stderr), ("stdout", cp.stdout))
+    ]
+    detail = "; ".join(f"{label}: {text}" for label, text in streams if text)
+    death = child_death(cp.returncode)
+    return f"{death} — {detail}" if detail else death
 
 
 def _run_tool(

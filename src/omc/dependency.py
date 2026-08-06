@@ -26,7 +26,13 @@ from pathlib import Path
 
 from .config import store
 from .errors import OmcError
-from .gitnexus import gitnexus_argv, gitnexus_cli, redact_userinfo
+from .gitnexus import (
+    child_death,
+    describe_child_failure,
+    gitnexus_argv,
+    gitnexus_cli,
+    redact_userinfo,
+)
 from .mirror import mirror_dir
 from .toolctx import ToolContext
 
@@ -308,6 +314,15 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
     docs = docs_dir(ctx.home, ref, commit)
     entry = manifest["dependencies"].get(ref.key, {}).get("commits", {}).get(commit)
     if entry and entry.get("indexed") and (dest / ".git").exists():
+        if entry.get("broken"):
+            # Manual re-arm: an explicit ensure of a parked entry grants one
+            # fresh heal cycle. The watch never ensures parked entries.
+            def _rearm(m: dict) -> None:
+                c = m["dependencies"][ref.key]["commits"][commit]
+                c.pop("broken", None)
+                c.pop("heals", None)
+
+            update_manifest(ctx.home, _rearm)
         _verdict(
             {
                 "ok": True,
@@ -350,7 +365,7 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
         cwd=dest,
     )
     if cp.returncode != 0:
-        detail = _redact((cp.stderr or cp.stdout or "").strip())[:400]
+        detail = describe_child_failure(cp, _redact)
         print(f"error: gitnexus analyze failed: {detail}", file=sys.stderr)
         return 1
     # Locked read-modify-write: clone+index spent minutes, during which a
@@ -372,6 +387,7 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
                 "created": c.get("created") or _now_iso(),
             }
         )
+        c.pop("broken", None)  # a fresh index invalidates the park; heals stays
         documented = c["documented"]
 
     update_manifest(ctx.home, _record)
@@ -388,6 +404,54 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
         }
     )
     return 0
+
+
+def _heal_or_park(ctx: ToolContext, key: str, commit: str, entry: dict, cp) -> int:
+    """Signal death opening the dependency store — the corrupt-store
+    signature. Heal once: wipe the derived .gitnexus and flip the entry
+    un-indexed so the watch's ensure rebuilds it. A second signal death
+    after that rebuild means reindexing does not fix this store: park the
+    entry as broken so the watch stops retrying. Manifest first, then the
+    wipe: a failed wipe leaves indexed:false + a corrupt store, which the
+    rebuilt analyze overwrites anyway."""
+    desc = describe_child_failure(cp, _redact)
+    death = child_death(cp.returncode)
+    outcome: dict[str, str] = {}
+
+    def _mutate(m: dict) -> None:
+        # Grab the clone URL from the same flocked read — the park hint needs it
+        # to print a RUNNABLE ensure (--git takes a URL, never the key@hash form
+        # that only resolve_ref understands).
+        outcome["url"] = m["dependencies"][key].get("url") or ""
+        c = m["dependencies"][key]["commits"][commit]
+        if int(c.get("heals") or 0) < 1:
+            c.update(indexed=False, heals=int(c.get("heals") or 0) + 1)
+            c.pop("broken", None)
+            outcome["action"] = "healed"
+        else:
+            c["broken"] = f"gitnexus wiki {death} after reindex — likely a GitNexus/lbug bug"
+            outcome["action"] = "parked"
+
+    update_manifest(ctx.home, _mutate)
+    if outcome["action"] == "healed":
+        shutil.rmtree(Path(entry["checkout"]) / ".gitnexus", ignore_errors=True)
+        print(
+            f"error: gitnexus wiki failed ({desc}) — store looks corrupt; "
+            "wiped .gitnexus and flagged for reindex (the watch will retry)",
+            file=sys.stderr,
+        )
+    else:
+        # A malformed entry with no url still names the dependency, just without
+        # a copy-pasteable command.
+        target = redact_userinfo(outcome.get("url") or "") or _redact(key)
+        print(
+            f"error: gitnexus wiki failed ({desc}) after a reindex — likely a "
+            f"GitNexus/lbug bug; parking {_redact(key)}@{commit[:7]}. After "
+            "upgrading GitNexus (`omc update`), retry with "
+            f"`omc internal dependency ensure --git {target} --commit {commit}`",
+            file=sys.stderr,
+        )
+    return 1
 
 
 def run_document(ctx: ToolContext, ref_str: str) -> int:
@@ -455,9 +519,11 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
             file=sys.stderr,
         )
         return 1
+    if cp.returncode is not None and cp.returncode < 0:
+        return _heal_or_park(ctx, key, commit, entry, cp)
     if cp.returncode != 0 or not wiki.is_dir():
         print(
-            f"error: gitnexus wiki failed: {_redact((cp.stderr or cp.stdout or '').strip())[:400]}",
+            f"error: gitnexus wiki failed: {describe_child_failure(cp, _redact)}",
             file=sys.stderr,
         )
         return 1
@@ -465,9 +531,14 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
     # path straight from the key (host/owner/.../repo) without re-parsing a URL.
     docs = Path(entry.get("docs") or (ctx.home / "gitnexus" / Path(key) / commit / "docs"))
     mirror_dir(wiki, docs)
-    update_manifest(
-        ctx.home, lambda m: m["dependencies"][key]["commits"][commit].update(documented=True)
-    )
+
+    def _complete(m: dict) -> None:
+        c = m["dependencies"][key]["commits"][commit]
+        c.update(documented=True)
+        c.pop("heals", None)
+        c.pop("broken", None)
+
+    update_manifest(ctx.home, _complete)
     _progress(100)  # deterministic completion signal — the last poll may have missed the final page
     _verdict(
         {

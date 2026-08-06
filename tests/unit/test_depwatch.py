@@ -1,6 +1,7 @@
 import os
 import stat
 import subprocess
+from pathlib import Path
 
 from omc.depwatch import run_dependency_watch
 from omc.toolctx import ToolContext
@@ -22,21 +23,22 @@ def _ctx(tmp_path):
     return ToolContext(home=home, env=env), calls
 
 
-def _seed_manifest(home, *, indexed=True, documented=False):
+def _seed_manifest(home, *, indexed=True, documented=False, broken=None):
     from omc.dependency import load_manifest, save_manifest
 
     m = load_manifest(home)
+    entry = {
+        "checkout": str(home / "dependencies" / "github.com" / "foo" / "bar" / H),
+        "docs": str(home / "gitnexus" / "github.com" / "foo" / "bar" / H / "docs"),
+        "indexed": indexed,
+        "documented": documented,
+        "created": "2026-07-22T00:00:00+00:00",
+    }
+    if broken:
+        entry["broken"] = broken
     m["dependencies"]["github.com/foo/bar"] = {
         "url": "https://github.com/foo/bar.git",
-        "commits": {
-            H: {
-                "checkout": str(home / "dependencies" / "github.com" / "foo" / "bar" / H),
-                "docs": str(home / "gitnexus" / "github.com" / "foo" / "bar" / H / "docs"),
-                "indexed": indexed,
-                "documented": documented,
-                "created": "2026-07-22T00:00:00+00:00",
-            }
-        },
+        "commits": {H: entry},
     }
     save_manifest(home, m)
 
@@ -297,36 +299,49 @@ def test_cli_bare_dependency_is_usage_error(tmp_path, monkeypatch, capsys):
     assert main(["dependency"]) == 2
 
 
-def test_document_job_logs_output_and_parses_progress(tmp_path, capsys):
+def test_document_job_success_deletes_log(tmp_path, capsys, monkeypatch):
+    import tempfile
+
+    logdir = tmp_path / "joblogs"
+    logdir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(logdir))
     ctx, calls = _ctx(tmp_path)
     omc = tmp_path / "bin" / "omc"
     omc.write_text(
         f'#!/bin/sh\necho "$@" >> "{calls}"\n'
         "echo 'OMC_PROGRESS {\"percent\": 42}'\n"
-        "echo NARRATION >&2\n"
         "echo 'OMC_PROGRESS not-json'\n"  # malformed: must be ignored, not crash
         "exit 0\n"
     )
     _seed_manifest(ctx.home, indexed=True, documented=False)
     assert run_dependency_watch(ctx, once=True) == 0
     err = capsys.readouterr().err
-    assert "✓ done github.com/foo/bar@" in err
-    assert "log: " in err
-    log_path = err.split("log: ", 1)[1].split()[0].rstrip(")")
-    logged = open(log_path).read()
-    assert 'OMC_PROGRESS {"percent": 42}' in logged and "NARRATION" in logged
+    done_line = next(ln for ln in err.splitlines() if ln.startswith("✓ done"))
+    assert "log:" not in done_line
+    assert list(logdir.iterdir()) == []  # the successful job's log was removed
     assert "\x1b[" not in err  # non-TTY: no ANSI bar bytes
 
 
-def test_document_job_failure_names_exit_and_log(tmp_path, capsys):
+def test_document_job_failure_names_exit_and_log(tmp_path, capsys, monkeypatch):
+    import tempfile
+
+    logdir = tmp_path / "joblogs"
+    logdir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(logdir))
     ctx, calls = _ctx(tmp_path)
     omc = tmp_path / "bin" / "omc"
-    omc.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\nexit 3\n')
+    omc.write_text(
+        f'#!/bin/sh\necho "$@" >> "{calls}"\n'
+        "echo 'OMC_PROGRESS {\"percent\": 42}'\necho NARRATION >&2\nexit 3\n"
+    )
     _seed_manifest(ctx.home, indexed=True, documented=False)
     assert run_dependency_watch(ctx, once=True) == 0
     err = capsys.readouterr().err
     assert "✗ failed (exit 3) github.com/foo/bar@" in err
     assert "log: " in err
+    log_path = err.split("log: ", 1)[1].split()[0].rstrip(")")
+    logged = open(log_path).read()  # teed output survives for diagnosis
+    assert 'OMC_PROGRESS {"percent": 42}' in logged and "NARRATION" in logged
 
 
 def test_failed_adoption_never_claims_finished(tmp_path, capsys):
@@ -398,3 +413,74 @@ def test_documents_missing_dependencies_in_parallel(tmp_path, capsys):
     # "see ✗ lines above" glyph is expected: the stub never flips the manifest.
     assert "✗ failed" not in err
     assert "documenting 3 dependencies" in err
+
+
+def _seed_broken(home, key="github.com/foo/bar"):
+    from omc.dependency import load_manifest, save_manifest
+
+    m = load_manifest(home)
+    m["dependencies"][key] = {
+        "url": f"https://{key}.git",
+        "commits": {
+            H: {
+                "checkout": str(home / "dependencies" / Path(key) / H),
+                "indexed": True,
+                "documented": False,
+                "broken": "gitnexus wiki killed by SIGSEGV (signal 11) after reindex",
+                "created": "2026-08-04T00:00:00+00:00",
+            }
+        },
+    }
+    save_manifest(home, m)
+
+
+def test_tick_never_touches_broken_entries(tmp_path, capsys):
+    ctx, calls = _ctx(tmp_path)
+    _seed_broken(ctx.home)
+    assert run_dependency_watch(ctx, once=True) == 0
+    assert not calls.exists()  # neither ensure nor document spawned
+    err = capsys.readouterr().err
+    assert "1 broken item(s) parked (see omc dependency list)" in err
+
+
+def test_tick_skips_broken_even_when_unindexed(tmp_path, capsys):
+    # broken wins over indexed:false — a parked entry is never re-ensured.
+    from omc.dependency import load_manifest, save_manifest
+
+    ctx, calls = _ctx(tmp_path)
+    _seed_broken(ctx.home)
+    m = load_manifest(ctx.home)
+    m["dependencies"]["github.com/foo/bar"]["commits"][H]["indexed"] = False
+    save_manifest(ctx.home, m)
+    assert run_dependency_watch(ctx, once=True) == 0
+    assert not calls.exists()
+
+
+def test_pass_reports_pending_and_broken_separately(tmp_path, capsys):
+    ctx, calls = _ctx(tmp_path)
+    _seed_manifest(ctx.home, indexed=True, documented=False)  # pending, stub no-op
+    _seed_broken(ctx.home, key="github.com/baz/qux")
+    assert run_dependency_watch(ctx, once=True) == 0
+    err = capsys.readouterr().err
+    assert "1 item(s) still pending" in err
+    assert "1 broken (see omc dependency list)" in err
+    assert "Finished documenting" not in err
+
+
+def test_finished_never_claimed_with_broken_parked(tmp_path, capsys):
+    ctx, calls = _stateful_ctx(tmp_path)
+    _seed_manifest(ctx.home, indexed=False, documented=False)  # stub flips to done
+    _seed_broken(ctx.home, key="github.com/baz/qux")
+    assert run_dependency_watch(ctx, once=True) == 0
+    err = capsys.readouterr().err
+    assert "Finished documenting" not in err
+    assert "1 item(s) broken (see omc dependency list); not retrying" in err
+
+
+def test_dependency_list_marks_broken(tmp_path, capsys):
+    from omc.depwatch import run_dependency_list
+
+    ctx, _ = _ctx(tmp_path)
+    _seed_broken(ctx.home)
+    assert run_dependency_list(ctx.home) == 0
+    assert "broken" in capsys.readouterr().out

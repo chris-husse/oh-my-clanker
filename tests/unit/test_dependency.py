@@ -437,11 +437,18 @@ def test_document_wiki_nonzero_rc_keeps_documented_false(tmp_path, capsys):
     _seed_indexed(ctx)  # wiki dir exists...
     # ...but the wiki step exits non-zero: the rc != 0 half of the gate.
     node = tmp_path / "bin" / "node"
-    node.write_text(f'#!/bin/sh\necho "$@" >> "{nodecalls}"\npwd >> "{nodecalls}"\nexit 1\n')
+    node.write_text(
+        f'#!/bin/sh\necho "$@" >> "{nodecalls}"\npwd >> "{nodecalls}"\n'
+        "echo banner\necho boom >&2\nexit 1\n"
+    )
     node.chmod(node.stat().st_mode | stat.S_IXUSR)
     assert run_document(ctx, "github.com/foo/bar") == 1
     entry = load_manifest(ctx.home)["dependencies"]["github.com/foo/bar"]["commits"][H]
     assert entry["documented"] is False
+    err = capsys.readouterr().err
+    # the describer names the exit and keeps BOTH streams
+    assert "gitnexus wiki failed: exit 1" in err
+    assert "stderr: boom" in err and "stdout: banner" in err
 
 
 def test_document_ignores_session_model_uses_docs_floor(tmp_path, capsys):
@@ -672,3 +679,99 @@ def test_document_stall_emits_no_100(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert 'OMC_PROGRESS {"percent": 100}' not in out
     assert "OMC_DEPENDENCY" not in out
+
+
+# ─── run_document: heal-then-park on corrupt-store signal deaths ──────
+
+
+def _segv_node(tmp_path, nodecalls):
+    """node stub that logs its argv then dies by SIGSEGV — the corrupt-store
+    signature (run_supervised reports it as returncode -11)."""
+    node = tmp_path / "bin" / "node"
+    node.write_text(f'#!/bin/sh\necho "$@" >> "{nodecalls}"\nkill -SEGV $$\n')
+    node.chmod(node.stat().st_mode | stat.S_IXUSR)
+
+
+def _entry(ctx):
+    return load_manifest(ctx.home)["dependencies"]["github.com/foo/bar"]["commits"][H]
+
+
+def _patch_entry(ctx, **fields):
+    m = load_manifest(ctx.home)
+    m["dependencies"]["github.com/foo/bar"]["commits"][H].update(fields)
+    save_manifest(ctx.home, m)
+
+
+def test_document_signal_death_heals_once(tmp_path, capsys):
+    ctx, _, nodecalls = _ctx(tmp_path)
+    dest = _seed_indexed(ctx)
+    _segv_node(tmp_path, nodecalls)
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 1
+    err = capsys.readouterr().err
+    assert "SIGSEGV" in err and "wiped" in err
+    entry = _entry(ctx)
+    assert entry["indexed"] is False and entry["heals"] == 1
+    assert "broken" not in entry
+    assert not (dest / ".gitnexus").exists()  # derived cache gone
+    assert (dest / ".git").exists()  # checkout untouched
+
+
+def test_document_signal_death_after_heal_parks(tmp_path, capsys):
+    ctx, _, nodecalls = _ctx(tmp_path)
+    dest = _seed_indexed(ctx)
+    _patch_entry(ctx, heals=1)
+    _segv_node(tmp_path, nodecalls)
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 1
+    err = capsys.readouterr().err
+    # The hint must be RUNNABLE: ensure's --git goes straight to parse_git_url,
+    # which rejects the key@hash form that resolve_ref accepts.
+    assert "omc update" in err
+    assert f"ensure --git https://github.com/foo/bar.git --commit {H}" in err
+    entry = _entry(ctx)
+    assert "SIGSEGV" in entry["broken"] and "after reindex" in entry["broken"]
+    assert entry["indexed"] is True  # park never un-indexes
+    assert (dest / ".gitnexus").exists()  # no second wipe
+
+
+def test_document_park_hint_falls_back_to_key_without_url(tmp_path, capsys):
+    # A malformed dep record (no url) must still name the dependency in the hint.
+    ctx, _, nodecalls = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    _patch_entry(ctx, heals=1)
+    m = load_manifest(ctx.home)
+    m["dependencies"]["github.com/foo/bar"].pop("url")
+    save_manifest(ctx.home, m)
+    _segv_node(tmp_path, nodecalls)
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 1
+    assert f"ensure --git github.com/foo/bar --commit {H}" in capsys.readouterr().err
+
+
+def test_document_success_clears_heal_state(tmp_path, capsys):
+    ctx, _, _ = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    _patch_entry(ctx, heals=1)
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 0
+    entry = _entry(ctx)
+    assert entry["documented"] is True
+    assert "heals" not in entry and "broken" not in entry
+
+
+def test_ensure_cached_hit_rearms_parked_entry(tmp_path, capsys):
+    ctx, _, _ = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    _patch_entry(ctx, heals=1, broken="gitnexus wiki killed by SIGSEGV after reindex")
+    assert run_ensure(ctx, "https://github.com/foo/bar.git", H) == 0
+    assert _verdict(capsys)["cached"] is True
+    entry = _entry(ctx)
+    assert "broken" not in entry and "heals" not in entry  # manual re-arm
+
+
+def test_ensure_reindex_preserves_heals_clears_broken(tmp_path, capsys):
+    ctx, _, _ = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    _patch_entry(ctx, indexed=False, heals=1, broken="stale")
+    assert run_ensure(ctx, "https://github.com/foo/bar.git", H) == 0
+    entry = _entry(ctx)
+    assert entry["indexed"] is True
+    assert entry["heals"] == 1  # preserved: the park cap must bind next time
+    assert "broken" not in entry

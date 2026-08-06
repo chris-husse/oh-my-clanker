@@ -28,6 +28,7 @@ from .config.schema import Config
 from .errors import OmcError
 from .gitnexus import (
     ANALYZE_ARGS,
+    describe_child_failure,
     ensure_gitnexus,
     flat_store_branch,
     gitnexus_argv,
@@ -245,11 +246,11 @@ def _heal_store(ctx: ToolContext, root: str, base: str) -> tuple[bool, bool]:
         _say(f"✗ could not delete the stale docs mirror: {exc}")
     cp = ctx.run(gitnexus_argv(ctx, "clean", "--force"), cwd=root)
     if flat_store_branch(rootp) is not None:
-        _say(f"✗ clean did not remove the index: {(cp.stderr or cp.stdout or '').strip()[:400]}")
+        _say(f"✗ clean did not remove the index: {describe_child_failure(cp)}")
         return False, mirror_cleared
     cp = ctx.run(gitnexus_argv(ctx, *ANALYZE_ARGS), cwd=root)
     if cp.returncode != 0:
-        _say(f"✗ full analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
+        _say(f"✗ full analyze failed: {describe_child_failure(cp)}")
         return False, mirror_cleared
     if flat_store_branch(rootp) != base:
         _say(f"✗ rebuilt index is not owned by {base!r} — not claiming success")
@@ -269,7 +270,7 @@ def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentatio
         _say("→ refreshing GitNexus index (incremental)")
         cp = ctx.run(gitnexus_argv(ctx, *ANALYZE_ARGS), cwd=root)
         if cp.returncode != 0:
-            _say(f"✗ analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
+            _say(f"✗ analyze failed: {describe_child_failure(cp)}")
             return
         _say("✓ index refreshed")
     if not enable_documentation:
@@ -291,7 +292,7 @@ def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentatio
     _say(f"→ regenerating documentation via {name} (LLM-heavy)")
     cp = ctx.run(gitnexus_argv(ctx, *wiki_args), cwd=root)
     if cp.returncode != 0:
-        _say(f"✗ wiki failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
+        _say(f"✗ wiki failed: {describe_child_failure(cp)}")
         return
     wiki = Path(root) / ".gitnexus" / "wiki"
     if wiki.is_dir():
