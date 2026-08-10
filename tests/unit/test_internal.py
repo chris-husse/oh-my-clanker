@@ -77,6 +77,7 @@ def test_rebase_main_in_primary_is_noop(tmp_path, capsys):
     rc, verdict, _ = _run(["rebase-main", "--base", "main"], primary, tmp_path, capsys)
     assert rc == 0
     assert verdict["ok"] is True and "primary" in verdict["note"]
+    assert verdict["synced"] == [] and verdict["shared"] == []
 
 
 def test_rebase_main_rebases_and_mirrors_snapshot(tmp_path, capsys):
@@ -97,11 +98,29 @@ def test_rebase_main_rebases_and_mirrors_snapshot(tmp_path, capsys):
 
     assert rc == 0 and verdict["ok"] is True
     assert ".gitnexus" in verdict["synced"]
+    assert verdict["shared"] == []  # stable schema: key present even when empty
     assert verdict["rebased"]  # old..new range recorded
     assert (wt / "f2.txt").exists()  # main's commit arrived under our work
     assert (wt / "mine.txt").exists()
     assert (wt / ".gitnexus" / "graph.db").read_text() == "fresh"
     assert not (wt / ".gitnexus" / "extraneous").exists()
+
+
+def test_rebase_main_reports_shared_omc_docs(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    shared = tmp_path / "shared-omc"
+    (shared / "docs").mkdir(parents=True)
+    (shared / "docs" / "page.md").write_text("docs")
+    os.symlink(shared, primary / ".omc")
+    os.symlink(shared, wt / ".omc")
+
+    rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
+
+    assert rc == 0 and verdict["ok"] is True
+    assert verdict["shared"] == [".omc/docs"]
+    assert verdict["synced"] == []  # no .gitnexus in this fixture; nothing else synced
+    assert (shared / "docs" / "page.md").read_text() == "docs"  # nothing destroyed
 
 
 def test_rebase_main_never_runs_gitnexus_index(tmp_path, capsys):

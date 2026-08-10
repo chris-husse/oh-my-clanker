@@ -19,8 +19,11 @@ omc internal rebase-main
 
 The last line is machine-readable:
 
-- `OMC_REBASE_MAIN {"ok": true, "rebased": "<old>..<new>", "synced": [...]}` —
-  report what moved and which snapshot dirs were re-mirrored, then continue.
+- `OMC_REBASE_MAIN {"ok": true, "rebased": "<old>..<new>", "synced": [...],
+  "shared": [...]}` — report what moved and which snapshot dirs were
+  re-mirrored, then continue. Entries under `shared` were already present
+  via a shared `.omc` (symlinked across checkouts) — nothing was copied,
+  and that is success, not a warning.
 - `OMC_REBASE_MAIN {"ok": true, ..., "note": "primary checkout — nothing to
   rebase"}` — you're in the main checkout; `omc watch` owns freshness here.
 - **rc 3 (bail)** with `{"ok": false, "conflicts": [...]}` — the rebase hit

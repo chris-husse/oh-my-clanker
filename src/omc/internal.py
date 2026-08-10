@@ -49,6 +49,7 @@ def _rebase_main(ctx: ToolContext, base_arg: str | None) -> int:
                 "ok": True,
                 "rebased": "",
                 "synced": [],
+                "shared": [],
                 "note": "primary checkout — nothing to rebase",
             }
         )
@@ -72,14 +73,21 @@ def _rebase_main(ctx: ToolContext, base_arg: str | None) -> int:
         return 3
 
     new = (ctx.run([ctx.git_bin, "rev-parse", "--short", "HEAD"]).stdout or "").strip()
-    synced = mirror_snapshot(Path(primary), Path(root))
+    result = mirror_snapshot(Path(primary), Path(root))
     # Deliberately NO gitnexus invocation here — indexing is `omc watch`'s
     # exclusive feature. Registering the copied snapshot (`gitnexus index` in
     # the worktree, removed 2026-08-03) minted a same-named registry entry
     # frozen at cut time per worktree, never unregistered; stale-entry lookups
     # then reported "N commits behind" while the primary index was current.
     # Worktree queries don't need registration: the proxy pins --repo <primary>.
-    _verdict({"ok": True, "rebased": f"{old}..{new}", "synced": synced})
+    _verdict(
+        {
+            "ok": True,
+            "rebased": f"{old}..{new}",
+            "synced": result.synced,
+            "shared": result.shared,
+        }
+    )
     return 0
 
 
