@@ -26,6 +26,11 @@ _TOKEN_GUIDANCE = {
 
 PROVIDERS = list(TOKEN_ENV)
 
+# Fixed in-container path the stub Jira MCP appends one JSON line to per write
+# (assignIssue / transitionIssue). Tracker-write assertions read THIS file, not
+# the LLM transcript: the log is deterministic, transcripts are not.
+MUTATIONS_LOG = "/tmp/stub-jira-mutations.jsonl"
+
 ALL_TOKEN_VARS = tuple(dict.fromkeys(v for vars_ in TOKEN_ENV.values() for v in vars_))
 
 
@@ -127,7 +132,7 @@ def wire_mcp(container, provider: str, mode: str) -> None:
             "type": "stdio",
             "command": "python3",
             "args": ["/repo/docker/stub-jira-mcp/server.py"],
-            "env": {"STUB_JIRA_MODE": mode},
+            "env": {"STUB_JIRA_MODE": mode, "STUB_JIRA_MUTATIONS_LOG": MUTATIONS_LOG},
         }
         # Merge into ~/.claude.json rather than clobbering it — the file may
         # already carry other harness/session state we must not destroy.
@@ -153,7 +158,8 @@ with open(path, "w") as f:
             "[mcp_servers.jira]\n"
             'command = "python3"\n'
             'args = ["/repo/docker/stub-jira-mcp/server.py"]\n'
-            f'env = {{ STUB_JIRA_MODE = "{mode}" }}\n'
+            f'env = {{ STUB_JIRA_MODE = "{mode}", '
+            f'STUB_JIRA_MUTATIONS_LOG = "{MUTATIONS_LOG}" }}\n'
         )
         rc, out = run_in(
             container,
@@ -168,7 +174,13 @@ with open(path, "w") as f:
             "mcp": {
                 "jira": {
                     "type": "local",
-                    "command": ["env", stub_env, "python3", "/repo/docker/stub-jira-mcp/server.py"],
+                    "command": [
+                        "env",
+                        stub_env,
+                        f"STUB_JIRA_MUTATIONS_LOG={MUTATIONS_LOG}",
+                        "python3",
+                        "/repo/docker/stub-jira-mcp/server.py",
+                    ],
                     "enabled": True,
                 }
             }

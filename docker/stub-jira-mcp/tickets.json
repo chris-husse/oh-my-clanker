@@ -3,6 +3,21 @@
     "summary": "Fix login timeout in auth service",
     "description": "Users are logged out after 5 minutes. Investigate session TTL handling in the auth service and extend it to the configured 24h.",
     "status": "To Do",
-    "issuetype": "Bug"
+    "issuetype": "Bug",
+    "assignee": null
+  },
+  "PROJ-2": {
+    "summary": "Add rate limiting to withdrawal API",
+    "description": "Add rate limiting to withdrawal API",
+    "status": "To Do",
+    "issuetype": "Bug",
+    "assignee": {"accountId": "stub-user-1", "displayName": "Stub User"}
+  },
+  "PROJ-3": {
+    "summary": "Migrate session store to Redis",
+    "description": "Migrate session store to Redis",
+    "status": "To Do",
+    "issuetype": "Bug",
+    "assignee": {"accountId": "other-user-9", "displayName": "Someone Else"}
   }
 }

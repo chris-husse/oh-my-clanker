@@ -41,7 +41,7 @@ read tool the session has (Jira MCP, GitHub/GitLab MCP or CLI, …):
 - Its surroundings where the tracker exposes them: parent/epic, linked issues.
 - Linked documents: summarize each (title + a few sentences + link). A doc that
   cannot be fetched is listed with "couldn't fetch — <reason>"; never hard-fail
-  on a document. Never write to the tracker.
+  on a document. Step 2 is read-only — ticket writes happen only via ticket-sync (Step 2.5).
 
 If `$ARGUMENTS` is a free-text description, it IS the context.
 
@@ -49,6 +49,20 @@ If `$ARGUMENTS` is a free-text description, it IS the context.
 brainstorm from? If not, tell the user exactly what's missing and ask them to
 improve the ticket (or paste the missing context). Re-check when they say it's
 done. Loop until it passes or they exit.
+
+## Step 2.5 — claim the ticket (ticket-sync)
+
+Only when the work context is a ticket key or URL (free-text work skips this
+step entirely): invoke the internal **`ticket-sync`** skill with phase
+`start` and the ticket reference. It assigns the ticket (asking first when
+someone else holds it) and moves it to an "In Progress"-equivalent status.
+
+- Verdict reason `user-declined` → STOP the start flow: the user chose not
+  to take over someone else's ticket.
+- Any other failure (`mcp-missing`, `mcp-unauthenticated`,
+  `no-matching-transition`, `assigned-elsewhere`, …) → report the one-line
+  message so the user knows the ticket was NOT moved, and continue — ticket
+  sync is best-effort, never a gate.
 
 ## Step 3 — base freshness gate (HARD REQUIREMENT)
 

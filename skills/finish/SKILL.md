@@ -61,6 +61,14 @@ Invoke **`create-mr`** — it generates the MR description
 with `--force-with-lease`. The user creates the actual MR/PR from the forge;
 the commit carries the full description.
 
+Then, once `create-mr` reports a successful push, invoke the internal
+**`ticket-sync`** skill with phase `review` — it moves the ticket (key
+derived from the branch name) to an "In Review"-equivalent column. Any
+failure: report its one-line message and continue to Step 6 — the push
+already succeeded, and the ticket can be moved by hand. The Step 6
+"address review comments" loop re-runs `create-mr` WITHOUT re-invoking
+ticket-sync (the ticket is already in review).
+
 ## Step 6 — offer follow-ups
 
 Report what happened (rebased onto `<base>`, squashed N→1, stage outcomes,

@@ -16,7 +16,7 @@ from .plugin import ensure_plugin
 from .probe import require_tools
 from .providers.registry import get_provider
 from .shells.registry import detect_shell
-from .slug import fetch_slug
+from .slug import MCP_TOOL_PATTERNS, fetch_slug
 from .terminals import detect_terminal
 from .toolctx import ToolContext
 from .watchlock import busy_lock, wait_until_idle
@@ -41,7 +41,12 @@ def _run_headless(ctx: ToolContext, cfg: Config, seed: str, cwd: str, slug: str)
     model = pcfg.model if pcfg else ""
     # Name the headless session after the slug too (where the CLI supports it),
     # so seeded sessions are resumable by name exactly like interactive ones.
-    argv = provider.headless_argv(seed, model=model, session_name=slug)
+    argv = provider.headless_argv(
+        seed,
+        model=model,
+        session_name=slug,
+        allowed_tools=[*MCP_TOOL_PATTERNS, "Bash", "Read", "Glob", "Grep"],
+    )
     try:
         cp = ctx.run(argv, cwd=cwd, extra_env={**provider.title_env(), "OMC_SLUG": slug})
     except OSError as exc:

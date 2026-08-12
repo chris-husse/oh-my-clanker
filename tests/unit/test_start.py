@@ -202,3 +202,26 @@ def test_start_proceeds_when_chain_is_blocked(tmp_path, monkeypatch):
     rc = run_start(ctx, Config(), "PROJ-1 do the thing", dry_run=True)
     assert rc == 0  # blocked chain never stops start
     assert (repo / "AGENTS.md").read_text() == "# handwritten\n"
+
+
+def test_run_headless_allows_mcp_tool_patterns():
+    from types import SimpleNamespace
+
+    from omc.slug import MCP_TOOL_PATTERNS
+    from omc.start import _run_headless
+
+    captured = {}
+
+    class FakeCtx:
+        def run(self, argv, cwd=None, extra_env=None):
+            captured["argv"] = argv
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    rc = _run_headless(FakeCtx(), Config(), seed="/omc:start PROJ-1", cwd=".", slug="proj-1-x")
+    assert rc == 0
+    argv = captured["argv"]
+    assert "--allowed-tools" in argv
+    for pattern in MCP_TOOL_PATTERNS:
+        assert pattern in argv
+    for base_tool in ("Bash", "Read", "Glob", "Grep"):
+        assert base_tool in argv
