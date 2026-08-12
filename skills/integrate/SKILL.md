@@ -36,8 +36,9 @@ get written.
    - `.omc/config/AGENTS.md` — the project's own agent instructions
    - `.config/wt.toml` — does a copy-ignored step exist?
    - `.gitnexus/` index and `.omc/docs/` generated docs
-   - `.omc/skills/build` · `.omc/skills/verify` · `.omc/skills/review` ·
-     `.omc/skills/explain-context` · `.omc/skills/investigation-context`
+   - `.omc/skills/check` · `.omc/skills/build` · `.omc/skills/verify` ·
+     `.omc/skills/review` · `.omc/skills/explain-context` ·
+     `.omc/skills/investigation-context`
    - `.omc/hooks/post-watch.sh` — optional CLI-side hook `omc watch` runs
      after action ticks (sync / forced refresh)
 2. **Mechanical fixes** via the existing machinery (with the user's go-ahead):
@@ -59,18 +60,34 @@ iterate, and **write only on explicit approval** (these are the project's
 files; in review mode show the existing file beside your proposal and flag
 drift and gaps, never silently replace):
 
+### `.omc/skills/check`
+The fast "am I on the right track" gate: build only what the unit tests
+need, then run them. Investigate the minimal test loop — justfile/Makefile
+test recipes, package.json scripts, CI unit-test jobs, and the graph
+(`query "unit tests"`). Propose a draft naming the REAL commands and what
+passing means. Keep it fast: no E2E, no world-build.
+
+**Migration trigger**: `.omc/skills/check` absent while `.omc/skills/build`
+exists → the project predates the check/build split. Audit the build stage
+against the current semantics (build = the world, NO tests): a build stage
+that runs unit tests is pre-split — propose splitting it into `check`
+(minimal build + unit tests) and `build` (world, no tests), grounded in the
+project's actual commands. Applies in BOTH fresh-setup and review modes.
+
 ### `.omc/skills/build`
-Investigate how this project actually builds and gates: justfile, Makefile,
-package.json scripts, pyproject, CI workflows — and the graph
-(`query "build"`). Propose a draft naming the REAL commands and what passing
-means (exit codes, format/lint steps). Drift example worth flagging in
-review mode: the skill says `make test` while CI runs `just build`.
+Build the world — everything compiles and packages, NO tests (unit tests
+live in `check`). Investigate how this project actually builds: justfile,
+Makefile, package.json scripts, pyproject, CI workflows — and the graph
+(`query "build"`). Propose a draft naming the REAL commands and what
+passing means (exit codes, format/lint steps). Drift example worth flagging
+in review mode: the skill says `make test` while CI runs `just build`.
 
 ### `.omc/skills/verify`
 What's the heavier "does it still work" tier here — integration tests, e2e
 suites, docker harnesses, smoke scripts? How long does it take, what does it
 need (services, tokens)? Propose the stage with honest cost notes and hard
-pass criteria.
+pass criteria. Reserved for after major milestones — never the routine dev
+loop.
 
 ### `.omc/skills/review`
 What do this project's reviews actually check — CONTRIBUTING.md, CI lint
@@ -120,5 +137,5 @@ user's voice.
    `/omc:explain` uses the context map; `omc watch` keeps the graph fresh
    (suggest the cadence); worktrees snapshot it all.
 3. Suggest committing the new/changed files (they're all meant to be
-   committed) — offer to run the project's own build stage first as a sanity
+   committed) — offer to run the project's own check stage first as a sanity
    check.

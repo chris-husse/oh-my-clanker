@@ -28,9 +28,10 @@ the bug).
 - **Never** `pytest.skip` / `mark.skip` / `skipif` / conditional skip-guards.
   A missing prerequisite is a `pytest.fail` naming the exact command that
   satisfies it (missing token → "put an ANTHROPIC_API_KEY in .env …").
-- Tier *selection* is allowed: `just build` (fast: ruff + unit, no LLM/network/
-  Docker) vs `just e2e-tests` (Docker-per-test, real LLMs, token-gated).
-  Within a selected tier, every test runs or fails loud.
+- Tier *selection* is allowed: `just check` (fast gate: unit tests, no
+  LLM/network/Docker) vs `just build` (ruff + package build, no tests) vs
+  `just e2e-tests` (Docker-per-test, real LLMs, token-gated). Within a
+  selected tier, every test runs or fails loud.
 
 ### No brittle tests
 
@@ -78,8 +79,9 @@ the bug).
 
 ## Build & verify
 
-- `just build` — the default gate; run after every change.
+- `just check` — the default gate; run after every change. `just build` runs
+  the world-build (ruff + package build, no tests).
 - `just e2e-tests [selector]` — Docker E2E; tokens from `.env`
   (`cp env.example .env`). First image build is slow; layers cache.
-- Project stages for this repo: `.omc/skills/{build,verify,review}` (used by
-  `/omc:finish`).
+- Project stages for this repo: `.omc/skills/{check,build,verify,review}`
+  (used by `/omc:finish`).

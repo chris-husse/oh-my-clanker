@@ -37,6 +37,7 @@ USER_FACING_SKILLS = (
     "plan",
     "implement",
     "finish",
+    "check",
     "build",
     "verify",
     "review",
@@ -92,14 +93,16 @@ def test_finish_skill_contract():
     ):
         assert needle in text, f"finish skill missing {needle!r}"
     assert "gh pr create" not in text  # never creates the MR/PR
-    # squash is delegated, then stages run build -> verify -> review, then push
-    order = [text.index("`squash`"), text.index("`build`"), text.index("`verify`")]
-    order += [text.index("`review`"), text.index("`create-mr`")]
-    assert order == sorted(order), "finish must order squash -> build -> verify -> review -> push"
+    # squash is delegated, then stages run check -> build -> verify -> review, then push
+    order = [text.index("`squash`"), text.index("`check`"), text.index("`build`")]
+    order += [text.index("`verify`"), text.index("`review`"), text.index("`create-mr`")]
+    assert order == sorted(order), (
+        "finish must order squash -> check -> build -> verify -> review -> push"
+    )
 
 
 def test_stage_proxy_contract():
-    for stage in ("build", "verify", "review"):
+    for stage in ("check", "build", "verify", "review"):
         text = (ROOT / "skills" / stage / "SKILL.md").read_text()
         for needle in (f".omc/skills/{stage}", "OMC_STAGE", '"configured"'):
             assert needle in text, f"{stage} proxy missing {needle!r}"
@@ -228,6 +231,8 @@ def test_implement_skill_contract():
         "model-tier policy",
         "`Model:`",
         "top tier",
+        "/omc:check",
+        "before dispatching the next task",
     ):
         assert needle in text, f"implement skill missing {needle!r}"
     # phases run strictly spec -> plan -> build -> ship
@@ -247,6 +252,7 @@ def test_index_and_document_delegate():
 
 def test_dogfood_stage_and_context_skills():
     for name, needle in (
+        ("check", "just check"),
         ("build", "just build"),
         ("verify", "test_e2e_smoke"),
         ("review", "ToolContext"),
@@ -286,6 +292,8 @@ def test_integrate_skill_contract():
     text = (ROOT / "skills" / "integrate" / "SKILL.md").read_text()
     for needle in (
         ".omc/skills/build",
+        ".omc/skills/check",
+        "Migration trigger",
         ".omc/skills/verify",
         ".omc/skills/review",
         ".omc/skills/explain-context",
@@ -317,6 +325,19 @@ def test_distribution_agents_model_tier_policy():
         assert needle in text, f"behavior layer missing {needle!r}"
     # the old guidance invited cheap-tier models for execution work
     assert "efficient models" not in text, "old Model selection phrasing must be gone"
+
+
+def test_distribution_agents_validation_cadence():
+    text = (ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text()
+    for needle in (
+        "Validation cadence",
+        "/omc:check",
+        "builds the world",
+        "major milestones",
+    ):
+        assert needle in text, f"behavior layer missing {needle!r}"
+    # finish bullet lists all four stage gates in order
+    assert "`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review`" in text
 
 
 def test_explain_dependency_skill_contract():

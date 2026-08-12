@@ -63,6 +63,14 @@ per-subagent models, proceed on the session model — never substitute a
 cheaper tier. Plans missing `Model:` lines fall back to the behavior
 layer's model-tier policy directly.
 
+After EACH task's subagent completes (and its reviews pass), run
+`/omc:check` — the project-defined quick gate (build what the unit tests
+need, run them) — before dispatching the next task. A failing check blocks
+progression: fix forward until check passes. Never substitute ad-hoc test
+commands for the stage; an unconfigured check is a pass, so this costs
+nothing on projects without one. Full E2E (`/omc:verify`) is NOT part of
+the per-task loop — it belongs to major milestones (finish runs it).
+
 Phase 2 → 3 is NOT a gate: once the plan is written and pressure-tested,
 start the subagent build immediately. Do not ask which execution approach
 to use (writing-plans offers a choice; this conductor has already made it)
@@ -73,4 +81,4 @@ IS the instruction to build. The only stops are critical spec findings
 ## Phase 4 — ship
 
 Invoke the `finish` skill (`/omc:finish`): rebase, squash with the MR
-description as the commit message, build/verify/review stages, push.
+description as the commit message, check/build/verify/review stages, push.

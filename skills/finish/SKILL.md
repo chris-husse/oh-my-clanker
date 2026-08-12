@@ -1,6 +1,6 @@
 ---
 name: finish
-description: Finish the current feature branch - rebase onto the base, squash to one commit whose message is the MR description, run the project's build/verify/review stages, push, then offer to close the worktree, address review comments, or discuss. Use when work on a ticket is done and ready for review.
+description: Finish the current feature branch - rebase onto the base, squash to one commit whose message is the MR description, run the project's check/build/verify/review stages, push, then offer to close the worktree, address review comments, or discuss. Use when work on a ticket is done and ready for review.
 ---
 
 # omc finish
@@ -41,10 +41,12 @@ changes (with notice), does the `reset --soft`, and leaves exactly one
 temp-message commit on `origin/<base>..HEAD`. An `OMC_SQUASH {"ok": false}`
 outcome → surface its message and stop.
 
-## Step 4 — project stages: build → verify → review
+## Step 4 — project stages: check → build → verify → review
 
-Invoke the **`build`**, **`verify`**, and **`review`** skills, in that order.
-Each is a proxy for the project's own `.omc/skills/<stage>/SKILL.md`:
+Invoke the **`check`**, **`build`**, **`verify`**, and **`review`** skills,
+in that order — check first, as the cheap fail-fast gate: a broken unit
+test dies in seconds, not after a world-build. Each is a proxy for the
+project's own `.omc/skills/<stage>/SKILL.md`:
 
 - Unconfigured (`"configured": false`) → note it was skipped and move on.
 - A stage that changed TRACKED files (formatters, autofixes) → amend those

@@ -20,7 +20,7 @@
 
    Non-interactive equivalents exist for scripting: `omc configure --defaults` or `omc configure --set llm.default=claude`. Documentation/wiki generation uses its own model — `--set llm.providers.claude.docs_model=claude-opus-4-8` to override; unset it defaults to the provider's standard coding tier (claude: `claude-sonnet-5`), never your session model. Run inside a repo, configure also establishes the **AGENTS.md control chain**: root `AGENTS.md` and `CLAUDE.md` become symlinks straight into the omc install's own generated behavior layer (`distribution/AGENTS.md`, found via `omc print-install-path`), which defers to the project's own instructions in `.omc/config/AGENTS.md` (yours — seeded once, never touched; existing regular files are never replaced, you get migration steps instead). Those symlinks point at a machine-specific path, so omc gitignores them — `omc start` and `omc configure` recreate them on any machine. Commit `.omc/config/AGENTS.md` plus the `.gitignore` entries; updating omc (`omc update`) updates the behavior layer everywhere instantly, no re-commit needed.
 
-3. Install the skills plugin for each harness you use (then, inside your project, run `/omc:integrate` in a session — it inventories every omc surface and brainstorms your project's build/verify/review/explain-context/investigation-context skills with you, grounded in your actual codebase; re-run it after omc updates or whenever the integration feels off):
+3. Install the skills plugin for each harness you use (then, inside your project, run `/omc:integrate` in a session — it inventories every omc surface and brainstorms your project's check/build/verify/review/explain-context/investigation-context skills with you, grounded in your actual codebase; re-run it after omc updates or whenever the integration feels off):
 
    | Harness | Install |
    |---|---|
@@ -59,7 +59,7 @@ From there, `/omc:start` takes over inside the session itself: it gathers the ti
 
 When the work is done, run `/omc:finish` inside the session: it rebases onto a fresh base, squashes the branch to a single commit whose message *is* the MR/PR description (generated from the real diff), pushes with `--force-with-lease`, and prints where to open the MR — it never creates one for you. Worktrees are snapshots of main — code AND knowledge: `wt` copies every gitignored file (`.env`, caches, the `.gitnexus`/`.omc/docs` graph+docs) into new worktrees, and `/omc:rebase-main` refreshes both later (rebase onto the fresh base + a deterministic Python re-mirror of the knowledge dirs; it is also `/omc:finish`'s first step). omc seeds a starter `.config/wt.toml` when a project has none, and `/omc:check-wt-config` reviews an existing one against the faithful-worktree expectations.
 
-If the repo defines project stages (`.omc/skills/{build,verify,review}/SKILL.md` — each a skill saying what that stage means for *this* project), finish runs them in that order between squash and push, stopping before the push if one fails; `/omc:build`, `/omc:verify`, and `/omc:review` run them standalone and are no-ops when unconfigured. It ends by offering to close the worktree (`wt remove` — the branch survives until merged), iterate on review comments (amend + re-push), or just talk through the change.
+If the repo defines project stages (`.omc/skills/{check,build,verify,review}/SKILL.md` — each a skill saying what that stage means for *this* project), finish runs them in that order between squash and push, stopping before the push if one fails. The intended split: `check` is the quick "am I on the right track" gate (build what the unit tests need, run them — use it constantly while working), `build` builds the world without tests, and `verify` is the full-E2E tier reserved for major milestones. `/omc:check`, `/omc:build`, `/omc:verify`, and `/omc:review` run them standalone and are no-ops when unconfigured. It ends by offering to close the worktree (`wt remove` — the branch survives until merged), iterate on review comments (amend + re-push), or just talk through the change.
 
 Three flags change the shape of the run: `--dry-run` prints the full plan (branch name, `wt` argv, title sequence, session argv) and stops before touching anything; `--headless` runs the seeded session in the provider's print mode instead of an interactive shell. By default, `omc start` waits for an in-flight `omc watch` update to finish before cutting the worktree — it never snapshots a half-updated primary; `--no-mutex` skips the wait.
 
@@ -113,7 +113,13 @@ already-wired worktrees included.
 
 ## Development
 
-Fast tier — format check, lint, unit tests; no LLM, no network, no Docker:
+Fast tier — unit tests; no LLM, no network, no Docker:
+
+```bash
+just check
+```
+
+World build — format check, lint, package build; no tests:
 
 ```bash
 just build
