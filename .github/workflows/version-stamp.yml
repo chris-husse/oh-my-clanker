@@ -1,0 +1,47 @@
+# Stamp the patch (third) version number on every merge to main.
+#
+# The human owns MAJOR.MINOR in pyproject.toml; GitHub owns the patch and sets
+# it to this workflow's run_number. scripts/stamp_version.py reads MAJOR.MINOR
+# from pyproject.toml and writes MAJOR.MINOR.<run_number> into all four version
+# files; this job then commits the result back to main with `[skip ci]` so the
+# stamp commit does not re-trigger CI or this workflow (the loop guard).
+#
+# To bump MAJOR or MINOR: edit `version` in pyproject.toml in a normal PR. The
+# patch you type there is irrelevant — it is replaced on merge.
+#
+# NOTE: pushes to main with the default GITHUB_TOKEN. main is currently
+# unprotected. If branch protection is ever added, this job needs a bypass
+# (a GitHub App token or an actor allowance) or the push will fail.
+name: version-stamp
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+concurrency:
+  group: version-stamp-main
+  cancel-in-progress: false
+jobs:
+  stamp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Stamp version = MAJOR.MINOR.run_number
+        id: stamp
+        run: |
+          version=$(python3 scripts/stamp_version.py "$GITHUB_RUN_NUMBER")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Commit and push if the version changed
+        run: |
+          if git diff --quiet; then
+            echo "version already current — nothing to stamp"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: stamp version ${{ steps.stamp.outputs.version }} [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main

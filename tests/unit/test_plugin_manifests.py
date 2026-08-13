@@ -1,8 +1,26 @@
 import json
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_all_version_strings_agree():
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    claude = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())["version"]
+    marketplace = next(
+        p
+        for p in json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())["plugins"]
+        if p["name"] == "omc"
+    )["version"]
+    codex = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text())["version"]
+    assert pyproject == claude == marketplace == codex, {
+        "pyproject": pyproject,
+        "claude": claude,
+        "marketplace": marketplace,
+        "codex": codex,
+    }
 
 
 def test_claude_plugin_manifest():
