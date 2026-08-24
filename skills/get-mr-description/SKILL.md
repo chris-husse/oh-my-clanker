@@ -21,6 +21,12 @@ for anything the messages don't explain.
 
 ## Output
 
+"ONLY the description, no commentary" below scopes **this skill's text output**
+— it is not permission to stop. The description is an argument to `create-mr`,
+which amends it into the commit and pushes; your very next action after writing
+it is that tool call, in the same turn. A polished description reads like a
+deliverable and is not one.
+
 Return ONLY the description text, no fences, no commentary:
 
 - **Line 1**: an imperative title, ≤72 characters (it becomes the squashed

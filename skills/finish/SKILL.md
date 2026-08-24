@@ -8,7 +8,21 @@ description: Finish the current feature branch - rebase onto the base, squash to
 Finish the current feature branch. Normally run inside an `omc start` worktree,
 but any feature branch works.
 
-## Step 0 — gate
+## Step 0 — externalize the flow (before the gate, no exceptions)
+
+**Write every step below into the task list now**, as your first action:
+gate → anything-to-finish → rebase-main → squash → the four project stages →
+create-mr (describe + push) → ticket-sync (review phase) → offer follow-ups.
+Mark each completed as you pass it.
+
+This is the longest composed flow in omc: nine sub-skills, each arriving as a
+fresh instruction block that reads like a new user request and pushes this one
+out of view. Every one of them ends in a verdict line or an artifact, and every
+one of those is an argument to the next step — never a place to stop. The task
+list is what holds the stack; without it this flow reliably dies partway, most
+often leaving the commit still reading `wip: squash of…`.
+
+## Step 0.1 — gate
 
 - cwd is a git repo, on a **feature branch**: not detached HEAD, not the base
   branch. Determine the base from the project's omc config
@@ -71,6 +85,11 @@ already succeeded, and the ticket can be moved by hand. The Step 6
 "address review comments" loop re-runs `create-mr` WITHOUT re-invoking
 ticket-sync (the ticket is already in review).
 
+Its `OMC_TICKET {…}` verdict is an argument to you, not the end of your turn:
+whatever it says, your very next action after it is a tool call that begins
+Step 6. `finish` is not complete until the user has been offered the
+follow-ups.
+
 ## Step 6 — offer follow-ups
 
 Report what happened (rebased onto `<base>`, squashed N→1, stage outcomes,
@@ -88,3 +107,12 @@ supports it; in a non-interactive/headless run, list them and end):
    `create-mr` so the description reflects the final state and the branch is
    re-pushed (`--force-with-lease`).
 3. **Chat about this** — discuss the change, the review, or what's next.
+
+## Completion contract
+
+`finish` is complete only once Step 6 has run and the branch is pushed with a
+real description. Before ending the turn, read the task list: any step still
+pending means you are not done — continue with it. A branch left squashed under
+a `wip:` message, or pushed but with the ticket never moved, is a failed run,
+not a partial success. Phase-to-phase transitions are NOT gates: do not ask
+permission between steps.

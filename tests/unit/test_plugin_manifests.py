@@ -398,3 +398,64 @@ def test_spec_skill_contract():
         assert needle in text, f"spec skill missing {needle!r}"
     # spec-phase emphasis is architecture; implementation choices are plan-phase
     assert "plan phase" in text
+
+
+# --- Anti-stall contract -----------------------------------------------------
+# Composed omc flows nest 3-4 deep (start -> ticket-sync; finish -> squash/
+# stages/create-mr -> get-mr-description; implement -> spec/plan/finish). Each
+# sub-skill arrives as a fresh instruction block and ends in a verdict line or a
+# polished artifact, both of which read as "done". Runs repeatedly died on the
+# OMC_TICKET verdict, leaving the caller's remaining steps silently unrun.
+# Prose disclaimers alone did not hold; these tests pin the structural rules.
+
+CONDUCTORS = ("start", "finish", "implement")
+
+
+def test_conductors_externalize_their_steps_first():
+    """Every composed flow must order its steps into the task list up front."""
+    for name in CONDUCTORS:
+        text = (ROOT / "skills" / name / "SKILL.md").read_text()
+        assert "task list" in text, f"{name} must anchor its steps in the task list"
+        assert "externalize the flow" in text.lower(), f"{name} missing the externalize step"
+        # ...and it must land before the first sub-skill invocation — that is the
+        # point where this skill's body stops being the freshest context.
+        first_invoke = min(
+            (text.index(v) for v in ("Invoke the", "invoke the") if v in text),
+            default=len(text),
+        )
+        assert text.lower().index("externalize the flow") < first_invoke, (
+            f"{name} must externalize its steps before invoking any sub-skill"
+        )
+
+
+def test_conductors_declare_a_completion_contract():
+    for name in CONDUCTORS:
+        text = (ROOT / "skills" / name / "SKILL.md").read_text()
+        assert "Completion contract" in text, f"{name} missing a completion contract"
+
+
+def test_verdict_is_never_the_end_of_the_turn():
+    """A sub-skill verdict is an argument to the caller, not a stopping point."""
+    text = (ROOT / "skills" / "ticket-sync" / "SKILL.md").read_text()
+    # the old wording made the verdict the literal last act of the reply
+    assert "end your reply" not in text
+    assert "No text after it." not in text
+    for needle in ("not the end of your turn", "next action is a tool call", "return to the caller"):
+        assert needle in text.lower().replace("**", ""), f"ticket-sync missing {needle!r}"
+    # both callers must name the verdict as a pass-through, not a terminator
+    for name in ("start", "finish"):
+        caller = (ROOT / "skills" / name / "SKILL.md").read_text()
+        assert "OMC_TICKET" in caller, f"{name} must name the verdict it consumes"
+        assert "not the end of your turn" in caller, f"{name} must reject the verdict-as-stop"
+
+
+def test_artifact_terminators_are_scoped_to_skill_output():
+    """'no commentary' must be marked as scoping output, not licensing a stop."""
+    text = (ROOT / "skills" / "get-mr-description" / "SKILL.md").read_text()
+    assert "not permission to stop" in text
+
+
+def test_behavior_layer_carries_the_anti_stall_doctrine():
+    text = (ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text()
+    for needle in ("argument, not a destination", "Externalize a composed flow", "OMC_TICKET"):
+        assert needle in text, f"behavior layer missing {needle!r}"
