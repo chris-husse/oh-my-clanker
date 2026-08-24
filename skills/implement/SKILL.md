@@ -12,6 +12,19 @@ converged design all the way to a pushed branch: do not ask permission
 between phases. The only interactive stops are CRITICAL spec findings
 (see Phase 1) and genuine blockers.
 
+## Phase -1 — externalize the flow (first action, no exceptions)
+
+**Write the four phases into the task list now**, before the resume check:
+spec → plan → subagent build → ship. Mark each completed as you pass it.
+
+This is omc's deepest nesting (`implement → spec → explain`,
+`implement → finish → create-mr → get-mr-description`), and every phase ends in
+a large, polished artifact — a spec, a 1,200-line plan, an MR description.
+**The bigger the artifact, the more it reads as a destination**, when it is only
+an argument to the next phase. The task list is what keeps the outer frames
+alive; without it this flow reliably stops after the spec or the plan, and a
+half-run conductor is indistinguishable from a broken one from the user's side.
+
 ## Phase 0 — resume check
 
 If a spec for the current work already exists
@@ -82,3 +95,9 @@ IS the instruction to build. The only stops are critical spec findings
 
 Invoke the `finish` skill (`/omc:finish`): rebase, squash with the MR
 description as the commit message, check/build/verify/review stages, push.
+
+## Completion contract
+
+`implement` is complete only when `finish` has run to its own completion
+contract — branch pushed, described, ticket moved, follow-ups offered. Before
+ending the turn, read the task list: a pending phase means continue, not stop.

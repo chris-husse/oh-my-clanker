@@ -26,6 +26,23 @@ current branch (`git rev-parse --abbrev-ref HEAD`).
   the tab title, and creates the worktree, none of which a skill can do from
   inside a session. Do not continue.
 
+## Step 0.5 — externalize the flow (before Step 1, no exceptions)
+
+On the prepared path, **write the remaining steps into the task list now**, as
+your next action, before gathering any context:
+
+1. Gather ticket context and pass the context gate (Step 2)
+2. Claim the ticket via ticket-sync (Step 2.5)
+3. Base freshness gate — fetch + rebase onto `origin/<base>` (Step 3)
+4. Summarize and hand off to `omc:plan` (Step 4)
+
+Mark each completed as you pass it. This is not bookkeeping. Steps 2.5 and 4
+invoke *other skills*, whose bodies arrive as fresh instruction blocks that read
+like new user requests and push this one out of view; the task list is the only
+representation of "what still has to happen" that survives that. Skipping this
+step is the known, repeated cause of `/omc:start` stopping dead after
+ticket-sync and never reaching `omc:plan`.
+
 ## Step 1 — superpowers present?
 
 Verify the superpowers plugin is available (its skills, e.g.
@@ -57,12 +74,22 @@ step entirely): invoke the internal **`ticket-sync`** skill with phase
 `start` and the ticket reference. It assigns the ticket (asking first when
 someone else holds it) and moves it to an "In Progress"-equivalent status.
 
+ticket-sync finishes by emitting an `OMC_TICKET {…}` verdict line. **That line
+is an argument to YOU, not the end of your turn** — the start flow is only half
+done when it appears. Read it, apply the branching below, and continue. Whatever
+the verdict says, your very next action after it is a tool call: mark task 2
+complete and start Step 3. Ending the turn on the verdict is the failure mode
+this flow is most prone to.
+
 - Verdict reason `user-declined` → STOP the start flow: the user chose not
   to take over someone else's ticket.
 - Any other failure (`mcp-missing`, `mcp-unauthenticated`,
   `no-matching-transition`, `assigned-elsewhere`, …) → report the one-line
   message so the user knows the ticket was NOT moved, and continue — ticket
   sync is best-effort, never a gate.
+- Success (`ok: true`) → note it in one line and continue.
+
+In every case except `user-declined`, proceed to Step 3 in the same turn.
 
 ## Step 3 — base freshness gate (HARD REQUIREMENT)
 
@@ -84,3 +111,11 @@ default. Then:
    primed brainstorm.
 
 This skill prepares and hands off — it never designs or writes code itself.
+
+## Completion contract
+
+`/omc:start` is complete only when `omc:plan` has actually been invoked. Before
+you end the turn, check the task list: if any of the four steps is still
+pending, you are not done — continue with the first pending one instead of
+stopping. Handing off is the deliverable; a claimed ticket on a fresh branch
+with no brainstorm started is a failed run, not a partial success.
