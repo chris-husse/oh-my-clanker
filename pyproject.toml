@@ -1,6 +1,6 @@
 [project]
 name = "omc"
-version = "0.1.1"
+version = "0.1.2"
 description = "Oh My Clanker! Turn a ticket into a prepared worktree with a seeded LLM session."
 requires-python = ">=3.12"
 license = "MIT"
