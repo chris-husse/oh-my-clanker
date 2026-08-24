@@ -1,12 +1,16 @@
 ---
 name: verify
-description: Run the project's verify stage if one is configured (.omc/skills/verify in the repo omc is invoked from); nothing to do otherwise. Proxy - the project defines what "verify" means.
+description: Run the project's verify stage if one is configured (.omc/skills/verify in the repo omc is invoked from); nothing to do otherwise. Proxy - the project defines what "verify" means. Intended semantics: full E2E verification - reserved for after major milestones, never the routine dev loop.
 ---
 
 # omc verify (project-stage proxy)
 
 There is nothing omc-specific to do here: this skill runs the PROJECT's
 verify stage, if the project defines one.
+
+Intended semantics: verify is the heavyweight full-E2E tier. Run it after
+major milestones — never as a routine dev-loop gate (that is `check`'s
+job).
 
 ## Steps
 

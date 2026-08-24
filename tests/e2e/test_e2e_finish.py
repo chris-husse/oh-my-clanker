@@ -80,13 +80,13 @@ def test_finish_squashes_describes_and_pushes(container):
     assert verdict["passed"], verdict["reasons"]
 
 
-def _add_build_stage(container, repo, skill_body):
+def _add_stage(container, repo, stage, skill_body):
     script = (
-        f"mkdir -p {repo}/.omc/skills/build && "
-        f"cat > {repo}/.omc/skills/build/SKILL.md << 'SKILLEOF'\n"
+        f"mkdir -p {repo}/.omc/skills/{stage} && "
+        f"cat > {repo}/.omc/skills/{stage}/SKILL.md << 'SKILLEOF'\n"
         "---\n"
-        "name: build\n"
-        "description: test project build stage\n"
+        f"name: {stage}\n"
+        f"description: test project {stage} stage\n"
         "---\n\n"
         f"{skill_body}\n"
         "SKILLEOF"
@@ -95,20 +95,30 @@ def _add_build_stage(container, repo, skill_body):
     assert rc == 0, out
 
 
-def test_finish_runs_passing_build_stage_then_pushes(container):
+def test_finish_runs_passing_check_and_build_stages_then_pushes(container):
     require_token("claude")
     configure_omc(container, "claude")
     repo = make_work_repo(container)
     _make_feature_branch(container, repo)
-    _add_build_stage(
+    _add_stage(
         container,
         repo,
-        "Run `sh -c 'echo built > /tmp/omc-build-ran && echo BUILD-OK'`.\n"
+        "check",
+        "Run `sh -c 'echo checked > /tmp/omc-check-ran && echo CHECK-OK'`.\n"
+        "CHECK-OK printed means the check passed; anything else is a failure.",
+    )
+    _add_stage(
+        container,
+        repo,
+        "build",
+        "Run `sh -c 'test -f /tmp/omc-check-ran && "
+        "echo built > /tmp/omc-build-ran && echo BUILD-OK'`.\n"
         "BUILD-OK printed means the build passed; anything else is a failure.",
     )
     # the stage file must be part of the branch (a real project tracks .omc/)
     rc, out = run_in(
-        container, ["bash", "-c", f"cd {repo} && git add -A && git commit -qm 'add build stage'"]
+        container,
+        ["bash", "-c", f"cd {repo} && git add -A && git commit -qm 'add check and build stages'"],
     )
     assert rc == 0, out
 
@@ -132,8 +142,10 @@ def test_finish_runs_passing_build_stage_then_pushes(container):
     # mid-session OMC_STAGE verdict lines are not visible here — the on-disk
     # marker and the pushed origin state below are the real evidence.
 
+    rc, _ = run_in(container, ["test", "-f", "/tmp/omc-check-ran"])
+    assert rc == 0, "project check stage never executed"
     rc, _ = run_in(container, ["test", "-f", "/tmp/omc-build-ran"])
-    assert rc == 0, "project build stage never executed"
+    assert rc == 0, "project build stage never executed (or ran before check)"
     rc, count = run_in(
         container,
         ["git", "-C", f"{repo}-origin", "rev-list", "--count", "main..feature/manual-fix"],
@@ -146,9 +158,10 @@ def test_finish_stops_before_push_on_failing_stage(container):
     configure_omc(container, "claude")
     repo = make_work_repo(container)
     _make_feature_branch(container, repo)
-    _add_build_stage(
+    _add_stage(
         container,
         repo,
+        "build",
         "Run `sh -c 'echo the build is broken >&2; exit 1'`.\n"
         "A non-zero exit code means the build FAILED.",
     )
@@ -178,3 +191,43 @@ def test_finish_stops_before_push_on_failing_stage(container):
         ["git", "-C", f"{repo}-origin", "rev-parse", "--verify", "feature/manual-fix"],
     )
     assert rc2 != 0, f"failing build stage must stop the push!\ntranscript:\n{out[:2000]}"
+
+
+def test_finish_stops_before_push_on_failing_check_stage(container):
+    require_token("claude")
+    configure_omc(container, "claude")
+    repo = make_work_repo(container)
+    _make_feature_branch(container, repo)
+    _add_stage(
+        container,
+        repo,
+        "check",
+        "Run `sh -c 'echo the unit tests are broken >&2; exit 1'`.\n"
+        "A non-zero exit code means the check FAILED.",
+    )
+    rc, out = run_in(
+        container, ["bash", "-c", f"cd {repo} && git add -A && git commit -qm 'add check stage'"]
+    )
+    assert rc == 0, out
+
+    rc, out = run_in(
+        container,
+        [
+            "claude",
+            "-p",
+            "/omc:finish",
+            "--output-format",
+            "text",
+            "--allowed-tools",
+            "Bash",
+            "Skill",
+        ],
+        cwd=repo,
+        timeout=900,
+    )
+    # the branch must NOT reach origin when the check stage fails
+    rc2, _ = run_in(
+        container,
+        ["git", "-C", f"{repo}-origin", "rev-parse", "--verify", "feature/manual-fix"],
+    )
+    assert rc2 != 0, f"failing check stage must stop the push!\ntranscript:\n{out[:2000]}"

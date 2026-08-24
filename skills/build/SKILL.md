@@ -1,12 +1,16 @@
 ---
 name: build
-description: Run the project's build stage if one is configured (.omc/skills/build in the repo omc is invoked from); nothing to do otherwise. Proxy - the project defines what "build" means.
+description: Run the project's build stage if one is configured (.omc/skills/build in the repo omc is invoked from); nothing to do otherwise. Proxy - the project defines what "build" means. Intended semantics: build the world - everything compiles and packages, NO tests.
 ---
 
 # omc build (project-stage proxy)
 
 There is nothing omc-specific to do here: this skill runs the PROJECT's
 build stage, if the project defines one.
+
+Intended semantics: build is the world-build — everything compiles and
+packages, with NO tests. Unit-test validation belongs to `check`; full
+E2E belongs to `verify`.
 
 ## Steps
 

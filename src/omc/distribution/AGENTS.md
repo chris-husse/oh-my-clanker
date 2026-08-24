@@ -8,8 +8,13 @@ harness (Claude Code, Codex, OpenCode) gets the same ground rules:
   `/omc:finish`'s first step). Never hand-copy or hand-delete those dirs;
   the deterministic mirror lives in `omc internal rebase-main`.
 - **Finish work through `/omc:finish`** — rebase, squash, project stage gates
-  (`/omc:build` → `/omc:verify` → `/omc:review`), described push. Do not
-  bypass a failing stage.
+  (`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review`), described
+  push. Do not bypass a failing stage.
+- **Validation cadence**: `/omc:check` is the quick "am I on the right
+  track" gate (build what the unit tests need, run them) — use it
+  constantly while working. `/omc:build` builds the world, no tests.
+  `/omc:verify` is full E2E — run it only after major milestones, never as
+  a routine dev-loop gate.
 - **Ask the graph, not grep**: `/omc:explain <question>` answers from the
   project's GitNexus knowledge graph and docs.
 - **Model selection**: the main session runs the model chosen in
