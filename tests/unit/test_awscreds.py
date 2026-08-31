@@ -3,6 +3,8 @@ import json
 import stat
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from omc.awscreds import _cache_path, _store, run_aws_credential_process
 from omc.toolctx import ToolContext
 
@@ -106,12 +108,14 @@ def test_corrupt_cache_is_a_miss_not_an_error(tmp_path, capsys):
 
 def test_op_failure_names_remedy_and_emits_nothing(tmp_path, capsys):
     bindir = tmp_path / "bin"
-    make_stub(bindir, "op", stdout="[ERROR] account is not signed in", rc=1)
+    # op writes its diagnosis to stderr; ours must carry it through, not swallow it.
+    make_stub(bindir, "op", stderr="[ERROR] account is not signed in", rc=1)
     make_stub(bindir, "aws", stdout=_ASSUME_ROLE_JSON)
     rc = run_aws_credential_process(_ctx(bindir), _args(tmp_path))
     captured = capsys.readouterr()
     assert rc == 1
     assert captured.out == ""  # stdout is the JSON contract: nothing on failure
+    assert "[ERROR] account is not signed in" in captured.err
     assert "one-time password" in captured.err
     assert "op signin" in captured.err
 
@@ -119,18 +123,33 @@ def test_op_failure_names_remedy_and_emits_nothing(tmp_path, capsys):
 def test_aws_failure_reemits_stderr_and_emits_nothing(tmp_path, capsys):
     bindir = tmp_path / "bin"
     make_stub(bindir, "op", stdout="123456")
-    make_stub(bindir, "aws", rc=254)
+    aws_error = "An error occurred (AccessDenied) when calling the AssumeRole operation"
+    make_stub(bindir, "aws", stderr=aws_error, rc=254)
     rc = run_aws_credential_process(_ctx(bindir), _args(tmp_path))
     captured = capsys.readouterr()
     assert rc == 1
     assert captured.out == ""
+    # "see the aws error above" is only true if the aws error is actually above it.
+    assert aws_error in captured.err
     assert "assume-role failed" in captured.err
 
 
-def test_cache_key_depends_on_flags(tmp_path):
-    a = _cache_path(_args(tmp_path))
-    b = _cache_path(_args(tmp_path, op_item="other-item"))
-    assert a != b
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("source_profile", "other-profile"),
+        ("role_arn", "arn:aws:iam::123456789012:role/Other"),
+        ("mfa_serial", "arn:aws:iam::123456789012:mfa/other"),
+        ("op_item", "other-item"),
+        ("op_vault", "Private"),
+        ("duration", 3600),
+    ],
+)
+def test_cache_key_depends_on_flags(tmp_path, flag, value):
+    # Every flag that changes WHO the session is must change the cache key —
+    # a collision would hand one role's caller another role's credentials.
+    base = _cache_path(_args(tmp_path))
+    assert _cache_path(_args(tmp_path, **{flag: value})) != base
 
 
 def test_op_vault_flag_reaches_op(tmp_path, capsys):
