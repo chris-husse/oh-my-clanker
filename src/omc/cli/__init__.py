@@ -90,6 +90,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dep_sub.add_parser("list", help="Show cached dependencies: repo, commit, index/doc status")
 
+    p_awscp = sub.add_parser(
+        "aws-credential-process",
+        help="AWS credential_process provider: assume a role with a 1Password-served"
+        " TOTP, headless",
+    )
+    p_awscp.add_argument(
+        "--source-profile", required=True, help="AWS profile holding the long-lived keys"
+    )
+    p_awscp.add_argument("--role-arn", required=True, help="IAM role to assume")
+    p_awscp.add_argument("--mfa-serial", required=True, help="TOTP MFA device ARN")
+    p_awscp.add_argument(
+        "--op-item", required=True, help="1Password item with the one-time password field"
+    )
+    p_awscp.add_argument("--op-vault", default=None, help="1Password vault (default: any)")
+    p_awscp.add_argument(
+        "--duration", type=int, default=43200, help="Session seconds (default 12h)"
+    )
+    p_awscp.add_argument(
+        "--cache-dir", default=None, help="Session cache dir (default ~/.omc/aws-credential-cache)"
+    )
+
     p_install = sub.add_parser("install", help="(Re)install omc from a local checkout")
     p_install.add_argument("path", nargs="?", default=".", help="Checkout path (default: .)")
 
@@ -126,7 +147,10 @@ def main(argv: list[str] | None = None) -> int:
         build_parser().print_help(sys.stderr)
         return 2
     ctx = ToolContext.from_env()
-    if args.command not in ("version", "print-install-path"):
+    # version/print-install-path: stdout is a one-line machine contract.
+    # aws-credential-process: stdout is the credential_process JSON contract, and it
+    # must work on a machine that never ran `omc configure`.
+    if args.command not in ("version", "print-install-path", "aws-credential-process"):
         print(f"Oh My Clanker! v{__version__}", file=sys.stderr)
     try:
         return _dispatch(ctx, args)
@@ -192,6 +216,10 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
         from ..configure import run_configure
 
         return run_configure(ctx, defaults=args.defaults, sets=args.set)
+    if args.command == "aws-credential-process":
+        from ..awscreds import run_aws_credential_process
+
+        return run_aws_credential_process(ctx, args)
     if args.command == "install":
         from ..installer import run_install
 
