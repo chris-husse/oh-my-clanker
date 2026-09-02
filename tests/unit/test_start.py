@@ -9,7 +9,7 @@ from omc.errors import OmcError, Refusal
 from omc.start import run_start
 from omc.toolctx import ToolContext
 
-from ._stubs import make_stub, stub_env
+from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, stub_env
 
 OK_VERDICT = 'OMC_SLUG {"ok": true, "slug": "proj-1-fix-login"}'
 
@@ -41,10 +41,10 @@ def _make_git_stub(bindir):
 def full_env(tmp_path, *, verdict=OK_VERDICT, wt_json=None):
     bindir = tmp_path / "bin"
     _make_git_stub(bindir)
-    # The static stub answers EVERY claude invocation with the same stdout, so
-    # prepend an "omc@" line: ensure_plugin's `plugin list` probe sees the
-    # plugin as installed, and parse_verdict ignores non-OMC_SLUG lines.
-    make_stub(bindir, "claude", stdout=f"omc@oh-my-clanker\n{verdict}")
+    # argv-aware claude stub: `plugin list --json` reports a healthy omc +
+    # superpowers (so ensure_plugin leaves them alone); everything else — the
+    # slug call — answers with the verdict.
+    make_claude_stub(bindir, plugins=HEALTHY_PLUGINS, stdout=verdict)
     make_stub(bindir, "wt", stdout=json.dumps(wt_json or {"path": str(tmp_path / "wtree")}))
     return ToolContext.from_env(stub_env(bindir, SHELL="/bin/bash"))
 
@@ -178,7 +178,7 @@ def _repo_env(tmp_path):
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     bindir = tmp_path / "bin"
-    make_stub(bindir, "claude", stdout=f"omc@oh-my-clanker\n{OK_VERDICT}")
+    make_claude_stub(bindir, plugins=HEALTHY_PLUGINS, stdout=OK_VERDICT)
     make_stub(bindir, "wt", stdout=json.dumps({"path": str(tmp_path / "wtree")}))
     env = stub_env(bindir, SHELL="/bin/bash")
     env["PATH"] = f"{bindir}:{os.environ['PATH']}"  # real git alongside the stubs
@@ -225,3 +225,37 @@ def test_run_headless_allows_mcp_tool_patterns():
         assert pattern in argv
     for base_tool in ("Bash", "Read", "Glob", "Grep"):
         assert base_tool in argv
+
+
+def test_start_repairs_a_plugin_that_fails_to_load(tmp_path, capsys):
+    # The first-run bug: omc@ is installed but Claude refuses to load it, so
+    # the seeded /omc:start opens on "Unknown command". start must notice
+    # (JSON probe, not a substring match) and reinstall before launching.
+    bindir = tmp_path / "bin"
+    _make_git_stub(bindir)
+    broken = [
+        {"id": "omc@oh-my-clanker", "errors": ['Dependency "superpowers@x" is not installed']},
+        {"id": "superpowers@claude-plugins-official"},
+    ]
+    calls = make_claude_stub(bindir, plugins=broken, stdout=OK_VERDICT)
+    make_stub(bindir, "wt", stdout=json.dumps({"path": str(tmp_path / "wtree")}))
+    (tmp_path / "wtree").mkdir()
+    ctx = ToolContext.from_env(stub_env(bindir, SHELL="/bin/bash"))
+    assert run_start(ctx, Config(), "PROJ-1", headless=True) == 0
+    assert "→ omc plugin for claude: repaired" in capsys.readouterr().err
+    lines = calls.read_text().splitlines()
+    install_at = lines.index("plugin install omc@oh-my-clanker --scope user")
+    seed_at = next(i for i, ln in enumerate(lines) if ln.startswith("-p /omc:start PROJ-1"))
+    assert install_at < seed_at  # repaired BEFORE the seeded session runs
+
+
+def test_dry_run_reports_a_plugin_that_fails_to_load(tmp_path, capsys):
+    bindir = tmp_path / "bin"
+    _make_git_stub(bindir)
+    broken = [{"id": "omc@oh-my-clanker", "errors": ["boom"]}, {"id": "superpowers@x"}]
+    calls = make_claude_stub(bindir, plugins=broken, stdout=OK_VERDICT)
+    make_stub(bindir, "wt", stdout=json.dumps({"path": str(tmp_path / "wtree")}))
+    ctx = ToolContext.from_env(stub_env(bindir, SHELL="/bin/bash"))
+    assert run_start(ctx, Config(), "PROJ-1", dry_run=True) == 0
+    assert "→ omc plugin for claude: failed to load: boom" in capsys.readouterr().err
+    assert "plugin install" not in calls.read_text()  # dry run never mutates

@@ -1,10 +1,12 @@
-> **RESOLVED** — the "failed to load" issue documented below was fixed by
-> qualifying the dependency with its marketplace. See "Resolution: marketplace-qualified
-> dependency" at the bottom of this file. The "Decision" and "Not investigated
-> further" sections below are preserved as the historical record of the
-> original investigation but no longer reflect the current manifest or the
-> current `docker/setup-plugins.sh` behavior — `--plugin-dir /repo` is no
-> longer needed.
+> **RESOLVED (twice)** — the "failed to load" issue documented below was first
+> fixed by qualifying the dependency with its marketplace ("Resolution:
+> marketplace-qualified dependency"), which only moved the failure to every
+> machine whose superpowers came from a *different* marketplace. The current
+> manifest declares **no dependency at all**; omc installs superpowers itself.
+> See "Resolution 2: no manifest dependency" at the bottom. The "Decision" and
+> "Not investigated further" sections below are the historical record of the
+> original investigation and no longer reflect the current manifest or
+> `docker/setup-plugins.sh` — `--plugin-dir /repo` is no longer needed.
 
 # Plugin registration in the E2E image — active mechanism
 
@@ -353,3 +355,51 @@ that off for the assertion blocks, which would have let an early `test`
 failure be masked by the exit code of the last line in the block — see
 `docker/PLUGIN-NOTES.md`'s sibling report, `.superpowers/sdd/task-9-report.md`,
 for the full note). Passing run: `1 passed in 17.60s`.
+
+
+## Resolution 2: no manifest dependency (2026-09-02)
+
+The marketplace-qualified dependency above fixed the Docker image, where
+`setup-plugins.sh` installs superpowers from `obra/superpowers-marketplace`.
+On a real machine superpowers is far more often installed from the official
+marketplace (`claude-plugins-official`, pre-registered by Claude Code), and
+there the same failure came straight back:
+
+```
+❯ omc@oh-my-clanker
+  Version: 0.1.4
+  Scope: user
+  Status: ✘ failed to load
+  Error: Dependency "superpowers@superpowers-marketplace" is not installed — run
+  `claude plugin install superpowers@superpowers-marketplace`, or check that
+  its marketplace is added
+
+❯ superpowers@claude-plugins-official
+  Version: 6.3.0
+  Scope: user
+  Status: ✔ enabled
+```
+
+Claude Code matches a declared dependency by its exact `name@marketplace`
+id — a superpowers from any other marketplace does not count — and it never
+installs the dependency for you. Worse, omc's own probe (`"omc@" in claude
+plugin list`) read this state as "ok", so `omc start` launched a session
+whose seeded `/omc:start` was "Unknown command".
+
+Reproduced in an isolated `HOME` (claude 2.1.x): superpowers installed from
+`anthropics/claude-plugins-official`, then omc from a local marketplace
+checkout. With the current manifest, `claude plugin list --json` reports the
+dependency error above for `omc@oh-my-clanker`; with `"dependencies"`
+removed from `.claude-plugin/plugin.json`, the same sequence reports omc
+with no `errors` key. Superpowers from `superpowers-marketplace` works
+identically (the image still installs it from there).
+
+**Kept shape:** `.claude-plugin/plugin.json` declares no `dependencies`
+(locked in by `tests/unit/test_plugin_manifests.py::test_claude_plugin_manifest`).
+`src/omc/plugin.py::ensure_plugin` — run by `omc start`, `omc update` and
+`omc configure` — now probes `claude plugin list --json` (an `errors` array
+per plugin is the contract), installs superpowers from the official
+marketplace when no `superpowers@*` plugin is present, installs omc when
+missing, and reinstalls it (after `claude plugin marketplace update`) when it
+is present but failed to load. Every mutating path re-probes and raises with
+Claude's own error text if the plugin still doesn't load.

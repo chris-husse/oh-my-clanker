@@ -1,17 +1,30 @@
 import json
+import os
 import subprocess
 
 from omc.agentsmd import distribution_agents_md
 from omc.cli import main
 from omc.config import store
 
+from ._stubs import HEALTHY_PLUGINS, make_claude_stub
 
-def _home(tmp_path, monkeypatch):
+
+def _home(tmp_path, monkeypatch, *, plugins=HEALTHY_PLUGINS, install_rc=0):
     home = tmp_path / "omchome"
     monkeypatch.setenv("OMC_HOME", str(home))
     monkeypatch.setenv("HOME", str(tmp_path))
+    # configure now installs the claude plugin — a stub MUST shadow the real
+    # `claude` (a real one would install plugins over the network into the
+    # temp HOME). The real PATH stays behind it: the chain step needs git.
+    bindir = tmp_path / "bin"
+    calls = make_claude_stub(bindir, plugins=plugins, install_rc=install_rc)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
     monkeypatch.chdir(tmp_path)  # outside any git repo
+    _CLAUDE_CALLS[str(home)] = calls
     return home
+
+
+_CLAUDE_CALLS: dict[str, object] = {}
 
 
 def _repo(tmp_path, monkeypatch):
@@ -177,3 +190,25 @@ def test_configure_outside_repo_skips_chain(tmp_path, monkeypatch):
     monkeypatch.chdir(outside)
     assert main(["configure", "--defaults"]) == 0
     assert not (outside / "AGENTS.md").exists()
+
+
+def test_configure_installs_missing_claude_plugin(tmp_path, monkeypatch, capsys):
+    # configure used to only PRINT install hints; on a fresh machine nothing
+    # ever installed the plugin and the first session opened on
+    # "Unknown command: /omc:start".
+    home = _home(tmp_path, monkeypatch, plugins=[])
+    assert main(["configure", "--defaults"]) == 0
+    recorded = _CLAUDE_CALLS[str(home)].read_text().splitlines()
+    assert "plugin install superpowers@claude-plugins-official --scope user" in recorded
+    assert "plugin install omc@oh-my-clanker --scope user" in recorded
+    captured = capsys.readouterr()
+    assert "✓ claude: omc plugin installed" in captured.err
+    assert "/plugin install omc@oh-my-clanker" in captured.out  # hints still printed
+
+
+def test_configure_survives_plugin_install_failure(tmp_path, monkeypatch, capsys):
+    _home(tmp_path, monkeypatch, plugins=[], install_rc=1)
+    assert main(["configure", "--defaults"]) == 0  # config was saved; plugin is advisory
+    captured = capsys.readouterr()
+    assert "✗ claude:" in captured.err and "fix manually" in captured.err
+    assert "/plugin install omc@oh-my-clanker" in captured.out

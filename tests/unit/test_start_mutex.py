@@ -16,7 +16,7 @@ from omc.start import run_start
 from omc.toolctx import ToolContext
 
 from ._mutexproc import install_slow_hook, spawn_watch, wait_for
-from ._stubs import make_stub
+from ._stubs import HEALTHY_PLUGINS, make_claude_stub
 from .test_watch import _ctx_with_node_stub, _push_remote_commit, _repo_with_origin
 
 OK_VERDICT = 'OMC_SLUG {"ok": true, "slug": "proj-1-fix-login"}'
@@ -68,7 +68,7 @@ def _start_env(tmp_path, repo, *, wt_probes_lock=False):
     With wt_probes_lock the wt stub FAILS if the busy lock is held when wt
     runs — proving start released the probe before creating the worktree."""
     bindir = tmp_path / "startbin"
-    make_stub(bindir, "claude", stdout=f"omc@oh-my-clanker\n{OK_VERDICT}")
+    make_claude_stub(bindir, plugins=HEALTHY_PLUGINS, stdout=OK_VERDICT)
     wtree = tmp_path / "wtree"
     wtree.mkdir(exist_ok=True)
     wt = bindir / "wt"
