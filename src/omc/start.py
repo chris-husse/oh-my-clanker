@@ -76,7 +76,7 @@ def run_start(
     name = cfg.llm.default
     _say(f"→ probing tools (git, wt, {name})")
     require_tools(ctx, cfg)
-    plugin_status = ensure_plugin(ctx, cfg, check_only=dry_run)
+    plugin_status = ensure_plugin(ctx, name, check_only=dry_run)
     _say(f"→ omc plugin for {name}: {plugin_status}")
 
     if not dry_run:

@@ -9,7 +9,7 @@ from omc.errors import OmcError
 from omc.installer import run_install, run_uninstall, run_update, validate_checkout
 from omc.toolctx import ToolContext
 
-from ._stubs import make_stub, stub_env
+from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, stub_env
 
 
 @pytest.fixture(autouse=True)
@@ -107,11 +107,11 @@ def _stub(bindir, name, rc=0):
     return calls
 
 
-def _update_ctx(tmp_path, *, claude_rc=0):
+def _update_ctx(tmp_path, *, plugins=HEALTHY_PLUGINS, install_rc=0):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     uv_calls = _stub(bindir, "uv")
-    claude_calls = _stub(bindir, "claude", rc=claude_rc)
+    claude_calls = make_claude_stub(bindir, plugins=plugins, install_rc=install_rc)
     codex_calls = _stub(bindir, "codex")
     _stub(bindir, "wt")  # require_tools probes git/wt/provider
     _stub(bindir, "git")  # deterministic --version for the probe
@@ -135,7 +135,11 @@ def test_update_upgrades_then_updates_each_providers_plugin(tmp_path, capsys):
 
 
 def test_update_isolates_provider_failures(tmp_path, capsys):
-    ctx, uv_calls, claude_calls, codex_calls = _update_ctx(tmp_path, claude_rc=1)
+    # omc plugin missing and `claude plugin install` fails: narrated once, and
+    # the other providers still get their turn.
+    ctx, uv_calls, claude_calls, codex_calls = _update_ctx(
+        tmp_path, plugins=[{"id": "superpowers@claude-plugins-official"}], install_rc=1
+    )
     assert run_update(ctx) == 0  # a broken provider never fails the update
     assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
     err = capsys.readouterr().err
@@ -229,3 +233,30 @@ def test_update_isolates_unknown_provider(tmp_path, capsys):
     assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
     err = capsys.readouterr().err
     assert "✗" in err and "nonexistent-provider" in err  # failure narrated
+
+
+def test_update_installs_a_missing_plugin(tmp_path, capsys):
+    # Before: `omc update` only ran `plugin update`, which fails when the
+    # plugin was never installed — a fresh machine stayed without /omc:*.
+    ctx, _, claude_calls, _ = _update_ctx(tmp_path, plugins=[])
+    assert run_update(ctx) == 0
+    recorded = claude_calls.read_text().splitlines()
+    assert "plugin install superpowers@claude-plugins-official --scope user" in recorded
+    assert "plugin install omc@oh-my-clanker --scope user" in recorded
+    assert "✓ claude: omc plugin installed" in capsys.readouterr().err
+
+
+def test_update_reinstalls_a_plugin_that_fails_to_load(tmp_path, capsys):
+    broken = [
+        {"id": "omc@oh-my-clanker", "errors": ['Dependency "superpowers@x" is not installed']},
+        {"id": "superpowers@claude-plugins-official"},
+    ]
+    ctx, _, claude_calls, _ = _update_ctx(tmp_path, plugins=broken)
+    assert run_update(ctx) == 0
+    recorded = claude_calls.read_text().splitlines()
+    assert (
+        recorded.index("plugin marketplace update oh-my-clanker")
+        < recorded.index("plugin uninstall omc@oh-my-clanker")
+        < recorded.index("plugin install omc@oh-my-clanker --scope user")
+    )
+    assert "✓ claude: omc plugin repaired" in capsys.readouterr().err

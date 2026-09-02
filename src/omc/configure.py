@@ -8,7 +8,8 @@ from pathlib import Path
 from .agentsmd import ensure_agents_chain
 from .config import store
 from .config.schema import GlobalConfig, ProjectConfig, ProviderConfig
-from .errors import ConfigError, Refusal
+from .errors import ConfigError, OmcError, Refusal
+from .plugin import ensure_plugin
 from .providers.registry import get_provider, provider_names
 from .toolctx import ToolContext
 from .wtconfig import repo_root
@@ -16,8 +17,9 @@ from .wtconfig import repo_root
 _PLUGIN_HINTS = """\
 omc's in-session skills install as a plugin — once per harness you use:
 
-  Claude Code:  /plugin marketplace add chris-husse/oh-my-clanker
-                /plugin install omc@oh-my-clanker
+  Claude Code:  installed for you above (also by `omc start` / `omc update`);
+                by hand: /plugin marketplace add chris-husse/oh-my-clanker
+                         /plugin install omc@oh-my-clanker
   Codex:        codex plugin marketplace add chris-husse/oh-my-clanker
                 then install 'omc' from /plugins
   OpenCode:     add to opencode.json:
@@ -25,8 +27,8 @@ omc's in-session skills install as a plugin — once per harness you use:
 
 omc's start skill hands off to superpowers — install it too:
 
-  Claude Code:  /plugin marketplace add obra/superpowers-marketplace
-                /plugin install superpowers@superpowers-marketplace
+  Claude Code:  installed for you above; by hand:
+                /plugin install superpowers@claude-plugins-official
   Codex/OpenCode: install it from https://github.com/obra/superpowers
 """
 
@@ -84,6 +86,7 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
             print(f"Updated {store.project_config_path(root)}")
         _migrate_legacy(ctx, migrated=write_global, carried=write_project)
         _ensure_repo_chain(ctx)
+        _ensure_plugins(ctx, gcfg)
         print(_PLUGIN_HINTS)
         return 0
 
@@ -104,6 +107,7 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
         print("(not inside a git repository — worktree.* settings are configured per-repo)")
     _migrate_legacy(ctx, migrated=True, carried=root is not None)
     _ensure_repo_chain(ctx)
+    _ensure_plugins(ctx, gcfg)
     print(_PLUGIN_HINTS)
     return 0
 
@@ -127,6 +131,20 @@ def _migrate_legacy(ctx: ToolContext, *, migrated: bool, carried: bool) -> None:
                 "run `omc configure` inside each repo"
             )
         print(msg)
+
+
+def _ensure_plugins(ctx: ToolContext, cfg: GlobalConfig) -> None:
+    """Install (or repair) the omc plugin for every configured provider that
+    has a scriptable path. Configure has already saved the config, so a plugin
+    failure is reported — with the manual commands — but never fails the run."""
+    for name in cfg.llm.providers:
+        try:
+            status = ensure_plugin(ctx, name)
+        except OmcError as exc:
+            print(f"✗ {name}: {exc}", file=sys.stderr)
+            continue
+        mark = "·" if status.startswith("unverified") else "✓"
+        print(f"{mark} {name}: omc plugin {status}", file=sys.stderr)
 
 
 def _ensure_repo_chain(ctx: ToolContext) -> None:

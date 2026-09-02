@@ -28,14 +28,16 @@
    | Codex | `codex plugin marketplace add chris-husse/oh-my-clanker`, then install `omc` from `/plugins` |
    | OpenCode | add `"plugin": ["omc@git+https://github.com/chris-husse/oh-my-clanker.git"]` to `opencode.json` |
 
-   `omc`'s session skill hands off to [superpowers](https://github.com/obra/superpowers)'s brainstorming skill, and declares it as a marketplace-qualified plugin dependency (`superpowers@superpowers-marketplace`) — but install superpowers explicitly yourself for every harness; Claude Code resolves the dependency once you have, it doesn't fetch it for you.
+   For Claude Code you can skip this table: `omc configure`, `omc update` and `omc start` all install (and repair) the plugin for you.
+
+   `omc`'s session skill hands off to [superpowers](https://github.com/obra/superpowers)'s brainstorming skill. The plugin manifest deliberately declares **no** dependency on it — Claude Code matches a dependency by its exact `name@marketplace` id and refuses to load omc when superpowers came from a different marketplace, and it never installs the dependency for you anyway. Instead omc installs superpowers itself for Claude Code (from the official marketplace); for the other harnesses install it yourself:
 
    | Harness | Install superpowers |
    |---|---|
-   | Claude Code | `/plugin marketplace add obra/superpowers-marketplace` then `/plugin install superpowers@superpowers-marketplace` |
+   | Claude Code | automatic; by hand: `/plugin install superpowers@claude-plugins-official` |
    | Codex / OpenCode | Install from [obra/superpowers](https://github.com/obra/superpowers) |
 
-   Full write-up (including the cross-marketplace dependency pitfall this manifest shape avoids): [`docker/PLUGIN-NOTES.md`](docker/PLUGIN-NOTES.md).
+   Full write-up of the cross-marketplace dependency pitfall: [`docker/PLUGIN-NOTES.md`](docker/PLUGIN-NOTES.md).
 
 ## Usage
 

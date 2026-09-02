@@ -6,6 +6,9 @@ set -euo pipefail
 claude plugin marketplace add /repo 2>/dev/null || true
 claude plugin install omc@oh-my-clanker --scope user 2>/dev/null || true
 
+# superpowers from obra's marketplace on purpose: the omc manifest declares no
+# dependency (see PLUGIN-NOTES.md, "Resolution 2"), so ensure_plugin must accept
+# a superpowers@<any-marketplace> — the image proves the non-official case.
 claude plugin marketplace add obra/superpowers-marketplace 2>/dev/null || true
 claude plugin install superpowers@superpowers-marketplace --scope user 2>/dev/null || true
 
