@@ -1,6 +1,6 @@
 {
   "name": "omc",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Turn a ticket into a prepared worktree with a seeded, brainstorm-ready LLM session.",
   "author": { "name": "Chris Husse", "url": "https://github.com/chris-husse" },
   "homepage": "https://github.com/chris-husse/oh-my-clanker",
