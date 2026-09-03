@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import store
 from .errors import OmcError
-from .plugin import marketplace_source
+from .plugin import ensure_plugin, marketplace_source
 from .probe import require_tools
 from .providers.registry import get_provider
 from .toolctx import ToolContext
@@ -78,6 +78,17 @@ def run_update(ctx: ToolContext) -> int:
         return dep_rc
     source = marketplace_source(ctx.env)
     for name in cfg.llm.providers:
+        if name == "claude":
+            # Install when missing, reinstall when Claude refuses to load it,
+            # refresh when healthy — a plain `plugin update` fails on a plugin
+            # that was never installed, which is how first-runs stayed broken.
+            try:
+                status = ensure_plugin(ctx, name, update=True)
+            except OmcError as exc:
+                print(f"✗ {name}: {exc} — continuing", file=sys.stderr)
+                continue
+            print(f"✓ {name}: omc plugin {status}", file=sys.stderr)
+            continue
         try:
             argvs = get_provider(name).plugin_update_argvs(source)
         except OmcError as exc:

@@ -24,6 +24,7 @@ ANALYZE_ARGS = ("analyze", "--skip-agents-md", "--skip-skills")
 
 # The ONLY source ever updated — mirrors the gitnexus-ensure skill's rule.
 GITNEXUS_ORIGIN = "https://github.com/chris-husse/GitNexus.git"
+_CXX_STD = "-std=c++20"  # see _native_build_env
 
 
 def gitnexus_cli(ctx: ToolContext) -> Path:
@@ -76,14 +77,18 @@ _redact_userinfo = redact_userinfo  # back-compat alias
 
 
 def _run_tool(
-    ctx: ToolContext, argv: list[str], *, cwd: str | None = None
+    ctx: ToolContext,
+    argv: list[str],
+    *,
+    cwd: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     """subprocess boundary for OPTIONAL tools (node/npm) — a missing binary is
     an expected failure, reported like any other failed step (installer._uv idiom).
     Git stays unwrapped: the repo treats git as guaranteed (watch.py does too).
     """
     try:
-        return ctx.run(argv, cwd=cwd)
+        return ctx.run(argv, cwd=cwd, extra_env=extra_env)
     except FileNotFoundError:
         return None
 
@@ -125,15 +130,26 @@ def _clone_if_missing(ctx: ToolContext, root: Path, approved_origin: str) -> int
     return 0
 
 
+def _native_build_env(ctx: ToolContext) -> dict[str, str]:
+    """Node >= 26 headers need C++20, but GitNexus's pinned tree-sitter 0.21.1
+    hardcodes -std=c++17 in binding.gyp. Where no prebuilt binary matches
+    (linux-arm64) node-gyp compiles from source and dies on that. gyp appends
+    $CXXFLAGS after its own flags, so a trailing -std=c++20 wins; harmless on
+    older Node and on platforms that use the prebuild."""
+    current = ctx.env.get("CXXFLAGS", "").strip()
+    return {"CXXFLAGS": f"{current} {_CXX_STD}".strip()}
+
+
 def _build(ctx: ToolContext, root: Path) -> int:
     """Two-step npm build; order matters (gitnexus-shared is a plain sibling
     package compiled by the main build with its own node_modules)."""
+    extra_env = _native_build_env(ctx)
     for argv, cwd in (
         (["npm", "install", "--no-audit", "--no-fund"], root / "gitnexus-shared"),
         (["npm", "ci"], root / "gitnexus"),
         (["npm", "run", "build"], root / "gitnexus"),
     ):
-        cp = _run_tool(ctx, argv, cwd=str(cwd))
+        cp = _run_tool(ctx, argv, cwd=str(cwd), extra_env=extra_env)
         if cp is None:
             print(f"error: {argv[0]} not found on PATH", file=sys.stderr)
             return 1

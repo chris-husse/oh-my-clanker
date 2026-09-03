@@ -26,10 +26,13 @@ def test_all_version_strings_agree():
 def test_claude_plugin_manifest():
     data = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
     assert data["name"] == "omc"
-    # Marketplace-qualified: a bare name resolves only within the declaring
-    # marketplace (oh-my-clanker), which never carries a superpowers entry —
-    # see docker/PLUGIN-NOTES.md for the confirmed failure mode and fix.
-    assert "superpowers@superpowers-marketplace" in data["dependencies"]
+    # NO `dependencies`. Claude Code resolves a dependency by its exact
+    # marketplace-qualified id and refuses to load omc ("failed to load") when
+    # superpowers came from any other marketplace (claude-plugins-official is
+    # the common case). It never installs the dependency for you either. omc
+    # installs superpowers itself in ensure_plugin — see docker/PLUGIN-NOTES.md,
+    # "Resolution 2: no manifest dependency".
+    assert "dependencies" not in data
 
 
 def test_claude_marketplace_lists_omc():
@@ -440,7 +443,11 @@ def test_verdict_is_never_the_end_of_the_turn():
     # the old wording made the verdict the literal last act of the reply
     assert "end your reply" not in text
     assert "No text after it." not in text
-    for needle in ("not the end of your turn", "next action is a tool call", "return to the caller"):
+    for needle in (
+        "not the end of your turn",
+        "next action is a tool call",
+        "return to the caller",
+    ):
         assert needle in text.lower().replace("**", ""), f"ticket-sync missing {needle!r}"
     # both callers must name the verdict as a pass-through, not a terminator
     for name in ("start", "finish"):

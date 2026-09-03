@@ -18,7 +18,8 @@ def _make_ctx(tmp_path, home, *, npm_rc=0):
     for name, out, rc in (("npm", "ok", npm_rc), ("node", "9.9.9", 0)):
         stub = bindir / name
         stub.write_text(
-            f'#!/bin/sh\necho "{name} $@ [cwd=$PWD]" >> "{calls}"\necho "{out}"\nexit {rc}\n'
+            f'#!/bin/sh\necho "{name} $@ [cwd=$PWD] [CXXFLAGS=$CXXFLAGS]" >> "{calls}"\n'
+            f'echo "{out}"\nexit {rc}\n'
         )
         stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
     env = {
@@ -293,3 +294,32 @@ def test_missing_node_is_clean_failure(tmp_path, capsys, monkeypatch):
     err = capsys.readouterr().err
     assert "not found" in err
     assert "Traceback" not in err
+
+
+def test_build_forces_cxx20_for_native_addons(tmp_path):
+    """Node >= 26 headers require C++20, but GitNexus's pinned tree-sitter 0.21.1
+    hardcodes -std=c++17 in its binding.gyp; on platforms without a prebuilt
+    binary (linux-arm64) node-gyp compiles from source and fails. gyp appends
+    the CXXFLAGS env after its own flags, so the last -std wins."""
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    origin, seed, _dest = _seed_clone(tmp_path, home)
+    _advance_origin(seed)
+
+    assert update_gitnexus(ctx, approved_origin=str(origin)) == 0
+    npm = [ln for ln in calls.read_text().splitlines() if ln.startswith("npm ci")]
+    assert len(npm) == 1
+    assert "-std=c++20" in npm[0].split("[CXXFLAGS=", 1)[1]
+
+
+def test_build_keeps_callers_cxxflags(tmp_path):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    ctx = ToolContext.from_env({**ctx.env, "CXXFLAGS": "-O2 -fno-omit-frame-pointer"})
+    origin, seed, _dest = _seed_clone(tmp_path, home)
+    _advance_origin(seed)
+
+    assert update_gitnexus(ctx, approved_origin=str(origin)) == 0
+    npm = [ln for ln in calls.read_text().splitlines() if ln.startswith("npm ci")]
+    flags = npm[0].split("[CXXFLAGS=", 1)[1].rstrip("]")
+    assert flags == "-O2 -fno-omit-frame-pointer -std=c++20"
