@@ -1,6 +1,20 @@
+import json
 from pathlib import Path
 
 from omc.cli import main
+
+from ._stubs import make_stub
+
+_ASSUME_ROLE_JSON = json.dumps(
+    {
+        "Credentials": {
+            "AccessKeyId": "ASIAEXAMPLE",
+            "SecretAccessKey": "secret/Example+Key",
+            "SessionToken": "token/Example+Tok==",
+            "Expiration": "2099-01-01T00:00:00+00:00",
+        }
+    }
+)
 
 
 def test_no_command_shows_help(capsys):
@@ -71,3 +85,37 @@ def test_print_install_path_is_machine_pure(capsys):
     lines = out.out.splitlines()
     assert len(lines) == 1  # exactly one line: OMC_PATH=$(omc print-install-path)
     assert (Path(lines[0]) / "distribution" / "AGENTS.md").is_file()
+
+
+def test_aws_credential_process_is_registered():
+    from omc.cli import build_parser
+
+    assert "aws-credential-process" in build_parser().format_help()
+
+
+def test_aws_credential_process_runs_bannerless_and_needs_no_config(tmp_path, capsys, monkeypatch):
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "op", stdout="123456")
+    make_stub(bindir, "aws", stdout=_ASSUME_ROLE_JSON)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(bindir))
+    rc = main(
+        [
+            "aws-credential-process",
+            "--source-profile",
+            "base",
+            "--role-arn",
+            "arn:aws:iam::123456789012:role/Dev",
+            "--mfa-serial",
+            "arn:aws:iam::123456789012:mfa/cli",
+            "--op-item",
+            "item123",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    out = json.loads(captured.out)
+    assert out["Version"] == 1
+    assert "Oh My Clanker!" not in captured.err  # bannerless: stdout is the JSON contract
