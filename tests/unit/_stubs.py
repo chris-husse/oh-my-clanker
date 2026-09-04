@@ -15,6 +15,7 @@ def make_stub(
     stderr: str = "",
     rc: int = 0,
     argv_log: Path | None = None,
+    env_log: Path | None = None,
 ) -> Path:
     # Quoted heredoc so stdout survives verbatim — JSON verdicts contain double quotes.
     bindir.mkdir(parents=True, exist_ok=True)
@@ -24,9 +25,14 @@ def make_stub(
     # put a stray newline on stderr and could flip a "stderr is empty" assertion.
     # printf over echo — a dash /bin/sh expands backslash escapes in echo's args.
     log = f"printf '%s\\n' \"$*\" > {shlex.quote(str(argv_log))}\n" if argv_log else ""
+    # Absolute /usr/bin/env: stub_env's PATH holds only bindir, so a bare `env`
+    # would not resolve. This records what the CHILD was handed, which is the only
+    # way to prove a secret reached one subprocess and not the other.
+    envlog = f"/usr/bin/env > {shlex.quote(str(env_log))}\n" if env_log else ""
     err = f"/bin/cat >&2 <<'OMC_STUB_ERR_EOF'\n{stderr}\nOMC_STUB_ERR_EOF\n" if stderr else ""
     path.write_text(
-        f"#!/bin/sh\n{log}/bin/cat <<'OMC_STUB_EOF'\n{stdout}\nOMC_STUB_EOF\n{err}exit {rc}\n"
+        f"#!/bin/sh\n{log}{envlog}/bin/cat <<'OMC_STUB_EOF'\n{stdout}\nOMC_STUB_EOF\n"
+        f"{err}exit {rc}\n"
     )
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return path
