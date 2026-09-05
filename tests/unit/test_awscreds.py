@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import stat
 from datetime import UTC, datetime, timedelta
 
@@ -32,6 +33,7 @@ def _args(tmp_path, **over):
         op_vault=None,
         duration=43200,
         cache_dir=str(tmp_path / "cache"),
+        with_service_account_token=None,
     )
     base.update(over)
     return argparse.Namespace(**base)
@@ -42,8 +44,8 @@ def _path(args):
     return _cache_path(args, args.cache_dir)
 
 
-def _ctx(bindir):
-    return ToolContext.from_env(stub_env(bindir))
+def _ctx(bindir, **env):
+    return ToolContext.from_env(stub_env(bindir, **env))
 
 
 def _fresh(**over):
@@ -279,3 +281,133 @@ def test_op_vault_flag_reaches_op(tmp_path, capsys):
     rc = run_aws_credential_process(_ctx(bindir), _args(tmp_path, op_vault="Private"))
     assert rc == 0
     assert "--vault Private" in argv_log.read_text()
+
+
+# --- --with-service-account-token ------------------------------------------
+#
+# The credential process runs from AWS SDK invocations in shells that never
+# exported OP_SERVICE_ACCOUNT_TOKEN, so `op` fails "not currently signed in".
+# The flag is the explicit opt-in; these pin WHERE the token may travel.
+
+_TOKEN = "ops_eyJzaWduSW5BZGRyZXNzIjoiZXhhbXBsZSJ9"
+
+
+def _token_file(tmp_path, text=f"  {_TOKEN}\n", name="op-token"):
+    path = tmp_path / name
+    path.write_text(text)
+    return path
+
+
+def _env_of(env_log):
+    """The child's environment as a dict, parsed from `env` output."""
+    lines = env_log.read_text().splitlines()
+    return dict(line.split("=", 1) for line in lines if "=" in line)
+
+
+def test_token_file_reaches_op_stripped_and_nothing_else(tmp_path, capsys, monkeypatch):
+    op_env = tmp_path / "op-env.txt"
+    aws_env = tmp_path / "aws-env.txt"
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "op", stdout="123456", env_log=op_env)
+    make_stub(bindir, "aws", stdout=_ASSUME_ROLE_JSON, env_log=aws_env)
+    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
+    args = _args(tmp_path, with_service_account_token=str(_token_file(tmp_path)))
+    rc = run_aws_credential_process(_ctx(bindir), args)
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["AccessKeyId"] == "ASIAEXAMPLE"
+    # Stripped: the surrounding whitespace of a `cat`-friendly file is not the token.
+    assert _env_of(op_env)["OP_SERVICE_ACCOUNT_TOKEN"] == _TOKEN
+    # `aws` has no business with a 1Password credential, and os.environ is not ours.
+    assert "OP_SERVICE_ACCOUNT_TOKEN" not in _env_of(aws_env)
+    assert "OP_SERVICE_ACCOUNT_TOKEN" not in os.environ
+
+
+def test_no_flag_leaves_the_op_environment_untouched(tmp_path, capsys, monkeypatch):
+    op_env = tmp_path / "op-env.txt"
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "op", stdout="123456", env_log=op_env)
+    make_stub(bindir, "aws", stdout=_ASSUME_ROLE_JSON)
+    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
+    assert run_aws_credential_process(_ctx(bindir), _args(tmp_path)) == 0
+    assert json.loads(capsys.readouterr().out)["AccessKeyId"] == "ASIAEXAMPLE"
+    assert "OP_SERVICE_ACCOUNT_TOKEN" not in _env_of(op_env)  # nothing is read implicitly
+
+
+def test_exported_token_wins_over_the_flag(tmp_path, capsys):
+    """A session that exported a token named a different service account on purpose.
+
+    The flag lives in a static ~/.aws/config line and cannot know about it, so the
+    environment — the thing a human just chose — outranks the file.
+    """
+    op_env = tmp_path / "op-env.txt"
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "op", stdout="123456", env_log=op_env)
+    make_stub(bindir, "aws", stdout=_ASSUME_ROLE_JSON)
+    ctx = _ctx(bindir, OP_SERVICE_ACCOUNT_TOKEN="ops_from_the_session")
+    args = _args(tmp_path, with_service_account_token=str(_token_file(tmp_path)))
+    assert run_aws_credential_process(ctx, args) == 0
+    assert json.loads(capsys.readouterr().out)["AccessKeyId"] == "ASIAEXAMPLE"
+    env = _env_of(op_env)
+    assert env["OP_SERVICE_ACCOUNT_TOKEN"] == "ops_from_the_session"
+    assert _TOKEN not in env["OP_SERVICE_ACCOUNT_TOKEN"]
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "reason"),
+    [("missing", None, "No such file"), ("blank", "\n  \n", "empty")],
+)
+def test_unusable_token_file_is_a_clean_error(tmp_path, capsys, name, text, reason):
+    # A typo'd or empty file must fail loudly HERE: signing in without the token
+    # only reproduces op's "not currently signed in" with the cause hidden.
+    aws_log = tmp_path / "aws-argv.txt"
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "op", stdout="123456")
+    make_stub(bindir, "aws", stdout=_ASSUME_ROLE_JSON, argv_log=aws_log)
+    path = tmp_path / f"{name}-token"
+    if text is not None:
+        path.write_text(text)
+    args = _args(tmp_path, with_service_account_token=str(path))
+    rc = run_aws_credential_process(_ctx(bindir), args)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""  # stdout is the JSON contract: nothing on failure
+    assert str(path) in captured.err  # the operator has to know WHICH file
+    assert reason in captured.err
+    assert "Traceback" not in captured.err  # a clean sentence, not a stack
+    assert not aws_log.exists()  # no STS round trip once the flag is known bad
+
+
+def test_token_value_never_appears_in_any_output(tmp_path, capsys):
+    """Whatever goes wrong downstream, the credential stays out of the diagnostics.
+
+    A credential_process's stderr lands in every AWS SDK's log, so a message that
+    quoted the token would publish it machine-wide.
+    """
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "op", stderr="[ERROR] account is not signed in", rc=1)
+    make_stub(bindir, "aws", stdout=_ASSUME_ROLE_JSON)
+    args = _args(tmp_path, with_service_account_token=str(_token_file(tmp_path)))
+    rc = run_aws_credential_process(_ctx(bindir), args)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert _TOKEN not in captured.out
+    assert _TOKEN not in captured.err
+    assert "[ERROR] account is not signed in" in captured.err  # op's own words survive
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0o000 file anyway")
+def test_unreadable_token_file_errors_without_leaking_its_contents(tmp_path, capsys):
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "op", stdout="123456")
+    make_stub(bindir, "aws", stdout=_ASSUME_ROLE_JSON)
+    path = _token_file(tmp_path)
+    path.chmod(0o000)
+    args = _args(tmp_path, with_service_account_token=str(path))
+    rc = run_aws_credential_process(_ctx(bindir), args)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    assert str(path) in captured.err
+    assert "Permission denied" in captured.err
+    assert _TOKEN not in captured.err
+    assert "Traceback" not in captured.err

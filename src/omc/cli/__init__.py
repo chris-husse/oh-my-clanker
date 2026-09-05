@@ -105,6 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_awscp.add_argument("--op-vault", default=None, help="1Password vault (default: any)")
     p_awscp.add_argument(
+        "--with-service-account-token",
+        default=None,
+        metavar="FILE",
+        help="File holding a 1Password service account token; passed to the `op` call"
+        " only, and only when OP_SERVICE_ACCOUNT_TOKEN is not already set",
+    )
+    p_awscp.add_argument(
         "--duration", type=int, default=43200, help="Session seconds (default 12h)"
     )
     p_awscp.add_argument(

@@ -15,6 +15,14 @@ because concurrent SDK clients are the normal case, not the edge case.
 
 stdout is the JSON contract and nothing else — the subcommand is on the
 no-banner list in cli/__init__.py, and every diagnostic goes to stderr.
+
+A credential_process runs from AWS SDK invocations in whatever shell the
+operator happens to be in, and nothing there exported OP_SERVICE_ACCOUNT_TOKEN
+— so a service-account `op` fails "You are not currently signed in" and every
+aws command on the machine dies. `--with-service-account-token FILE` is the
+explicit opt-in: the operator names the file in their ~/.aws/config
+credential_process line, and we hand its contents to the `op` child alone.
+Nothing is read implicitly and nothing is guessed — no flag, no token.
 """
 
 from __future__ import annotations
@@ -37,6 +45,8 @@ from .toolctx import ToolContext
 # than one extra STS round trip.
 EXPIRY_MARGIN = timedelta(minutes=5)
 SESSION_NAME = "omc-aws-credential-process"
+# The variable `op` reads to authenticate as a 1Password service account.
+OP_TOKEN_ENV = "OP_SERVICE_ACCOUNT_TOKEN"
 
 
 def _cache_path(args: argparse.Namespace, cache_dir: str | Path) -> Path:
@@ -118,11 +128,58 @@ def _no_otp(args: argparse.Namespace) -> None:
     )
 
 
+def _no_token(path: str, reason: str) -> None:
+    # The path and the reason — NEVER the contents. This file holds a credential,
+    # and a diagnostic that quoted it would paste it into every AWS SDK's logs.
+    print(
+        f"error: --with-service-account-token names a file we cannot use: '{path}' ({reason})",
+        file=sys.stderr,
+    )
+
+
+def _op_extra_env(ctx: ToolContext, args: argparse.Namespace) -> dict[str, str] | None:
+    """Env additions for the `op` child: {} normally, the token when asked.
+
+    Returned as ToolContext.run's ``extra_env`` so the value exists only in the
+    child's environment — os.environ is never touched, and the `aws` child never
+    sees it either (it has no business with a 1Password credential).
+
+    None means "the flag named an unusable file"; the message is already printed
+    and the caller must fail. Silently signing in without the token would just
+    reproduce the "not currently signed in" failure the flag exists to prevent,
+    with the operator's typo hidden behind op's error.
+    """
+    path = getattr(args, "with_service_account_token", None)
+    if not path:
+        return {}  # no flag: exactly the behaviour that shipped before it
+    if ctx.env.get(OP_TOKEN_ENV):
+        # AN EXPORTED TOKEN WINS OVER THE FLAG. The flag lives in a static
+        # ~/.aws/config line; a session that exported a token named a different
+        # service account on purpose, and it knows something the config file
+        # cannot. (Empty counts as absent — an empty token authenticates nobody.)
+        return {}
+    try:
+        token = Path(path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        _no_token(path, exc.strerror or exc.__class__.__name__)
+        return None
+    except ValueError:  # UnicodeDecodeError: a binary file is not a token
+        _no_token(path, "not valid UTF-8 text")
+        return None
+    if not token:
+        _no_token(path, "file is empty")
+        return None
+    return {OP_TOKEN_ENV: token}
+
+
 def _sign_in(ctx: ToolContext, args: argparse.Namespace) -> dict | None:
+    op_env = _op_extra_env(ctx, args)
+    if op_env is None:
+        return None
     op_argv = ["op", "item", "get", args.op_item, "--otp"]
     if args.op_vault:
         op_argv += ["--vault", args.op_vault]
-    cp = ctx.run(op_argv)
+    cp = ctx.run(op_argv, extra_env=op_env)
     if cp.returncode != 0:
         _echo_child_stderr(cp.stderr)
         _no_otp(args)

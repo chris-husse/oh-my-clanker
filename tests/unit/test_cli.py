@@ -119,3 +119,28 @@ def test_aws_credential_process_runs_bannerless_and_needs_no_config(tmp_path, ca
     out = json.loads(captured.out)
     assert out["Version"] == 1
     assert "Oh My Clanker!" not in captured.err  # bannerless: stdout is the JSON contract
+
+
+def test_service_account_token_flag_is_optional_and_defaults_to_none():
+    """The flag goes into an operator's ~/.aws/config line — its spelling is a contract.
+
+    Optional in both directions: omitting it must keep parsing (every existing
+    credential_process line stays valid), and its dest is what awscreds reads.
+    """
+    from omc.cli import build_parser
+
+    base = [
+        "aws-credential-process",
+        "--source-profile",
+        "base",
+        "--role-arn",
+        "arn:aws:iam::123456789012:role/Dev",
+        "--mfa-serial",
+        "arn:aws:iam::123456789012:mfa/cli",
+        "--op-item",
+        "item123",
+    ]
+    parser = build_parser()
+    assert parser.parse_args(base).with_service_account_token is None
+    args = parser.parse_args([*base, "--with-service-account-token", "/etc/op/token"])
+    assert args.with_service_account_token == "/etc/op/token"
