@@ -1,7 +1,7 @@
 {
   "name": "omc",
   "displayName": "Oh My Clanker!",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Turn a ticket into a prepared worktree with a seeded, brainstorm-ready LLM session. In-session skills for the omc CLI.",
   "author": { "name": "Chris Husse" },
   "homepage": "https://github.com/chris-husse/oh-my-clanker",
