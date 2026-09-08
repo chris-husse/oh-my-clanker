@@ -7,9 +7,11 @@
   "repository": "https://github.com/chris-husse/oh-my-clanker",
   "license": "MIT",
   "skills": "./skills/",
+  "hooks": {},
   "interface": {
     "displayName": "Oh My Clanker!",
     "shortDescription": "Ticket -> prepared worktree -> brainstorm-ready session",
+    "longDescription": "Turn a ticket key, URL, or description into a prepared git worktree with a seeded, brainstorm-ready session: omc generates the branch slug, creates the worktree, and hands off to a design-first workflow that ends in a pushed branch.",
     "category": "Developer Tools"
   }
 }

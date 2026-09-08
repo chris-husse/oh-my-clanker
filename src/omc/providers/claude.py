@@ -3,7 +3,28 @@ from __future__ import annotations
 import json
 import shlex
 
-from .base import Provider
+from .base import PluginEntry, PluginFacts, Provider, RepairStep
+
+PLUGIN_REF = "omc@oh-my-clanker"
+MARKETPLACE_NAME = "oh-my-clanker"
+SUPERPOWERS_REF = "superpowers@claude-plugins-official"
+OFFICIAL_MARKETPLACE = "anthropics/claude-plugins-official"
+
+
+def _entry(entries: list[dict], name: str) -> PluginEntry | None:
+    """The installed plugin named ``name`` from ANY marketplace (ids are
+    ``name@marketplace``). Cross-marketplace matching is deliberate: a
+    manifest pinned to one marketplace made Claude refuse to load omc when
+    superpowers came from another — see docker/PLUGIN-NOTES.md "Resolution 2"."""
+    raw = next((e for e in entries if str(e.get("id", "")).startswith(name + "@")), None)
+    if raw is None:
+        return None
+    problems = [str(e) for e in (raw.get("errors") or [])]
+    # Absent `enabled` counts as enabled: only an explicit False disables.
+    enabled = raw.get("enabled") is not False
+    if not enabled:
+        problems.append("the plugin is disabled")
+    return PluginEntry(id=str(raw.get("id", "")), enabled=enabled, problems=tuple(problems))
 
 
 class ClaudeProvider(Provider):
@@ -107,15 +128,122 @@ class ClaudeProvider(Provider):
     def install_hint(self):
         return "npm install -g @anthropic-ai/claude-code"
 
-    def plugin_update_argvs(self, marketplace_source: str | None = None):
-        # Self-heal the marketplace registration first (best-effort — a re-add
-        # of an existing marketplace is benign), then snapshot + update. Claude
-        # docs: "restart required to apply" — running sessions keep the old plugin.
-        argvs = []
-        if marketplace_source:
-            argvs.append(["claude", "plugin", "marketplace", "add", marketplace_source])
-        argvs += [
-            ["claude", "plugin", "marketplace", "update", "oh-my-clanker"],
-            ["claude", "plugin", "update", "omc@oh-my-clanker"],
-        ]
-        return argvs
+    def plugin_probe_argvs(self):
+        # `claude plugin list --json`: one entry per installed plugin with
+        # `id`, `enabled` and — for a plugin Claude refused to load — an
+        # `errors` list. The human listing carries the same facts as prose;
+        # the JSON is the contract (verified 2026-09-02, claude 2.1.x).
+        return [["claude", "plugin", "list", "--json"]]
+
+    def parse_plugin_facts(self, stdouts):
+        # ValueError covers both failure modes for the caller: json's own
+        # JSONDecodeError is a ValueError subclass.
+        data = json.loads(stdouts[0] or "")
+        if not isinstance(data, list):
+            raise ValueError("expected a JSON array")
+        entries = [e for e in data if isinstance(e, dict)]
+        # marketplace_source stays None: claude exposes no source probe, and
+        # re-adding an existing marketplace is benign.
+        return PluginFacts(omc=_entry(entries, "omc"), superpowers=_entry(entries, "superpowers"))
+
+    def plugin_repair_argvs(self, facts, *, source, update):
+        omc_fix = f"claude plugin marketplace add {source} && claude plugin install {PLUGIN_REF}"
+        steps: list[RepairStep] = []
+        if facts.superpowers is None:
+            steps += [
+                RepairStep(
+                    ["claude", "plugin", "marketplace", "add", OFFICIAL_MARKETPLACE],
+                    "installing superpowers (omc's start skill hands off to it)…",
+                    # Best-effort: the official marketplace is usually pre-registered.
+                    fatal=False,
+                ),
+                RepairStep(
+                    ["claude", "plugin", "install", SUPERPOWERS_REF, "--scope", "user"],
+                    "",
+                    fatal=True,
+                    action="installed superpowers",
+                    manual_fix=(
+                        f"claude plugin marketplace add {OFFICIAL_MARKETPLACE} && "
+                        f"claude plugin install {SUPERPOWERS_REF}"
+                    ),
+                ),
+            ]
+        elif facts.superpowers.problems:
+            # Present but not serving skills. omc's start skill hands off to
+            # superpowers, so reporting "ok" here would promise a handoff that
+            # fails mid-session. Repair in place by its OWN id — a superpowers
+            # from any marketplace satisfies the check, so re-installing
+            # OFFICIAL_MARKETPLACE's copy could orphan the user's.
+            steps.append(
+                RepairStep(
+                    ["claude", "plugin", "enable", facts.superpowers.id],
+                    f"superpowers is installed but not serving skills "
+                    f"({facts.superpowers.problems[0]}) — re-enabling…",
+                    fatal=True,
+                    action="enabled superpowers",
+                    manual_fix=f"claude plugin enable {facts.superpowers.id}",
+                )
+            )
+        if facts.omc is None:
+            steps += [
+                RepairStep(
+                    ["claude", "plugin", "marketplace", "add", source],
+                    f"installing the omc plugin from {source}…",
+                    # The marketplace may already be registered from an earlier
+                    # attempt — a failed add is fine if the install below succeeds.
+                    fatal=False,
+                ),
+                RepairStep(
+                    ["claude", "plugin", "install", PLUGIN_REF, "--scope", "user"],
+                    "",
+                    fatal=True,
+                    action="installed",
+                    manual_fix=omc_fix,
+                ),
+            ]
+        elif facts.omc.problems:
+            steps += [
+                # Refresh the marketplace snapshot first so the reinstall picks
+                # up a fixed manifest; add/update/uninstall are best-effort.
+                RepairStep(
+                    ["claude", "plugin", "marketplace", "add", source],
+                    f"the omc plugin is installed but failed to load "
+                    f"({facts.omc.problems[0]}) — reinstalling from {source}…",
+                    fatal=False,
+                ),
+                RepairStep(
+                    ["claude", "plugin", "marketplace", "update", MARKETPLACE_NAME],
+                    "",
+                    fatal=False,
+                ),
+                RepairStep(["claude", "plugin", "uninstall", PLUGIN_REF], "", fatal=False),
+                RepairStep(
+                    ["claude", "plugin", "install", PLUGIN_REF, "--scope", "user"],
+                    "",
+                    fatal=True,
+                    action="repaired",
+                    manual_fix=omc_fix,
+                ),
+            ]
+        elif update:
+            # Claude's docs note a restart is required to apply — running
+            # sessions keep the old plugin — per Claude's docs, not verified
+            # live; whether a RUNNING session picks the update up is an
+            # explicitly open question (a non-goal of the codex-registration
+            # design, tracked in docker/PLUGIN-NOTES.md).
+            steps += [
+                RepairStep(["claude", "plugin", "marketplace", "add", source], "", fatal=False),
+                RepairStep(
+                    ["claude", "plugin", "marketplace", "update", MARKETPLACE_NAME],
+                    "",
+                    fatal=False,
+                ),
+                RepairStep(
+                    ["claude", "plugin", "update", PLUGIN_REF],
+                    "",
+                    fatal=True,
+                    action="updated",
+                    manual_fix=omc_fix,
+                ),
+            ]
+        return steps

@@ -19,8 +19,16 @@ claude plugin marketplace add /repo               -> Successfully added marketpl
 claude plugin install omc@oh-my-clanker --scope user -> Successfully installed plugin: omc@oh-my-clanker (scope: user)
 claude plugin marketplace add obra/superpowers-marketplace -> Successfully added marketplace: superpowers-marketplace
 claude plugin install superpowers@superpowers-marketplace --scope user -> Successfully installed plugin: superpowers@superpowers-marketplace (scope: user)
+cp /repo/.opencode/plugins/omc.js ~/.config/opencode/plugins/omc.js   (opencode has no marketplace)
 codex plugin marketplace add /repo                 -> Added marketplace `oh-my-clanker` from /repo
+codex plugin add omc@oh-my-clanker                 -> installs it; registration alone serves no skills
+codex plugin marketplace add obra/superpowers-marketplace
+codex plugin add superpowers@superpowers-marketplace
 ```
+
+The three `codex plugin …` lines and the opencode copy were added when codex
+registration landed (2026-09-08). Codex verbs are `add`/`remove` — never
+`install`/`uninstall`.
 
 ## The failure: `omc@oh-my-clanker` installs but fails to load
 
@@ -115,6 +123,13 @@ locked-in unit test), so it's flagged here rather than changed.
 
 ## OpenCode and Codex plugin paths
 
+> **SUPERSEDED for codex (2026-09-08, codex-cli 0.153.4)** — the codex bullet
+> below is the 0.144.5 record, when only registration was possible. Codex now
+> installs: `docker/setup-plugins.sh` runs `codex plugin add omc@oh-my-clanker`
+> **and** `codex plugin add superpowers@superpowers-marketplace`, and omc's own
+> self-heal does the same on the user's machine. See "Codex plugin registration
+> — verified 2026-09-08" below. The OpenCode bullet still holds.
+
 Unaffected by the above — they don't go through Claude Code's
 marketplace/dependency system:
 
@@ -201,6 +216,26 @@ there is no longer a reason for E2E (or any other) sessions to launch via
 `claude --plugin-dir /repo` instead of relying on the installed plugin.
 
 ## omc update: per-provider plugin update verification (COPS-987)
+
+> **SUPERSEDED (2026-09-08, codex-cli 0.153.4)** — this section's references
+> to `Provider.plugin_update_argvs()` (lines below citing it, including the
+> `test_plugin_update_argvs_are_pure_and_per_provider` assertions) describe a
+> member that **no longer exists**. `plugin_update_argvs()` was deleted;
+> `omc update` now routes every configured provider through a single
+> `ensure_plugin(ctx, name, update=True)` call, backed by three pure
+> `Provider` members — `plugin_probe_argvs()`, `parse_plugin_facts()`, and
+> `plugin_repair_argvs(facts, *, source, update)` — that replace it with a
+> strictly more expressive probe/plan/execute split. The codex subsection's
+> framing below (end users are *told* to run
+> `codex plugin marketplace add chris-husse/oh-my-clanker` by hand) is also
+> now false in the same way: `codex plugin add` on the CLI, and `--json`
+> output on both `plugin list` and `plugin marketplace list`, now exist, and
+> omc runs the marketplace-add/plugin-add sequence itself. See "Codex plugin
+> registration — verified 2026-09-08 (codex-cli 0.153.4)" at the bottom of
+> this file for the current, verified contract. The empirical findings kept
+> below — `marketplace upgrade` refreshing Git-sourced snapshots in place,
+> and opencode having no scriptable cache-refresh command — are unaffected
+> by this and remain accurate.
 
 **Not verified (both providers): whether a running, authenticated agent
 session picks up a refreshed snapshot/cache without a restart — live-session
@@ -403,3 +438,95 @@ marketplace when no `superpowers@*` plugin is present, installs omc when
 missing, and reinstalls it (after `claude plugin marketplace update`) when it
 is present but failed to load. Every mutating path re-probes and raises with
 Claude's own error text if the plugin still doesn't load.
+
+## Codex plugin registration — verified 2026-09-08 (codex-cli 0.153.4)
+
+**Supersedes the codex claims above** (the COPS-987 section's codex
+subsection), which were recorded against codex-cli 0.144.5. The key change:
+`codex plugin add` and `--json` output on both list commands now exist, so
+`plugin_update_argvs`'s old comment ("codex has no scriptable
+per-marketplace add") was false by the time it was read. `omc start`,
+`omc configure`, and `omc update` now install, repair and refresh **the omc
+plugin** for codex, and install **superpowers when it is absent** — no manual
+step. The asymmetry is deliberate and holds for BOTH providers: the
+superpowers block is gated on `facts.superpowers is None`, and the update
+branch touches only the omc ref, so nothing repairs or refreshes superpowers.
+Whatever superpowers a machine already has is left exactly as it is (any
+marketplace satisfies the check). `plugin_update_argvs`
+itself is gone; codex's plugin behaviour now lives in
+`Provider.plugin_probe_argvs()` / `parse_plugin_facts()` /
+`plugin_repair_argvs(facts, *, source, update)` on `CodexProvider`.
+
+Established empirically this session, partly in an isolated `CODEX_HOME`.
+Full design context: `docs/superpowers/specs/2026-09-08-fix-codex-integration-skill-registration-design.md`,
+section "The codex contract".
+
+**The two facts that cost the most to learn:**
+
+- **No `errors` field anywhere in codex's plugin JSON.** Codex has no
+  load-error channel at all — `installed`/`enabled` are the *entire* health
+  signal. Claude's `_problems()` (reading a per-plugin `errors` array) has
+  no codex analogue, and claude's "failed to load → uninstall + reinstall"
+  repair collapses, for codex, to a plain re-add — there is nothing to
+  distinguish "installed but broken" from "not installed" beyond those two
+  booleans.
+- **`codex plugin marketplace add` refuses a same-named marketplace from a
+  different source with exit 1** — `marketplace 'oh-my-clanker' is already
+  added from a different source; remove it before adding this source` — AND
+  **codex normalises `owner/repo` to `https://github.com/<owner>/<repo>.git`**
+  before storing it as the registered source. Naively comparing the
+  registered source (already normalised) against omc's own computed source
+  (still `owner/repo`) produces a **permanent false conflict** for the
+  default GitHub-installed user: every `omc start` would remove the
+  marketplace, re-add it, and reinstall the plugin, reporting "repaired" —
+  forever. That normalisation is invisible in the CLI's own output shape
+  (`marketplace list --json`'s `source` field just looks like "the source",
+  not "the source after silent rewriting") and was the single most expensive
+  bug found in this work. The fix compares *canonicalised* sources and
+  treats an unprovable difference as **not** a conflict — a false positive
+  churns the user's config forever and silently; a false negative produces
+  one loud, actionable `marketplace add` exit-1 with a `fix manually:` line.
+  Loud beats silent churn.
+
+| # | Fact | Consequence |
+|---|---|---|
+| C1 | `codex plugin list --json` → `{"installed":[…],"available":[…]}`. Entries: `pluginId` (= `name@marketplaceName`), `name`, `marketplaceName`, `version`, `installed`, `enabled`, `source`, `marketplaceSource`, `installPolicy`, `authPolicy` | A real machine-readable probe exists; no table scraping |
+| C2 | **No `errors` field** | Codex has no load-error channel. `installed`/`enabled` are the whole health signal; claude's `_problems()` has no analogue and the "failed to load → uninstall + reinstall" repair collapses to a plain re-add |
+| C3 | The JSON **omits** path/git marketplaces until the plugin is installed. `available` was `[]` throughout, even with dozens of uninstalled remote plugins | The probe confirms "installed & enabled" but cannot distinguish "registered, not installed" from "nothing registered". Acceptable: the repair is idempotent, so it simply re-runs both commands |
+| C4 | `codex plugin marketplace list --json` → `{"marketplaces":[{name, root, marketplaceSource:{sourceType, source}}]}` | The registered source *is* readable — required for C7 |
+| C5 | Codex reads **`.claude-plugin/marketplace.json`** (it prints that path as the marketplace root), for omc's checkout and obra's marketplace alike. No `.codex-plugin/marketplace.json` exists or is needed | No new marketplace manifest to author |
+| C6 | `codex plugin marketplace add` accepts a local path **and** `owner/repo`. Re-adding the *same* source → exit 0, "already added" | Idempotent; safe to run unconditionally |
+| C7 | Re-adding a same-named marketplace from a **different** source → **exit 1**: `marketplace 'oh-my-clanker' is already added from a different source; remove it before adding this source` | A live bug generator: `marketplace_source(env)` varies with how omc was installed, so moving from a local checkout to a GitHub install hard-fails. Must be handled explicitly |
+| C8 | `codex plugin add omc@oh-my-clanker` → exit 0; repeating it → exit 0, same message | Idempotent; safe to run unconditionally |
+| C9 | Verbs are `add` / `remove`, **not** `install` / `uninstall` | Diverges from claude; belongs in the codex adapter |
+| C10 | `marketplace remove` succeeds even with the plugin installed, and the plugin then disappears from `installed` — no zombie state | Remove-then-re-add is a safe repair |
+| C11 | Failing commands exit 1 with the message on **stderr** | Existing `ctx.run` + returncode handling works unchanged |
+| C12 | Install root is version-pinned: `~/.codex/plugins/cache/<marketplace>/<plugin>/<version>/`, a full repo copy | See the "Version pinning and `omc update`" discussion in the design spec |
+| C13 | `CODEX_HOME` fully isolates config and cache | Clean sandbox for E2E and future probing |
+
+**The repair, in outline** (see `CodexProvider.plugin_repair_argvs` for the
+exact per-condition table): a detected source conflict (C7) is repaired by a
+non-fatal `marketplace remove` followed by a fatal `marketplace add` of the
+correct source; because removing a marketplace also removes its installed
+plugins (C10), the omc plugin re-add step is **unconditional** whenever a
+conflict was present, even though `facts` (captured before the repair ran)
+still showed omc as installed — otherwise a conflict repair would silently
+leave codex with no omc plugin at all.
+
+**superpowers for codex** comes from `obra/superpowers-marketplace`, not
+codex's own curated catalog: `superpowers@openai-curated-remote` (6.3.0) is
+in the official curated marketplace, but installing it returns exit 1,
+`remote plugin plugins~Plugin_… is disabled by admin` — org policy on a
+managed machine, so it is not usable as the primary route. `obra/superpowers-marketplace`
+works end to end (`marketplace add` → exit 0, `plugin add
+superpowers@superpowers-marketplace` → exit 0, `installed: true`, `enabled:
+true`, 14 skills present). Superpowers from *any* marketplace satisfies the
+check, so a user who already has it from the curated catalog is left alone.
+This is a deliberate per-provider asymmetry: claude installs
+`superpowers@claude-plugins-official`; codex installs
+`superpowers@superpowers-marketplace`.
+
+**Still open, unverified for both claude and codex:** whether a running,
+already-authenticated session picks up a freshly installed/repaired plugin
+without a restart. This has never been tested live and is not claimed either
+way — it stays a tracked follow-up, not a fact.

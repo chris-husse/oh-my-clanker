@@ -20,8 +20,9 @@ omc's in-session skills install as a plugin — once per harness you use:
   Claude Code:  installed for you above (also by `omc start` / `omc update`);
                 by hand: /plugin marketplace add chris-husse/oh-my-clanker
                          /plugin install omc@oh-my-clanker
-  Codex:        codex plugin marketplace add chris-husse/oh-my-clanker
-                then install 'omc' from /plugins
+  Codex:        installed for you above (also by `omc start` / `omc update`);
+                by hand: codex plugin marketplace add chris-husse/oh-my-clanker
+                         codex plugin add omc@oh-my-clanker
   OpenCode:     add to opencode.json:
                 "plugin": ["omc@git+https://github.com/chris-husse/oh-my-clanker.git"]
 
@@ -29,7 +30,9 @@ omc's start skill hands off to superpowers — install it too:
 
   Claude Code:  installed for you above; by hand:
                 /plugin install superpowers@claude-plugins-official
-  Codex/OpenCode: install it from https://github.com/obra/superpowers
+  Codex:        installed for you above (from obra/superpowers-marketplace —
+                codex's own curated entry is admin-blocked on managed machines)
+  OpenCode:     install it from https://github.com/obra/superpowers
 """
 
 
@@ -65,6 +68,7 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
                 store.set_key(pcfg, key, value)
                 write_project = True
             else:
+                _check_model(ctx, key, value)  # before the write, so a typo never lands
                 store.set_key(gcfg, key, value)
                 write_global = True
         # Migration must not lose the legacy worktree section: when this run
@@ -93,7 +97,7 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
     if not sys.stdin.isatty():
         raise Refusal("interactive configure needs a TTY (use --defaults or --set KEY=VALUE)")
     gcfg = store.load_global(ctx.home) or legacy_global or GlobalConfig()
-    _walkthrough_global(gcfg)
+    _walkthrough_global(ctx, gcfg)
     pcfg = None
     if root is not None:
         pcfg = store.load_project(root) or legacy_project or ProjectConfig()
@@ -110,6 +114,48 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
     _ensure_plugins(ctx, gcfg)
     print(_PLUGIN_HINTS)
     return 0
+
+
+def known_models(ctx: ToolContext, name: str) -> list[str]:
+    """Selectable model ids for ``name``, preferring the harness's own catalog.
+
+    Best-effort by design: no catalog command, a missing binary, a non-zero
+    exit, or unparseable output all fall back to the provider's static
+    ``models()``. This must never raise — a wrong model id is a nuisance, but
+    a config walkthrough that dies because a catalog probe failed is worse.
+    """
+    provider = get_provider(name)
+    argv = provider.model_catalog_argv()
+    if argv:
+        try:
+            cp = ctx.run(argv)
+            if cp.returncode == 0:
+                # JSONDecodeError subclasses ValueError, so bad JSON lands here too.
+                found = provider.parse_model_catalog(cp.stdout or "")
+                if found:
+                    return found
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return provider.models()
+
+
+def _check_model(ctx: ToolContext, key: str, value: str) -> None:
+    """Reject `--set llm.providers.<name>.model=<unknown>` up front.
+
+    The harness may not: codex accepts any slug, warns that it has no metadata
+    for it, then fails the first real call with a generic 400 blaming org
+    policy. Catching it here is the difference between a typo and a mystery.
+    Silent when the catalog is unavailable — never guess a value is wrong.
+    """
+    parts = key.split(".")
+    if parts[:2] != ["llm", "providers"] or parts[-1:] != ["model"] or not value:
+        return
+    name = parts[2]
+    known = known_models(ctx, name)
+    if known and value not in known:
+        raise Refusal(
+            f"{name} does not offer a model named {value!r}.\n  available: {', '.join(known)}"
+        )
 
 
 def _migrate_legacy(ctx: ToolContext, *, migrated: bool, carried: bool) -> None:
@@ -155,7 +201,9 @@ def _ensure_repo_chain(ctx: ToolContext) -> None:
         ensure_agents_chain(ctx, root)
 
 
-def _walkthrough_global(cfg: GlobalConfig) -> None:  # pragma: no cover - PTY-driven, E2E territory
+def _walkthrough_global(  # pragma: no cover - PTY-driven, E2E territory
+    ctx: ToolContext, cfg: GlobalConfig
+) -> None:
     import questionary
     from questionary import Choice
 
@@ -170,7 +218,10 @@ def _walkthrough_global(cfg: GlobalConfig) -> None:  # pragma: no cover - PTY-dr
 
     for name in selected:
         pcfg = cfg.llm.providers[name]
-        known = get_provider(name).models()
+        # The harness's live catalog when it has one (codex: `codex debug
+        # models`), else the provider's static list. This is what turns
+        # codex from a free-text prompt into a real picker.
+        known = known_models(ctx, name)
         if known:
             other = "Other (type a model id)…"
             default = pcfg.model if pcfg.model in known else known[0]

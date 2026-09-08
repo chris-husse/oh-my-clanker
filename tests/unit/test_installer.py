@@ -9,7 +9,26 @@ from omc.errors import OmcError
 from omc.installer import run_install, run_uninstall, run_update, validate_checkout
 from omc.toolctx import ToolContext
 
-from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, stub_env
+from ._stubs import (
+    CODEX_MKT_FALLBACK,
+    CODEX_OMC,
+    CODEX_SUPERPOWERS,
+    HEALTHY_PLUGINS,
+    make_claude_stub,
+    make_codex_stub,
+    make_stub,
+    stub_env,
+)
+
+# A codex that is already registered and healthy, so `run_update` reaches
+# ensure_plugin's UPDATE path rather than its install/repair path. The
+# marketplace fixture carries codex's own normalised spelling of the fallback
+# repo (measured — see _stubs.CODEX_MKT_FALLBACK); the pretty `owner/repo` form
+# would read as a different source and make every run report "repaired".
+_HEALTHY_CODEX = {
+    "plugins": [CODEX_OMC, CODEX_SUPERPOWERS],
+    "marketplaces": [CODEX_MKT_FALLBACK],
+}
 
 
 @pytest.fixture(autouse=True)
@@ -112,7 +131,7 @@ def _update_ctx(tmp_path, *, plugins=HEALTHY_PLUGINS, install_rc=0):
     bindir.mkdir()
     uv_calls = _stub(bindir, "uv")
     claude_calls = make_claude_stub(bindir, plugins=plugins, install_rc=install_rc)
-    codex_calls = _stub(bindir, "codex")
+    codex_calls = make_codex_stub(bindir, **_HEALTHY_CODEX)
     _stub(bindir, "wt")  # require_tools probes git/wt/provider
     _stub(bindir, "git")  # deterministic --version for the probe
     home = tmp_path / "omc-home"
@@ -131,7 +150,13 @@ def test_update_upgrades_then_updates_each_providers_plugin(tmp_path, capsys):
     assert "tool upgrade omc" in uv_calls.read_text()
     assert "plugin marketplace update oh-my-clanker" in claude_calls.read_text()
     assert "plugin update omc@oh-my-clanker" in claude_calls.read_text()
-    assert "plugin marketplace upgrade" in codex_calls.read_text()
+    # THE USER-VISIBLE FIX: codex is no longer routed down a name fork that
+    # only refreshed the marketplace snapshot — it goes through ensure_plugin,
+    # which re-adds the plugin from the refreshed snapshot and re-probes it.
+    recorded = codex_calls.read_text()
+    assert "plugin marketplace upgrade" in recorded
+    assert "plugin add omc@oh-my-clanker" in recorded
+    assert "✓ codex: omc plugin updated" in capsys.readouterr().err
 
 
 def test_update_isolates_provider_failures(tmp_path, capsys):
@@ -140,12 +165,20 @@ def test_update_isolates_provider_failures(tmp_path, capsys):
     ctx, uv_calls, claude_calls, codex_calls = _update_ctx(
         tmp_path, plugins=[{"id": "superpowers@claude-plugins-official"}], install_rc=1
     )
-    assert run_update(ctx) == 0  # a broken provider never fails the update
-    assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
+    # Best-effort applies to the LOOP, not the command: the other providers
+    # still get their turn, but a left-broken plugin must not report success.
+    # `omc update` exiting 0 here is how codex's local-source refresh window
+    # (remove, then a failed re-add when the checkout moved) stayed invisible.
+    assert run_update(ctx) == 1
+    # `marketplace upgrade` only appears in codex's UPDATE branch, so this
+    # proves codex reached ensure_plugin(update=True) after claude blew up.
+    assert "plugin marketplace upgrade" in codex_calls.read_text()
     err = capsys.readouterr().err
     assert "claude" in err
-    assert err.count("✗") == 1  # only the FINAL argv decides pass/fail — benign
-    # marketplace add/update failures must not each print their own ✗
+    # ONE ✗ for the whole failing provider: ensure_plugin raises once, and the
+    # best-effort (fatal=False) steps ahead of the failing install never
+    # narrate a failure of their own.
+    assert err.count("✗") == 1
 
 
 def test_update_aborts_when_required_tool_missing(tmp_path, monkeypatch):
@@ -214,7 +247,7 @@ def test_update_isolates_unknown_provider(tmp_path, capsys):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     _stub(bindir, "uv")
-    codex_calls = _stub(bindir, "codex")
+    codex_calls = make_codex_stub(bindir, **_HEALTHY_CODEX)
     # require_tools probes the DEFAULT provider (claude) + git/wt, not the
     # configured (unknown) providers — stub those so the probe passes and the
     # test still exercises unknown-provider isolation in the plugin loop.
@@ -229,7 +262,9 @@ def test_update_isolates_unknown_provider(tmp_path, capsys):
     cfg = GlobalConfig()
     cfg.llm.providers = {"nonexistent-provider": ProviderConfig(), "codex": ProviderConfig()}
     store.save_global(ctx.home, cfg)
-    assert run_update(ctx) == 0  # Must succeed despite unknown provider
+    # rc 1, but the loop is still isolated: a typo'd provider in the config is
+    # a real failure the user should see, not something to swallow silently.
+    assert run_update(ctx) == 1
     assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
     err = capsys.readouterr().err
     assert "✗" in err and "nonexistent-provider" in err  # failure narrated
@@ -260,3 +295,60 @@ def test_update_reinstalls_a_plugin_that_fails_to_load(tmp_path, capsys):
         < recorded.index("plugin install omc@oh-my-clanker --scope user")
     )
     assert "✓ claude: omc plugin repaired" in capsys.readouterr().err
+
+
+def test_update_uses_ensure_plugin_for_every_provider(monkeypatch, tmp_path, capsys):
+    """run_update must not branch on provider name — every configured provider
+    goes through ensure_plugin, and a failure in one never aborts the rest."""
+    import omc.installer as installer
+    from omc.providers.registry import get_provider
+
+    seen = []
+
+    def fake_ensure(ctx, name, *, check_only=False, update=False):
+        seen.append((name, update))
+        if name == "codex":
+            raise OmcError("boom")
+        if name == "opencode":
+            # What ensure_plugin really returns for a provider with no
+            # scriptable probe — the prefix drives the "·" mark.
+            return "unverified (no scriptable check for this provider yet)"
+        return "updated"
+
+    monkeypatch.setattr(installer, "ensure_plugin", fake_ensure)
+    # The provider-name fork is gone, and with it the member it dispatched on.
+    assert not hasattr(get_provider("claude"), "plugin_update_argvs")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "uv")
+    _stub(bindir, "claude")  # require_tools probes git/wt/provider
+    _stub(bindir, "wt")
+    _stub(bindir, "git")
+    ctx = ToolContext.from_env(
+        {
+            "HOME": str(tmp_path),
+            "OMC_HOME": str(tmp_path / "omc-home"),
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+        }
+    )
+    cfg = GlobalConfig()
+    cfg.llm.providers = {
+        "claude": ProviderConfig(),
+        "codex": ProviderConfig(),
+        "opencode": ProviderConfig(),
+    }
+    store.save_global(ctx.home, cfg)
+
+    # rc 1 because codex was left broken; the loop is unaffected, which is what
+    # this test is really about (see `seen` below).
+    assert run_update(ctx) == 1
+    # update=True for all three, in config order — codex raising did not stop
+    # the loop before opencode got its turn.
+    assert seen == [("claude", True), ("codex", True), ("opencode", True)]
+    err = capsys.readouterr().err
+    assert "✗ codex: boom — continuing" in err
+    assert "✓ claude: omc plugin updated" in err
+    # The display contract: only an "unverified" status renders "·".
+    assert "· opencode: omc plugin unverified" in err
+    assert err.count("✗") == 1

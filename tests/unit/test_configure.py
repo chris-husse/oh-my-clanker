@@ -2,11 +2,16 @@ import json
 import os
 import subprocess
 
+import pytest
+
 from omc.agentsmd import distribution_agents_md
 from omc.cli import main
 from omc.config import store
+from omc.configure import run_configure
+from omc.errors import Refusal
+from omc.toolctx import ToolContext
 
-from ._stubs import HEALTHY_PLUGINS, make_claude_stub
+from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, stub_env
 
 
 def _home(tmp_path, monkeypatch, *, plugins=HEALTHY_PLUGINS, install_rc=0):
@@ -18,6 +23,12 @@ def _home(tmp_path, monkeypatch, *, plugins=HEALTHY_PLUGINS, install_rc=0):
     # temp HOME). The real PATH stays behind it: the chain step needs git.
     bindir = tmp_path / "bin"
     calls = make_claude_stub(bindir, plugins=plugins, install_rc=install_rc)
+    # Same reasoning for `codex`, now that --set validates model ids against
+    # the harness's catalog: without a stub these tests would shell out to the
+    # REAL codex CLI and their fake slugs would be correctly rejected. rc 1 =
+    # "catalog unavailable", which `known_models` degrades to "no list", so
+    # tests that are not about validation are unaffected by it.
+    make_stub(bindir, "codex", rc=1)
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
     monkeypatch.chdir(tmp_path)  # outside any git repo
     _CLAUDE_CALLS[str(home)] = calls
@@ -212,3 +223,62 @@ def test_configure_survives_plugin_install_failure(tmp_path, monkeypatch, capsys
     captured = capsys.readouterr()
     assert "✗ claude:" in captured.err and "fix manually" in captured.err
     assert "/plugin install omc@oh-my-clanker" in captured.out
+
+
+def _catalog_stub(bindir, *, stdout, rc=0):
+    from ._stubs import make_stub
+
+    make_stub(bindir, "codex", stdout=stdout, rc=rc)
+    return ToolContext.from_env(stub_env(bindir))
+
+
+_CATALOG = '{"models": [{"slug": "gpt-6-astra", "visibility": "list", "priority": 1}]}'
+
+
+def test_known_models_prefers_the_harness_catalog(tmp_path):
+    from omc.configure import known_models
+
+    ctx = _catalog_stub(tmp_path / "bin", stdout=_CATALOG)
+    assert known_models(ctx, "codex") == ["gpt-6-astra"]
+
+
+def test_known_models_falls_back_when_the_catalog_is_unavailable(tmp_path):
+    from omc.configure import known_models
+
+    # non-zero exit, garbage output, and a missing binary must all degrade to
+    # the static list rather than raising — a probe failure is not fatal.
+    assert known_models(_catalog_stub(tmp_path / "b1", stdout=_CATALOG, rc=1), "codex") == []
+    assert known_models(_catalog_stub(tmp_path / "b2", stdout="not json"), "codex") == []
+    assert known_models(ToolContext.from_env(stub_env(tmp_path / "empty")), "codex") == []
+    # claude has no catalog command, so its static aliases come straight back
+    assert known_models(_catalog_stub(tmp_path / "b3", stdout=_CATALOG), "claude") == [
+        "fable",
+        "opus",
+        "sonnet",
+    ]
+
+
+def test_set_rejects_a_model_the_harness_does_not_offer(tmp_path):
+    # THE BUG: `--set llm.providers.codex.model=astra` used to be accepted and
+    # then fail at `omc start` with a 400 blaming org policy.
+    ctx = _catalog_stub(tmp_path / "bin", stdout=_CATALOG)
+    with pytest.raises(Refusal, match="does not offer a model named 'astra'"):
+        run_configure(ctx, defaults=False, sets=["llm.providers.codex.model=astra"])
+    # nothing was written
+    assert not store.global_config_path(ctx.home).exists()
+
+
+def test_set_accepts_a_real_model_and_an_empty_one(tmp_path):
+    ctx = _catalog_stub(tmp_path / "bin", stdout=_CATALOG)
+    assert run_configure(ctx, defaults=False, sets=["llm.providers.codex.model=gpt-6-astra"]) == 0
+    # blank means "let the harness pick its default" and must stay allowed
+    assert run_configure(ctx, defaults=False, sets=["llm.providers.codex.model="]) == 0
+
+
+def test_set_of_a_non_model_key_never_probes_the_catalog(tmp_path):
+    # a catalog probe per --set would be gratuitous; only model keys validate
+    bindir = tmp_path / "bin"
+    ctx = _catalog_stub(bindir, stdout=_CATALOG)
+    calls = bindir / "codex.calls"
+    run_configure(ctx, defaults=False, sets=["notifications.enabled=false"])
+    assert not calls.exists()

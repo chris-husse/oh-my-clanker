@@ -24,18 +24,19 @@
 
    | Harness | Install |
    |---|---|
-   | Claude Code | `/plugin marketplace add chris-husse/oh-my-clanker` then `/plugin install omc@oh-my-clanker` |
-   | Codex | `codex plugin marketplace add chris-husse/oh-my-clanker`, then install `omc` from `/plugins` |
+   | Claude Code | installed for you (also by `omc start` / `omc update`); by hand: `/plugin marketplace add chris-husse/oh-my-clanker` then `/plugin install omc@oh-my-clanker` |
+   | Codex | installed for you (also by `omc start` / `omc update`); by hand: `codex plugin marketplace add chris-husse/oh-my-clanker && codex plugin add omc@oh-my-clanker` |
    | OpenCode | add `"plugin": ["omc@git+https://github.com/chris-husse/oh-my-clanker.git"]` to `opencode.json` |
 
-   For Claude Code you can skip this table: `omc configure`, `omc update` and `omc start` all install (and repair) the plugin for you.
+   For Claude Code and Codex you can skip this table: `omc configure`, `omc update` and `omc start` all install (and repair) the plugin for you.
 
-   `omc`'s session skill hands off to [superpowers](https://github.com/obra/superpowers)'s brainstorming skill. The plugin manifest deliberately declares **no** dependency on it — Claude Code matches a dependency by its exact `name@marketplace` id and refuses to load omc when superpowers came from a different marketplace, and it never installs the dependency for you anyway. Instead omc installs superpowers itself for Claude Code (from the official marketplace); for the other harnesses install it yourself:
+   `omc`'s session skill hands off to [superpowers](https://github.com/obra/superpowers)'s brainstorming skill. The plugin manifest deliberately declares **no** dependency on it — Claude Code matches a dependency by its exact `name@marketplace` id and refuses to load omc when superpowers came from a different marketplace, and it never installs the dependency for you anyway. Instead omc installs superpowers itself for Claude Code (from the official marketplace) and for Codex (from `obra/superpowers-marketplace` — Codex's own curated catalog entry is admin-blocked on managed machines); for OpenCode install it yourself:
 
    | Harness | Install superpowers |
    |---|---|
    | Claude Code | automatic; by hand: `/plugin install superpowers@claude-plugins-official` |
-   | Codex / OpenCode | Install from [obra/superpowers](https://github.com/obra/superpowers) |
+   | Codex | automatic; by hand: `codex plugin marketplace add obra/superpowers-marketplace && codex plugin add superpowers@superpowers-marketplace` |
+   | OpenCode | Install from [obra/superpowers](https://github.com/obra/superpowers) |
 
    Full write-up of the cross-marketplace dependency pitfall: [`docker/PLUGIN-NOTES.md`](docker/PLUGIN-NOTES.md).
 

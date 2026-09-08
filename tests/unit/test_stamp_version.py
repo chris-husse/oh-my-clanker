@@ -79,3 +79,50 @@ def test_stamp_writes_all_four_files(tmp_path, monkeypatch):
     assert json.loads(codex.read_text())["version"] == "0.3.42"
     # inline object preserved (no JSON reflow)
     assert '"author": { "name": "X" }' in plugin.read_text()
+
+
+def test_stamp_lock_targets_omc_not_a_dependency():
+    # uv.lock carries a version line per package; only omc's may be stamped.
+    text = (
+        '[[package]]\nname = "pytest"\nversion = "8.0.0"\n\n'
+        '[[package]]\nname = "omc"\nversion = "0.3.0"\nsource = { editable = "." }\n'
+    )
+    out = sv.stamp_lock(text, "0.3.42")
+    assert 'name = "omc"\nversion = "0.3.42"' in out
+    assert 'name = "pytest"\nversion = "8.0.0"' in out  # dependency untouched
+    assert 'source = { editable = "." }' in out
+
+
+def test_stamp_lock_raises_when_omc_entry_is_missing():
+    with pytest.raises(ValueError):
+        sv.stamp_lock(
+            '[[package]]\nname = "pytest"\nversion = "8.0.0"\n',
+            "0.3.42",
+        )
+
+
+def test_stamp_lock_is_idempotent():
+    text = '[[package]]\nname = "omc"\nversion = "0.3.42"\n'
+    assert sv.stamp_lock(text, "0.3.42") == text
+
+
+def test_stamp_writes_uv_lock_too(tmp_path, monkeypatch):
+    # The regression this guards: uv.lock was left one version behind every
+    # release, and `uv run` silently re-synced it into a spurious diff.
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "omc"\nversion = "0.3.0"\n')
+    plugin = tmp_path / "plugin.json"
+    plugin.write_text('{\n  "version": "0.3.0"\n}\n')
+    lock = tmp_path / "uv.lock"
+    lock.write_text(
+        '[[package]]\nname = "ruff"\nversion = "0.1.0"\n\n'
+        '[[package]]\nname = "omc"\nversion = "0.3.0"\n'
+    )
+
+    monkeypatch.setattr(sv, "PYPROJECT", pyproject)
+    monkeypatch.setattr(sv, "JSON_FILES", (plugin,))
+    monkeypatch.setattr(sv, "LOCK", lock)
+
+    assert sv.stamp(42) == "0.3.42"
+    assert 'name = "omc"\nversion = "0.3.42"' in lock.read_text()
+    assert 'name = "ruff"\nversion = "0.1.0"' in lock.read_text()
