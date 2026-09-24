@@ -87,6 +87,12 @@ def fetch_slug(ctx: ToolContext, cfg: Config, context: str) -> str:
     output = (cp.stdout or "") + "\n" + (cp.stderr or "")
     verdict = parse_verdict(output)
     if verdict is None:
+        # Ask the adapter first: some failures (a model slug the harness does
+        # not know) are explained badly by the harness's own output, and
+        # dumping the raw transcript buries the one useful line.
+        explained = provider.explain_failure(output)
+        if explained is not None:
+            raise Refusal(explained)
         raise OmcError(
             f"no OMC_SLUG verdict in {name} output (rc {cp.returncode}):\n{output.strip()}"
         )
