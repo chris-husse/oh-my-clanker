@@ -1,6 +1,46 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class PluginEntry:
+    """One installed plugin, as the harness reports it.
+
+    ``problems`` is why it won't serve skills; it includes the disabled
+    reason so callers check one field instead of also consulting ``enabled``.
+    """
+
+    id: str  # "omc@oh-my-clanker"
+    enabled: bool
+    problems: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PluginFacts:
+    """What one probe round learned about a harness's plugin state."""
+
+    omc: PluginEntry | None = None
+    superpowers: PluginEntry | None = None
+    marketplace_source: str | None = None  # registered source; None = unknown
+
+
+@dataclass(frozen=True)
+class RepairStep:
+    """One command in a repair plan, bundled with its narration, its failure
+    policy, the status it contributes, and its manual-fix hint.
+
+    Per-step metadata follows probe.py's convention (spec tuples of
+    (name, argv, hint) -> ProbeResult carries the hint alongside the argv):
+    the provider owns the provider-specific text, the caller renders it.
+    """
+
+    argv: list[str]
+    label: str  # narrated before the step runs
+    fatal: bool  # False = best-effort self-heal, failure tolerated
+    action: str = ""  # contributes to ensure_plugin's status; last non-empty wins
+    manual_fix: str = ""  # rendered as "fix manually: <text>" on fatal failure
 
 
 class Provider(ABC):
@@ -76,6 +116,32 @@ class Provider(ABC):
         must be split so line-anchored contracts (OMC_STAGE) survive."""
         return [line]
 
+    def model_catalog_argv(self) -> list[str]:
+        """Command whose stdout is this harness's model catalog.
+
+        ``[]`` means no scriptable catalog exists — callers fall back to the
+        static ``models()`` list. Same split as the plugin seam: this names
+        the command, ``parse_model_catalog`` reads its output, and the caller
+        does the I/O. Pure.
+        """
+        return []
+
+    def parse_model_catalog(self, stdout: str) -> list[str]:
+        """Selectable model ids from ``model_catalog_argv()``'s stdout, best
+        first. Pure; raises on malformed input so the caller can fall back."""
+        return []
+
+    def explain_failure(self, output: str) -> str | None:
+        """A precise remediation for a known-shape failure in this harness's
+        output, or None.
+
+        Providers fail in ways their own output explains badly — a wrong model
+        id, for instance, reads as an HTTP 400 about "organization policy".
+        The caller shows this INSTEAD of dumping the raw transcript, so the
+        signatures live in the adapter that knows them. Pure.
+        """
+        return None
+
     @abstractmethod
     def title_env(self) -> dict[str, str]:
         """Env that stops the CLI from clobbering the terminal title ({} if none exists)."""
@@ -92,11 +158,39 @@ class Provider(ABC):
         free-text and move fast — pinning one here would rot)."""
         return ""
 
-    @abstractmethod
-    def plugin_update_argvs(self, marketplace_source: str | None = None) -> list[list[str]]:
-        """Commands that update this provider's installed omc plugin, in order.
+    def plugin_probe_argvs(self) -> list[list[str]]:
+        """Commands whose stdout carries this harness's plugin state, in the
+        order ``parse_plugin_facts`` expects them.
 
-        ``marketplace_source`` (owner/repo or a local path) lets a provider
-        self-heal a missing marketplace registration; providers that don't need
-        it ignore the argument. [] means no scriptable update path is known yet.
-        Builders stay pure (no I/O)."""
+        ``[]`` means no scriptable probe exists for this provider — callers
+        report the plugin as unverified and never mutate anything. Pure.
+
+        Probe argvs MUST be side-effect-free: plugin.py runs them BEFORE the
+        ``check_only`` early return, so --dry-run's "mutates nothing"
+        guarantee rests entirely on this. A read-only listing, never an add,
+        an update, or anything that touches a snapshot on disk.
+        """
+        return []
+
+    def parse_plugin_facts(self, stdouts: list[str]) -> PluginFacts:
+        """Turn probe stdout (one entry per ``plugin_probe_argvs()`` command,
+        same order) into facts. Default: an all-``None`` ``PluginFacts``
+        (nothing known). Pure — no I/O, and it must not raise on
+        well-formed-but-empty output.
+
+        "Well-formed-but-empty" means a payload the harness legitimately emits
+        when NOTHING is installed (``{}``, an absent key, a ``null`` value, an
+        empty array) — a fresh machine is exactly the machine that needs the
+        install, and plugin.py:_probe turns any parse exception into a fatal
+        error that would block `omc start` there. An empty *string* is NOT
+        that case: it means the CLI printed nothing at all, a broken probe
+        rather than an empty state, so raising on it stays within contract —
+        claude's parser does, matching the pre-seam plugin.py."""
+        return PluginFacts()
+
+    def plugin_repair_argvs(
+        self, facts: PluginFacts, *, source: str, update: bool
+    ) -> list[RepairStep]:
+        """Ordered plan that makes ``facts`` healthy. ``[]`` = nothing to do.
+        Pure: state in, commands out — the caller executes them."""
+        return []

@@ -16,7 +16,15 @@ claude plugin install superpowers@superpowers-marketplace --scope user 2>/dev/nu
 mkdir -p ~/.config/opencode/plugins
 cp /repo/.opencode/plugins/omc.js ~/.config/opencode/plugins/omc.js
 
-# Codex: repo marketplace registration
+# Codex: marketplace registration AND install — registration alone leaves the
+# plugin "not installed", which serves no skills. Verbs are add/remove.
 codex plugin marketplace add /repo 2>/dev/null || true
+codex plugin add omc@oh-my-clanker 2>/dev/null || true
+
+# superpowers for codex from obra: codex's own curated catalog entry is
+# admin-blocked on managed machines (exit 1), so the git marketplace is the
+# route that actually works.
+codex plugin marketplace add obra/superpowers-marketplace 2>/dev/null || true
+codex plugin add superpowers@superpowers-marketplace 2>/dev/null || true
 
 echo "plugin setup done"

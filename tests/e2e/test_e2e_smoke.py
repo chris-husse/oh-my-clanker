@@ -1,3 +1,4 @@
+import json
 import re
 
 import pytest
@@ -43,3 +44,24 @@ def test_work_repo_and_wt(container):
     repo = make_work_repo(container)
     rc, out = run_in(container, ["wt", "list", "--format=json"], cwd=repo)
     assert rc == 0, out
+
+
+def test_codex_plugin_is_registered_in_the_image(container):
+    """`codex plugin add` actually installs — registration alone leaves the
+    plugin 'not installed' and serving no skills. Plugin commands need no
+    auth, so this runs in CI unlike the seeded-session tests."""
+    rc, out = run_in(container, ["codex", "plugin", "list", "--json"])
+    assert rc == 0, f"codex plugin list failed:\n{out}"
+    # run_in hands back stdout and stderr COMBINED (exec_run without demux, run
+    # under `bash -lc`), so any stray stderr line — a login-shell profile echo, a
+    # node deprecation warning, a codex update notice — makes a whole-string
+    # json.loads() raise while rc is still 0: a red test that says nothing about
+    # plugin state. Slice the object out of the stream instead. Do NOT
+    # "simplify" this back to json.loads(out).
+    start, end = out.find("{"), out.rfind("}")
+    assert start != -1 and end > start, f"no JSON object in codex plugin list output:\n{out}"
+    installed = json.loads(out[start : end + 1])["installed"]
+    names = {e["name"] for e in installed}
+    assert "omc" in names, out
+    omc = next(e for e in installed if e["name"] == "omc")
+    assert omc["installed"] is True and omc["enabled"] is True, omc

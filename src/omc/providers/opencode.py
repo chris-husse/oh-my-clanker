@@ -55,9 +55,9 @@ export const OmcNotify = async ({{ $ }}) => ({{
     def install_hint(self):
         return "npm install -g opencode-ai"
 
-    def plugin_update_argvs(self, marketplace_source: str | None = None):
-        # opencode manages its plugin cache itself (git-ref entry in
-        # opencode.json); no scriptable update verified yet — see
-        # docker/PLUGIN-NOTES.md (Task 9 investigation). marketplace_source is
-        # unused: no scriptable marketplace add exists for opencode.
-        return []
+    # NO plugin_* overrides, deliberately: opencode manages its plugin cache
+    # itself (a git-ref entry in opencode.json) and no scriptable probe, add or
+    # update has been verified — see docker/PLUGIN-NOTES.md (Task 9
+    # investigation). It therefore rides Provider's inert defaults, and the
+    # empty plugin_probe_argvs() is what makes ensure_plugin report the omc
+    # plugin as "unverified" instead of mutating anything.

@@ -133,39 +133,14 @@ def test_claude_opencode_ignore_notify_sink_argv():
         assert with_arg == without
 
 
-def test_plugin_update_argvs_are_pure_and_per_provider():
-    from omc.providers.registry import get_provider
-
-    claude = get_provider("claude").plugin_update_argvs()
-    assert ["claude", "plugin", "marketplace", "update", "oh-my-clanker"] in claude
-    assert ["claude", "plugin", "update", "omc@oh-my-clanker"] in claude
-    codex = get_provider("codex").plugin_update_argvs()
-    assert codex == [["codex", "plugin", "marketplace", "upgrade"]]
-    assert get_provider("opencode").plugin_update_argvs() == []  # not scriptable yet
-
-
-def test_claude_plugin_update_prepends_marketplace_add():
-    from omc.providers.claude import ClaudeProvider
-
-    argvs = ClaudeProvider().plugin_update_argvs("chris-husse/oh-my-clanker")
-    assert argvs[0] == ["claude", "plugin", "marketplace", "add", "chris-husse/oh-my-clanker"]
-    assert ["claude", "plugin", "marketplace", "update", "oh-my-clanker"] in argvs
-    assert ["claude", "plugin", "update", "omc@oh-my-clanker"] in argvs
-
-
-def test_claude_plugin_update_without_source_omits_add():
-    from omc.providers.claude import ClaudeProvider
-
-    argvs = ClaudeProvider().plugin_update_argvs()
-    assert not any("add" in a for a in argvs)  # no source → no marketplace add
-
-
-def test_codex_ignores_marketplace_source():
-    from omc.providers.codex import CodexProvider
-
-    assert CodexProvider().plugin_update_argvs("anything") == [
-        ["codex", "plugin", "marketplace", "upgrade"]
-    ]
+# `plugin_update_argvs` is GONE: update is an input to plugin_repair_argvs, so
+# the update sequences it used to build are asserted by the repair-plan tests
+# below (claude: test_claude_repair_plan_superpowers_and_update_and_noop, which
+# pins both the marketplace refresh and the `plugin update`; codex:
+# test_codex_repair_update_local_source_refreshes_the_copy for the marketplace
+# upgrade and test_codex_repair_update_of_a_broken_plugin_upgrades_first for the
+# repair path; opencode: test_plugin_seam_defaults_are_inert for "not
+# scriptable").
 
 
 # Captured from a real `claude -p --output-format stream-json --verbose` run
@@ -248,3 +223,584 @@ def test_notifies_natively_flags():
     assert get_provider("claude").notifies_natively() is True
     assert get_provider("codex").notifies_natively() is False
     assert get_provider("opencode").notifies_natively() is False
+
+
+def test_plugin_seam_defaults_are_inert():
+    # New optional capability members are CONCRETE defaults, not abstract:
+    # registry.py builds provider instances at module import, so an abstract
+    # member would break import until every provider implements it.
+    from omc.providers.base import PluginFacts
+
+    # opencode carries no plugin capability at all and rides the defaults
+    op = get_provider("opencode")
+    assert op.plugin_probe_argvs() == []
+    facts = op.parse_plugin_facts([])
+    assert isinstance(facts, PluginFacts)
+    assert facts.omc is None and facts.superpowers is None and facts.marketplace_source is None
+    assert op.plugin_repair_argvs(facts, source="x", update=False) == []
+
+
+def test_repair_step_defaults():
+    from dataclasses import FrozenInstanceError
+
+    from omc.providers.base import RepairStep
+
+    s = RepairStep(argv=["a", "b"], label="doing it", fatal=True)
+    assert s.action == "" and s.manual_fix == ""
+    with pytest.raises(FrozenInstanceError):  # frozen
+        s.argv = []
+
+
+_CLAUDE_LIST_HEALTHY = json.dumps(
+    [
+        {"id": "omc@oh-my-clanker", "enabled": True},
+        {"id": "superpowers@claude-plugins-official", "enabled": True},
+    ]
+)
+_CLAUDE_LIST_BROKEN = json.dumps(
+    [
+        {"id": "omc@oh-my-clanker", "enabled": True, "errors": ["dep missing"]},
+        {"id": "superpowers@superpowers-marketplace", "enabled": True},
+    ]
+)
+
+
+def test_claude_plugin_probe_and_parse():
+    p = get_provider("claude")
+    assert p.plugin_probe_argvs() == [["claude", "plugin", "list", "--json"]]
+
+    facts = p.parse_plugin_facts([_CLAUDE_LIST_HEALTHY])
+    assert facts.omc is not None and facts.omc.problems == ()
+    assert facts.superpowers is not None
+    assert facts.marketplace_source is None  # claude exposes no source probe
+
+    broken = p.parse_plugin_facts([_CLAUDE_LIST_BROKEN])
+    assert broken.omc.problems == ("dep missing",)
+    # superpowers from ANY marketplace satisfies the check
+    assert broken.superpowers.id == "superpowers@superpowers-marketplace"
+
+
+def test_claude_parse_disabled_becomes_a_problem():
+    p = get_provider("claude")
+    out = json.dumps([{"id": "omc@oh-my-clanker", "enabled": False}])
+    facts = p.parse_plugin_facts([out])
+    assert facts.omc.enabled is False
+    assert "disabled" in facts.omc.problems[0]
+
+
+def test_claude_repair_plan_installs_missing_omc():
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    p = get_provider("claude")
+    facts = PluginFacts(
+        omc=None,
+        superpowers=PluginEntry("superpowers@claude-plugins-official", True, ()),
+    )
+    steps = p.plugin_repair_argvs(facts, source="chris-husse/oh-my-clanker", update=False)
+    argvs = [s.argv for s in steps]
+    add_at = argvs.index(["claude", "plugin", "marketplace", "add", "chris-husse/oh-my-clanker"])
+    install_at = argvs.index(
+        ["claude", "plugin", "install", "omc@oh-my-clanker", "--scope", "user"]
+    )
+    assert add_at < install_at
+    assert steps[install_at].fatal is True
+    assert steps[install_at].action == "installed"
+    assert "fix manually" not in steps[install_at].manual_fix  # the caller adds that prefix
+    assert "claude plugin marketplace add" in steps[install_at].manual_fix
+
+
+def test_claude_repair_plan_repairs_broken_omc_in_order():
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    p = get_provider("claude")
+    facts = PluginFacts(
+        omc=PluginEntry("omc@oh-my-clanker", True, ("dep missing",)),
+        superpowers=PluginEntry("superpowers@claude-plugins-official", True, ()),
+    )
+    argvs = [
+        s.argv
+        for s in p.plugin_repair_argvs(facts, source="chris-husse/oh-my-clanker", update=False)
+    ]
+    update_at = argvs.index(["claude", "plugin", "marketplace", "update", "oh-my-clanker"])
+    uninstall_at = argvs.index(["claude", "plugin", "uninstall", "omc@oh-my-clanker"])
+    install_at = argvs.index(
+        ["claude", "plugin", "install", "omc@oh-my-clanker", "--scope", "user"]
+    )
+    assert update_at < uninstall_at < install_at
+
+
+def test_claude_repair_plan_superpowers_and_update_and_noop():
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    p = get_provider("claude")
+    omc_ok = PluginEntry("omc@oh-my-clanker", True, ())
+    sp_ok = PluginEntry("superpowers@claude-plugins-official", True, ())
+
+    # superpowers missing -> official marketplace add + install, action set
+    only_omc = p.plugin_repair_argvs(PluginFacts(omc=omc_ok), source="s", update=False)
+    argvs = [s.argv for s in only_omc]
+    assert ["claude", "plugin", "marketplace", "add", "anthropics/claude-plugins-official"] in argvs
+    assert [
+        "claude", "plugin", "install", "superpowers@claude-plugins-official", "--scope", "user",
+    ] in argvs  # fmt: skip
+    assert [s.action for s in only_omc if s.action] == ["installed superpowers"]
+
+    # healthy + update -> marketplace update + plugin update, action "updated"
+    upd = p.plugin_repair_argvs(PluginFacts(omc=omc_ok, superpowers=sp_ok), source="s", update=True)
+    argvs = [s.argv for s in upd]
+    # The snapshot refresh is part of the update sequence: without it `plugin
+    # update` re-resolves against the marketplace copy already on disk.
+    assert ["claude", "plugin", "marketplace", "update", "oh-my-clanker"] in argvs
+    assert ["claude", "plugin", "update", "omc@oh-my-clanker"] in argvs
+    assert [s.action for s in upd if s.action] == ["updated"]
+
+    # healthy, no update -> empty plan
+    assert (
+        p.plugin_repair_argvs(PluginFacts(omc=omc_ok, superpowers=sp_ok), source="s", update=False)
+        == []
+    )
+
+
+# --- codex plugin registration ------------------------------------------------
+# Captured from codex-cli 0.153.4 (2026-09-08). Note: NO `errors` field exists
+# — `installed`/`enabled` are the entire health signal.
+_CODEX_MKTS = json.dumps(
+    {
+        "marketplaces": [
+            {
+                "name": "oh-my-clanker",
+                "root": "/checkout/omc",
+                "marketplaceSource": {"sourceType": "local", "source": "/checkout/omc"},
+            }
+        ]
+    }
+)
+_CODEX_MKTS_EMPTY = json.dumps({"marketplaces": []})
+_CODEX_INSTALLED = json.dumps(
+    {
+        "installed": [
+            {
+                "pluginId": "omc@oh-my-clanker",
+                "name": "omc",
+                "marketplaceName": "oh-my-clanker",
+                "version": "0.1.7",
+                "installed": True,
+                "enabled": True,
+            }
+        ],
+        "available": [],
+    }
+)
+_CODEX_NONE = json.dumps({"installed": [], "available": []})
+
+
+def test_codex_plugin_probe_argvs():
+    p = get_provider("codex")
+    assert p.plugin_probe_argvs() == [
+        ["codex", "plugin", "marketplace", "list", "--json"],
+        ["codex", "plugin", "list", "--json"],
+    ]
+
+
+def test_codex_parse_reads_source_and_installed():
+    p = get_provider("codex")
+    facts = p.parse_plugin_facts([_CODEX_MKTS, _CODEX_INSTALLED])
+    assert facts.marketplace_source == "/checkout/omc"
+    assert facts.omc is not None and facts.omc.problems == ()
+    assert facts.superpowers is None
+
+    # Nothing registered at all: the JSON omits path/git marketplaces until
+    # the plugin is installed, so "absent" is the only readable state.
+    empty = p.parse_plugin_facts([_CODEX_MKTS_EMPTY, _CODEX_NONE])
+    assert empty.marketplace_source is None and empty.omc is None
+
+
+def test_codex_parse_tolerates_every_empty_shape():
+    # plugin.py:_probe makes ANY parse exception fatal, and on the `omc start`
+    # path that blocks the session — so a fresh machine (exit 0, nothing
+    # registered) must parse to all-None facts however codex spells "empty".
+    from omc.providers.base import PluginFacts
+
+    p = get_provider("codex")
+    for pair in (
+        ["{}", "{}"],
+        ['{"marketplaces": null}', '{"installed": null}'],
+        ['{"marketplaces": [null, 3]}', '{"installed": [null, "x"]}'],
+    ):
+        facts = p.parse_plugin_facts(pair)
+        assert facts == PluginFacts()
+
+    # The other side of the line: EMPTY STDOUT is a broken probe, not an empty
+    # state, so it must raise rather than read as "nothing installed" — omc
+    # would otherwise run four mutating commands and then fail confusingly.
+    # Same for a payload that is not an object at all: the contract moved.
+    for pair in (["", ""], ['{"marketplaces": []}', ""]):
+        with pytest.raises(ValueError):
+            p.parse_plugin_facts(pair)
+    with pytest.raises(ValueError, match="JSON object"):
+        p.parse_plugin_facts(["[]", _CODEX_NONE])
+
+
+def test_codex_parse_disabled_becomes_a_problem():
+    p = get_provider("codex")
+    out = json.dumps(
+        {
+            "installed": [
+                {"pluginId": "omc@oh-my-clanker", "name": "omc", "enabled": False,
+                 "installed": True}
+            ],
+            "available": [],
+        }
+    )  # fmt: skip
+    facts = p.parse_plugin_facts([_CODEX_MKTS, out])
+    assert facts.omc.enabled is False
+    assert "disabled" in facts.omc.problems[0]
+
+
+def test_codex_repair_fresh_install_order():
+    from omc.providers.base import PluginFacts
+
+    p = get_provider("codex")
+    steps = p.plugin_repair_argvs(PluginFacts(), source="chris-husse/oh-my-clanker", update=False)
+    argvs = [s.argv for s in steps]
+    add_at = argvs.index(["codex", "plugin", "marketplace", "add", "chris-husse/oh-my-clanker"])
+    omc_at = argvs.index(["codex", "plugin", "add", "omc@oh-my-clanker"])
+    sp_add_at = argvs.index(
+        ["codex", "plugin", "marketplace", "add", "obra/superpowers-marketplace"]
+    )
+    sp_at = argvs.index(["codex", "plugin", "add", "superpowers@superpowers-marketplace"])
+    assert add_at < omc_at
+    assert sp_add_at < sp_at
+    # codex verbs are add/remove, never install/uninstall
+    assert not any("install" in a or "uninstall" in a for a in argvs)
+
+
+def test_codex_repair_conflicting_source_removes_then_readds():
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    p = get_provider("codex")
+    # Registered from a DIFFERENT source than the one omc wants. Codex refuses
+    # a same-named add from another source (exit 1), so it must be removed first.
+    facts = PluginFacts(
+        omc=PluginEntry("omc@oh-my-clanker", True, ()),
+        superpowers=PluginEntry("superpowers@superpowers-marketplace", True, ()),
+        marketplace_source="/old/checkout",
+    )
+    steps = p.plugin_repair_argvs(facts, source="chris-husse/oh-my-clanker", update=False)
+    argvs = [s.argv for s in steps]
+    remove_at = argvs.index(["codex", "plugin", "marketplace", "remove", "oh-my-clanker"])
+    add_at = argvs.index(["codex", "plugin", "marketplace", "add", "chris-husse/oh-my-clanker"])
+    # THE LOAD-BEARING ASSERTION: omc reads as installed in `facts`, but
+    # removing the marketplace also removes its plugins, so the plan MUST
+    # re-add omc anyway or codex is left with no plugin at all.
+    omc_at = argvs.index(["codex", "plugin", "add", "omc@oh-my-clanker"])
+    assert remove_at < add_at < omc_at
+    assert steps[remove_at].fatal is False  # may legitimately not exist
+
+
+def test_codex_repair_healthy_is_a_noop_and_same_source_is_not_a_conflict():
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    p = get_provider("codex")
+    facts = PluginFacts(
+        omc=PluginEntry("omc@oh-my-clanker", True, ()),
+        superpowers=PluginEntry("superpowers@openai-curated-remote", True, ()),
+        marketplace_source="chris-husse/oh-my-clanker",
+    )
+    assert p.plugin_repair_argvs(facts, source="chris-husse/oh-my-clanker", update=False) == []
+
+
+def test_codex_repair_update_local_source_refreshes_the_copy():
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    p = get_provider("codex")
+    facts = PluginFacts(
+        omc=PluginEntry("omc@oh-my-clanker", True, ()),
+        superpowers=PluginEntry("superpowers@superpowers-marketplace", True, ()),
+        marketplace_source="/checkout/omc",
+    )
+    # Local source: the install is a COPY into a version-pinned dir, so an
+    # unchanged version keeps serving stale skills. Remove before re-adding.
+    local = p.plugin_repair_argvs(facts, source="/checkout/omc", update=True)
+    argvs = [s.argv for s in local]
+    rm_at = argvs.index(["codex", "plugin", "remove", "omc@oh-my-clanker"])
+    add_at = argvs.index(["codex", "plugin", "add", "omc@oh-my-clanker"])
+    assert rm_at < add_at
+    assert local[rm_at].fatal is False
+    assert [s.action for s in local if s.action] == ["updated"]
+
+    # Git source: upgrade the snapshot, then re-add. No plugin remove.
+    git_facts = PluginFacts(
+        omc=PluginEntry("omc@oh-my-clanker", True, ()),
+        superpowers=PluginEntry("superpowers@superpowers-marketplace", True, ()),
+        marketplace_source="chris-husse/oh-my-clanker",
+    )
+    remote = p.plugin_repair_argvs(git_facts, source="chris-husse/oh-my-clanker", update=True)
+    argvs = [s.argv for s in remote]
+    assert ["codex", "plugin", "marketplace", "upgrade"] in argvs
+    assert ["codex", "plugin", "remove", "omc@oh-my-clanker"] not in argvs
+
+
+def test_codex_repair_update_of_a_broken_plugin_upgrades_first():
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    p = get_provider("codex")
+    # `omc update` on a machine whose omc plugin is DISABLED (or absent): the
+    # repair path re-adds it, and codex's install root is version-pinned while a
+    # same-source `marketplace add` is a no-op — so without the snapshot upgrade
+    # the CLI is upgraded and the SKILLS are not, reported as "repaired".
+    for facts in (
+        PluginFacts(
+            omc=PluginEntry("omc@oh-my-clanker", False, ("the plugin is disabled",)),
+            superpowers=PluginEntry("superpowers@superpowers-marketplace", True, ()),
+            marketplace_source="chris-husse/oh-my-clanker",
+        ),
+        PluginFacts(superpowers=PluginEntry("superpowers@superpowers-marketplace", True, ())),
+    ):
+        argvs = [
+            s.argv
+            for s in p.plugin_repair_argvs(facts, source="chris-husse/oh-my-clanker", update=True)
+        ]
+        up_at = argvs.index(["codex", "plugin", "marketplace", "upgrade"])
+        add_at = argvs.index(["codex", "plugin", "add", "omc@oh-my-clanker"])
+        assert up_at < add_at
+
+    # And NOT without update: a fresh `omc start` must not pay for the fetch.
+    fresh = p.plugin_repair_argvs(PluginFacts(), source="chris-husse/oh-my-clanker", update=False)
+    assert ["codex", "plugin", "marketplace", "upgrade"] not in [s.argv for s in fresh]
+
+
+def test_codex_repair_reports_omcs_own_action_last():
+    from omc.providers.base import PluginFacts
+
+    p = get_provider("codex")
+    # ensure_plugin's status is the LAST non-empty action, so omc's must come
+    # after superpowers' — a fresh machine that reports "installed superpowers"
+    # reads as though omc's own plugin never installed. Claude plans it the
+    # same way round.
+    steps = p.plugin_repair_argvs(PluginFacts(), source="chris-husse/oh-my-clanker", update=False)
+    assert [s.action for s in steps if s.action] == ["installed superpowers", "installed"]
+
+
+def test_codex_is_local_source_rule_has_one_home():
+    from omc.providers.codex import _is_local_source
+
+    assert _is_local_source("/checkout/omc")
+    assert _is_local_source("./omc")
+    assert _is_local_source("~/src/omc")
+    assert not _is_local_source("chris-husse/oh-my-clanker")
+    assert not _is_local_source("https://github.com/x/omc.git")
+    assert not _is_local_source("git@github.com:x/omc.git")
+
+
+def _codex_healthy_facts(registered):
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    return PluginFacts(
+        omc=PluginEntry("omc@oh-my-clanker", True, ()),
+        superpowers=PluginEntry("superpowers@superpowers-marketplace", True, ()),
+        marketplace_source=registered,
+    )
+
+
+def test_codex_normalised_github_source_is_not_a_conflict():
+    # THE REGRESSION THAT MATTERS MOST: the default GitHub-installed user.
+    # codex stores `owner/repo` as a normalised full git URL (measured 0.153.4),
+    # so a raw != marked EVERY such user as conflicted — removing the
+    # marketplace, re-adding it and reinstalling the plugin on every single
+    # `omc start`, reporting "repaired", silently, forever.
+    p = get_provider("codex")
+    for registered in (
+        "https://github.com/chris-husse/oh-my-clanker.git",
+        "https://github.com/chris-husse/oh-my-clanker",
+        "git@github.com:chris-husse/oh-my-clanker.git",  # SSH form
+        "ssh://git@github.com/chris-husse/oh-my-clanker.git",
+        "chris-husse/oh-my-clanker",  # what marketplace_source() computes
+        "https://github.com/Chris-Husse/Oh-My-Clanker.git",  # case-insensitive
+    ):
+        facts = _codex_healthy_facts(registered)
+        plan = p.plugin_repair_argvs(facts, source="chris-husse/oh-my-clanker", update=False)
+        assert plan == [], f"{registered} was treated as a conflict"
+
+
+def test_codex_genuine_conflict_is_still_detected():
+    # A LOCAL path registered while omc resolves the GitHub repo really is a
+    # different source (local paths are echoed verbatim, so they compare as-is).
+    p = get_provider("codex")
+    facts = _codex_healthy_facts("/old/checkout")
+    steps = p.plugin_repair_argvs(facts, source="chris-husse/oh-my-clanker", update=False)
+    argvs = [s.argv for s in steps]
+    remove_at = argvs.index(["codex", "plugin", "marketplace", "remove", "oh-my-clanker"])
+    add_at = argvs.index(["codex", "plugin", "marketplace", "add", "chris-husse/oh-my-clanker"])
+    # the `or conflict` re-add must still fire: the remove wiped the plugin
+    omc_at = argvs.index(["codex", "plugin", "add", "omc@oh-my-clanker"])
+    assert remove_at < add_at < omc_at
+    # and a DIFFERENT local checkout is a conflict too
+    other = p.plugin_repair_argvs(facts, source="/new/checkout", update=False)
+    assert ["codex", "plugin", "marketplace", "remove", "oh-my-clanker"] in [s.argv for s in other]
+
+
+def test_codex_unknown_marketplace_source_claims_no_conflict():
+    # `root` is a local CACHE path for a git marketplace, never the source, so
+    # parse must NOT fall back to it — that would manufacture a conflict every
+    # start. Absent marketplaceSource = unknown, and unknown claims no conflict:
+    # a false positive churns config silently forever, a false negative costs
+    # one loud `marketplace add` exit 1 with an actionable manual_fix.
+    p = get_provider("codex")
+    mkts = json.dumps(
+        {
+            "marketplaces": [
+                {"name": "oh-my-clanker", "root": "/codex-home/.tmp/marketplaces/oh-my-clanker"}
+            ]
+        }
+    )
+    facts = p.parse_plugin_facts([mkts, _CODEX_INSTALLED])
+    assert facts.marketplace_source is None
+    assert facts.omc is not None  # the plugin itself was still read
+
+    healthy = _codex_healthy_facts(None)
+    plan = p.plugin_repair_argvs(healthy, source="chris-husse/oh-my-clanker", update=False)
+    assert plan == []
+    # a null marketplaceSource is the same "unknown", not a conflict
+    nulled = json.dumps({"marketplaces": [{"name": "oh-my-clanker", "marketplaceSource": None}]})
+    assert p.parse_plugin_facts([nulled, _CODEX_INSTALLED]).marketplace_source is None
+
+
+def test_codex_canonical_source_unifies_the_measured_spellings():
+    from omc.providers.codex import _canonical_source
+
+    forms = [
+        "chris-husse/oh-my-clanker",
+        "https://github.com/chris-husse/oh-my-clanker.git",
+        "https://github.com/chris-husse/oh-my-clanker",
+        "git@github.com:chris-husse/oh-my-clanker.git",
+        "https://github.com/chris-husse/oh-my-clanker.git/",
+    ]
+    assert len({_canonical_source(f) for f in forms}) == 1
+    # local paths are echoed verbatim by codex, so they compare as themselves
+    assert _canonical_source("/checkout/omc") == "/checkout/omc"
+    # a different host is NOT the same repo
+    assert _canonical_source("https://gitlab.com/x/y.git") != _canonical_source("x/y")
+
+
+def test_claude_repair_re_enables_a_disabled_superpowers():
+    # omc's start skill hands off to superpowers, so reporting "ok" over a
+    # disabled one promises a handoff that fails mid-session.
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    p = get_provider("claude")
+    facts = PluginFacts(
+        omc=PluginEntry("omc@oh-my-clanker", True, ()),
+        superpowers=PluginEntry(
+            "superpowers@superpowers-marketplace", False, ("the plugin is disabled",)
+        ),
+    )
+    steps = p.plugin_repair_argvs(facts, source="chris-husse/oh-my-clanker", update=False)
+    argvs = [s.argv for s in steps]
+    # repaired in place by its OWN id — installing the official marketplace's
+    # copy over it would orphan the one the user actually has
+    assert argvs == [["claude", "plugin", "enable", "superpowers@superpowers-marketplace"]]
+    assert steps[0].action == "enabled superpowers"
+    assert steps[0].fatal is True
+    assert "claude plugin enable superpowers@superpowers-marketplace" in steps[0].manual_fix
+
+
+def test_codex_repair_re_enables_a_disabled_superpowers():
+    # codex has no `enable` verb; re-adding an installed plugin re-enables it
+    # (verified live at 0.153.4 against omc@oh-my-clanker: False -> True).
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    p = get_provider("codex")
+    facts = PluginFacts(
+        omc=PluginEntry("omc@oh-my-clanker", True, ()),
+        superpowers=PluginEntry(
+            "superpowers@openai-curated-remote", False, ("the plugin is disabled",)
+        ),
+        marketplace_source="chris-husse/oh-my-clanker",
+    )
+    steps = p.plugin_repair_argvs(facts, source="chris-husse/oh-my-clanker", update=False)
+    # by its OWN id, so a curated-catalog superpowers is not shadowed by obra's
+    assert [s.argv for s in steps] == [
+        ["codex", "plugin", "add", "superpowers@openai-curated-remote"]
+    ]
+    assert steps[0].action == "enabled superpowers"
+    assert not any("marketplace" in a for a in [s.argv for s in steps])
+
+
+def test_a_healthy_superpowers_is_never_touched():
+    # guards the elif: `problems == ()` must not trigger the re-enable branch
+    from omc.providers.base import PluginEntry, PluginFacts
+
+    for name, mkt in (("claude", "chris-husse/oh-my-clanker"), ("codex", None)):
+        facts = PluginFacts(
+            omc=PluginEntry("omc@oh-my-clanker", True, ()),
+            superpowers=PluginEntry("superpowers@anywhere", True, ()),
+            marketplace_source=mkt or "chris-husse/oh-my-clanker",
+        )
+        p = get_provider(name)
+        assert p.plugin_repair_argvs(facts, source="chris-husse/oh-my-clanker", update=False) == []
+
+
+# Captured verbatim from `codex debug models` (codex-cli 0.153.4, 2026-09-10).
+# `visibility` separates the 5 selectable models from 2 internal ones.
+_CODEX_CATALOG = json.dumps(
+    {
+        "models": [
+            {"slug": "gpt-5.6-sol", "visibility": "list", "priority": 2},
+            {"slug": "gpt-reserve", "visibility": "hide", "priority": 1},
+            {"slug": "gpt-6-astra", "visibility": "list", "priority": 1},
+            {"slug": "codex-auto-review", "visibility": "hide", "priority": 9},
+            {"slug": "gpt-5.5", "visibility": "list"},
+        ]
+    }
+)
+
+
+def test_codex_model_catalog_argv_and_parse():
+    p = get_provider("codex")
+    assert p.model_catalog_argv() == ["codex", "debug", "models"]
+    # hidden models dropped, listable ordered by priority, missing priority last
+    assert p.parse_model_catalog(_CODEX_CATALOG) == ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.5"]
+
+
+def test_codex_model_catalog_parse_raises_on_garbage():
+    # known_models() relies on this raising so it can fall back to models()
+    p = get_provider("codex")
+    for bad in ("", "not json", "{}"):
+        with pytest.raises((ValueError, KeyError, TypeError)):
+            p.parse_model_catalog(bad)
+
+
+def test_claude_and_opencode_have_no_catalog_command():
+    # claude's aliases are resolved by its own binary, so a catalog probe would
+    # buy nothing; opencode has no verified surface.
+    for name in ("claude", "opencode"):
+        assert get_provider(name).model_catalog_argv() == []
+        assert get_provider(name).parse_model_catalog("{}") == []
+
+
+def test_codex_explains_an_unknown_model():
+    # codex does NOT reject a bad slug: it warns, then returns a generic 400
+    # blaming "organization or application policy". The warning is the only
+    # honest signal, so it must be what the user is shown.
+    p = get_provider("codex")
+    output = (
+        "model: astra\n"
+        "warning: Model metadata for `astra` not found. Defaulting to fallback "
+        "metadata; this can degrade performance and cause issues.\n"
+        'ERROR: {"type": "error", "status": 400, "error": {"type": '
+        '"invalid_request_error", "message": "Sorry, your request could not be '
+        'completed. This may be due to an organization or application policy"}}'
+    )
+    msg = p.explain_failure(output)
+    assert msg is not None
+    assert "'astra'" in msg
+    assert "omc configure" in msg
+
+
+def test_explain_failure_is_silent_on_unknown_shapes():
+    # a real outage must NOT be mislabelled as a bad model id
+    outage = 'ERROR: {"status": 500, "error": {"message": "internal"}}'
+    for name in provider_names():
+        assert get_provider(name).explain_failure(outage) is None
+        assert get_provider(name).explain_failure("") is None

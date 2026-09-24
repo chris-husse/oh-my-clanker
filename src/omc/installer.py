@@ -8,9 +8,8 @@ from pathlib import Path
 
 from .config import store
 from .errors import OmcError
-from .plugin import ensure_plugin, marketplace_source
+from .plugin import ensure_plugin
 from .probe import require_tools
-from .providers.registry import get_provider
 from .toolctx import ToolContext
 
 _UV_MISSING = (
@@ -68,54 +67,37 @@ def run_update(ctx: ToolContext) -> int:
     if cfg is not None:
         require_tools(ctx, cfg)  # git/wt/provider — raises OmcError on a miss
     # Managed dependencies (GitNexus). Module-attribute import so tests can
-    # monkeypatch omc.gitnexus.update_gitnexus; a failure here must fail the
-    # command (unlike the best-effort plugin loop below).
+    # monkeypatch omc.gitnexus.update_gitnexus. A failure here fails the
+    # command, same as a plugin failure below — the difference is that this one
+    # returns early, while the plugin loop finishes every provider first.
     from . import gitnexus
 
     dep_rc = gitnexus.update_gitnexus(ctx)
     if cfg is None:
         print("· no config — skipping plugin updates (run `omc configure`)", file=sys.stderr)
         return dep_rc
-    source = marketplace_source(ctx.env)
+    plugin_rc = 0
     for name in cfg.llm.providers:
-        if name == "claude":
-            # Install when missing, reinstall when Claude refuses to load it,
-            # refresh when healthy — a plain `plugin update` fails on a plugin
-            # that was never installed, which is how first-runs stayed broken.
-            try:
-                status = ensure_plugin(ctx, name, update=True)
-            except OmcError as exc:
-                print(f"✗ {name}: {exc} — continuing", file=sys.stderr)
-                continue
-            print(f"✓ {name}: omc plugin {status}", file=sys.stderr)
-            continue
+        # No provider-name branching: ensure_plugin installs when missing,
+        # repairs when the harness refuses to load it, and refreshes when
+        # healthy. Providers with no scriptable probe report "unverified".
         try:
-            argvs = get_provider(name).plugin_update_argvs(source)
+            status = ensure_plugin(ctx, name, update=True)
         except OmcError as exc:
+            # Best-effort applies to the LOOP, not the command: one broken
+            # harness must never stop the others from being updated, but the
+            # command must not then report success. `omc update` exiting 0
+            # after leaving a plugin uninstalled is how codex's local-source
+            # refresh window (remove, then a failed re-add when the checkout
+            # has moved) stayed invisible.
             print(f"✗ {name}: {exc} — continuing", file=sys.stderr)
+            plugin_rc = 1
             continue
-        if not argvs:
-            print(f"· {name}: no scriptable plugin update yet — update it in-app", file=sys.stderr)
-            continue
-        ok = True
-        for i, argv in enumerate(argvs):
-            is_last = i == len(argvs) - 1
-            try:
-                cp = ctx.run(argv)
-            except OSError as exc:
-                print(f"✗ {name}: {argv[0]} not runnable ({exc}) — continuing", file=sys.stderr)
-                ok = False
-                break
-            if cp.returncode != 0 and is_last:
-                detail = (cp.stderr or cp.stdout or "").strip()[:200]
-                print(f"✗ {name}: {' '.join(argv)} failed: {detail} — continuing", file=sys.stderr)
-                ok = False
-                break
-            # non-last (marketplace add/update) failures are benign self-heal
-            # steps — never abort the sequence or mark failure.
-        if ok:
-            print(f"✓ {name}: plugin updated", file=sys.stderr)
-    return dep_rc
+        # The "unverified" prefix is ensure_plugin's display contract (same
+        # rendering as configure.py): nothing was checked, so not a "✓".
+        mark = "·" if status.startswith("unverified") else "✓"
+        print(f"{mark} {name}: omc plugin {status}", file=sys.stderr)
+    return dep_rc or plugin_rc
 
 
 def _is_unsafe_home(home: Path, env) -> bool:

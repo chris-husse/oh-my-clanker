@@ -45,6 +45,12 @@ def test_codex_plugin_manifest():
     data = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text())
     assert data["name"] == "omc"
     assert data["skills"] == "./skills/"
+    # `hooks` is required by codex's manifest schema (an empty object is the
+    # "no hooks" spelling); the version is pinned by test_all_version_strings_agree.
+    assert data["hooks"] == {}
+    # longDescription is what codex's plugin browser shows — a spec'd
+    # deliverable, and nothing else in the suite would notice it going away.
+    assert "worktree" in data["interface"]["longDescription"]
 
 
 def test_opencode_entry_registers_skills_dir():
