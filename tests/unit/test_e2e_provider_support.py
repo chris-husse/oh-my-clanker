@@ -73,6 +73,7 @@ def test_docker_provider_install_invokes_only_supported_packages(tmp_path):
         env={
             "PATH": str(tmp_path),
             "CODEX_VERSION": "test-version",
+            "CLAUDE_VERSION": "claude-test-version",
             "OMC_NPM_ARGS": str(calls),
         },
         check=True,
@@ -80,7 +81,7 @@ def test_docker_provider_install_invokes_only_supported_packages(tmp_path):
     assert calls.read_text().splitlines() == [
         "install",
         "-g",
-        "@anthropic-ai/claude-code",
+        "@anthropic-ai/claude-code@claude-test-version",
         "@openai/codex@test-version",
     ]
 
