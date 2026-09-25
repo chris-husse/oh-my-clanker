@@ -10,6 +10,18 @@ from ._stubs import HEALTHY_PLUGINS, make_claude_stub, stub_env
 
 OMC = {"id": "omc@oh-my-clanker"}
 SUPERPOWERS = {"id": "superpowers@claude-plugins-official"}
+STALE_MARKETPLACE = {
+    "name": "oh-my-clanker",
+    "source": "directory",
+    "path": "/deleted/worktree",
+    "installLocation": "/deleted/worktree",
+}
+REMOTE_MARKETPLACE = {
+    "name": "oh-my-clanker",
+    "source": "github",
+    "repo": "chris-husse/oh-my-clanker",
+    "installLocation": "/cache/oh-my-clanker",
+}
 DEP_ERROR = (
     'Dependency "superpowers@superpowers-marketplace" is not installed — run '
     "`claude plugin install superpowers@superpowers-marketplace`, or check that "
@@ -166,3 +178,136 @@ def test_marketplace_source_forms(tmp_path):
     assert marketplace_source(base) == "x/omc"
 
     assert marketplace_source({"HOME": str(tmp_path)}) == "chris-husse/oh-my-clanker"
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_update_replaces_stale_marketplace_source(tmp_path, broken):
+    omc = {**OMC, "errors": ["Marketplace failed to load: cache-miss"]} if broken else OMC
+    ctx, calls = _ctx(tmp_path, plugins=[omc, SUPERPOWERS], marketplaces=[STALE_MARKETPLACE])
+    assert ensure_plugin(ctx, "claude", update=True) == ("repaired" if broken else "updated")
+    entries = json.loads((tmp_path / "bin" / "claude.marketplaces.json").read_text())
+    assert entries == [REMOTE_MARKETPLACE]
+    assert "errors" not in _state(tmp_path)["omc@oh-my-clanker"]
+    lines = calls.read_text().splitlines()
+    assert lines.index("isolated plugin install omc@oh-my-clanker --scope user") < lines.index(
+        "plugin marketplace remove oh-my-clanker --scope user"
+    )
+    assert "plugin install omc@oh-my-clanker --scope user" in lines
+
+
+@pytest.mark.parametrize("failure", ["add", "update"])
+def test_marketplace_failure_does_not_uninstall_plugin(tmp_path, failure):
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=[{**OMC, "errors": [DEP_ERROR]}, SUPERPOWERS],
+        marketplaces=[STALE_MARKETPLACE if failure == "add" else REMOTE_MARKETPLACE],
+        marketplace_failures={failure: "network unavailable"},
+    )
+    before = _state(tmp_path)
+    with pytest.raises(OmcError, match="network unavailable"):
+        ensure_plugin(ctx, "claude", update=True)
+    assert _state(tmp_path) == before
+    lines = calls.read_text().splitlines()
+    assert "plugin uninstall omc@oh-my-clanker" not in lines
+    assert "plugin marketplace remove oh-my-clanker --scope user" not in lines
+
+
+def test_missing_omc_in_replacement_does_not_remove_existing_marketplace(tmp_path):
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=[OMC, SUPERPOWERS],
+        marketplaces=[STALE_MARKETPLACE],
+        available_omc=False,
+    )
+    with pytest.raises(OmcError, match="omc"):
+        ensure_plugin(ctx, "claude", update=True)
+    assert (
+        "plugin marketplace remove oh-my-clanker --scope user" not in calls.read_text().splitlines()
+    )
+    assert json.loads((tmp_path / "bin" / "claude.marketplaces.json").read_text()) == [
+        STALE_MARKETPLACE
+    ]
+
+
+def test_source_replacement_does_not_refresh_again_after_destructive_remove(tmp_path):
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=[OMC, SUPERPOWERS],
+        marketplaces=[STALE_MARKETPLACE],
+        marketplace_failures={"update": "network unavailable"},
+    )
+    assert ensure_plugin(ctx, "claude", update=True) == "updated"
+    assert "omc@oh-my-clanker" in _state(tmp_path)
+    assert "plugin marketplace update oh-my-clanker" not in calls.read_text().splitlines()
+
+
+@pytest.mark.parametrize("settings_name", ["settings.json", "settings.local.json"])
+def test_project_marketplace_conflict_preserves_user_registration(tmp_path, settings_name):
+    from ._stubs import make_stub
+
+    ctx, calls = _ctx(tmp_path, plugins=[OMC, SUPERPOWERS], marketplaces=[STALE_MARKETPLACE])
+    project = tmp_path / "project"
+    settings = project / ".claude" / settings_name
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps(
+            {
+                "extraKnownMarketplaces": {
+                    "oh-my-clanker": {
+                        "source": {"source": "directory", "path": "/deleted/worktree"}
+                    },
+                }
+            }
+        )
+    )
+    make_stub(tmp_path / "bin", "git", stdout=str(project))
+    before = _state(tmp_path)
+    with pytest.raises(OmcError, match="project.*marketplace"):
+        ensure_plugin(ctx, "claude", update=True)
+    assert _state(tmp_path) == before
+    assert (
+        "plugin marketplace remove oh-my-clanker --scope user" not in calls.read_text().splitlines()
+    )
+    assert json.loads((tmp_path / "bin" / "claude.marketplaces.json").read_text()) == [
+        STALE_MARKETPLACE
+    ]
+
+
+def test_matching_local_declaration_overrides_shared_project_source(tmp_path):
+    from ._stubs import make_stub
+
+    ctx, _ = _ctx(tmp_path, plugins=[OMC, SUPERPOWERS], marketplaces=[STALE_MARKETPLACE])
+    project = tmp_path / "project"
+    config = project / ".claude"
+    config.mkdir(parents=True)
+    for name, source in (
+        ("settings.json", {"source": "directory", "path": "/deleted/worktree"}),
+        ("settings.local.json", {"source": "github", "repo": "chris-husse/oh-my-clanker"}),
+    ):
+        (config / name).write_text(
+            json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "oh-my-clanker": {"source": source},
+                    }
+                }
+            )
+        )
+    make_stub(tmp_path / "bin", "git", stdout=str(project))
+    assert ensure_plugin(ctx, "claude", update=True) == "updated"
+
+
+def test_replacement_plugin_install_failure_preserves_existing_plugin(tmp_path):
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=[OMC, SUPERPOWERS],
+        marketplaces=[STALE_MARKETPLACE],
+        install_rc=1,
+    )
+    before = _state(tmp_path)
+    with pytest.raises(OmcError, match="install failed"):
+        ensure_plugin(ctx, "claude", update=True)
+    assert _state(tmp_path) == before
+    assert (
+        "plugin marketplace remove oh-my-clanker --scope user" not in calls.read_text().splitlines()
+    )

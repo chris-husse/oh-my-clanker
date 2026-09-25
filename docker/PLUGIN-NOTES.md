@@ -1,3 +1,88 @@
+## Claude marketplace source repair (2026-09-25)
+
+Claude 2.1.281 rejects adding `chris-husse/oh-my-clanker` when settings
+already declare the `oh-my-clanker` marketplace as a local directory. The
+error says its network source differs from the source declared in settings.
+Claude 2.1.212 allowed the same replacement. The E2E image now pins Claude
+2.1.281 so cached installations of the older CLI cannot hide this behavior.
+
+The old repair ignored failed add/update commands, uninstalled OMC, and then
+failed to reinstall from a deleted worktree. An unavailable replacement could
+also be reported as a successful update of the old source. Both failures were
+reproduced before the production change using the real Claude CLI in Docker.
+
+Repair now probes the registered source. Before replacing it, OMC uses a
+temporary `CLAUDE_CONFIG_DIR` in the caller's project context to register the
+desired marketplace, verify OMC is offered, install it, and check that it loads.
+Only then does it remove the
+old user-scoped registration (which also uninstalls its plugins), register
+the intended source, and reinstall OMC. Existing-source refresh failures stop
+before plugin removal. A fresh replacement is not fetched again by a redundant
+update between removal and reinstall. Each command failure is reported; the
+CLI still continues to update other configured providers as before.
+
+This is a validated sequence of Claude CLI operations, not an atomic
+transaction. A failure after the live registration has been removed can still
+require manual recovery. OMC neither edits Claude's internal registry files nor
+changes project marketplace declarations.
+
+`tests/e2e/test_e2e_marketplace_repair.py` covers deleted-worktree replacement
+with a directory or GitHub source, unavailable replacement preservation, and
+conflicting project declarations. These scenarios need Docker and network
+access for public plugins, but no model calls or account credentials.
+
+The first regression run on the old repair had two failures (GitHub source
+replacement and unavailable-source detection) and one passing directory
+transition. The initial repaired run passed all three. A separate unit
+regression exposed the redundant post-removal update and passed after its
+removal. A tightened project-declaration test then exposed a preflight that
+incorrectly excluded the caller's project settings: registration changed before
+the conflict was reported. Retaining cwd alone did not fix it with a fresh
+Claude config. OMC now checks the project's `settings.json` and
+`settings.local.json` declarations explicitly before replacement, reporting
+conflicts without editing either the project settings or user registration.
+Final verification on source `69d739533c18a5ebbda0ab821f6718baded810d7`
+(before this evidence-only documentation edit) passed all **60 regular E2Es**,
+including all ten live lifecycle cases, all four marketplace regressions, and
+all four smoke cases. There was no single uninterrupted all-green invocation.
+The initial command was `CODEX_AUTH_VOLUME=omc-e2e-codex-auth just e2e-tests
+tests/e2e -vv --durations=20
+--junitxml=/tmp/omc-marketplace-release-e2e.xml`; subsequent runs selected only
+cases without passing evidence. Every run used the default fresh-checkout
+image, with no prebuilt override. The separate `expensive` whole-project wiki
+generation tier was not selected; the regular small-fixture wiki test passed.
+
+| Fresh image SHA-256 | Passing cases | Local JUnit under `/tmp/` |
+| --- | ---: | --- |
+| `b2225a86d2eb576a8023419e07a7286ea400ee9f60934d79a21278cf8af39627` | 16 | `omc-marketplace-release-e2e.xml` |
+| `76818bfc793fe9533eae6882dacb80e98bf1d44c920dd881cede0e76046d6298` | 5 | `omc-marketplace-lifecycle-part1.xml` |
+| `83026e324bbbcb338eb8e036c24157a984a6446a8d3fb5a8b2b3d6faf2fe390d` | 32 | `omc-marketplace-other-rest.xml` |
+| `8b30e704fda8c792b465e59b9bf6bb293f946231ea0c4ea407f8f70a4e88fd71` | 7 | `omc-marketplace-codex-rest.xml` |
+
+The selected node IDs are recorded in
+`/tmp/omc-marketplace-{remaining,other,codex}-cases.txt`; the aggregate
+`/tmp/omc-marketplace-coverage.json` maps every collected regular case to a
+passing run. The resumed commands used `just e2e-tests <selected-node-ids>
+-p omc_probe_plugin -vv --maxfail=1 --durations=20 --junitxml=<report>`.
+The temporary diagnostic plugin only printed sanitized conversation events
+when a turn failed; it did not alter provider behavior. CLI versions were
+Claude 2.1.281 and Codex 0.156.1; lifecycle actors/judges used Claude
+`claude-fable-5-1` and Codex `gpt-6-astra`.
+
+Earlier unsuccessful runs remain part of the evidence: Codex capability once
+stalled at the disposable folder-trust prompt before a session started. Stopping
+that run interrupted native skill submission, whose cleanup timeout masked
+the interrupt. Both cases subsequently passed unchanged. Two resumed setups
+encountered the account lock held by another worktree's E2E run; remaining
+Claude cases ran first, then all Codex cases passed after the account was free.
+A diagnostic attempt using an image already removed by testcontainers failed
+at setup. No product or harness change was made to hide those failures.
+
+The final unit gate passed 693 tests and the build passed format, lint, sdist,
+and wheel checks. An earlier unchanged PTY child-cleanup unit test failed once;
+its isolated rerun and the final full unit suite passed. That intermittent
+cleanup behavior and the one folder-trust stall were not claimed fixed here.
+
 > **Conversational lifecycle E2E (2026-09-24):**
 > `tests/e2e/test_e2e_lifecycle.py` exercises the real `omc start` launch and
 > persistent provider conversations. Codex uses a container-local PTY server

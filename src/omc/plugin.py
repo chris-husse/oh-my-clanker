@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from .errors import OmcError
 from .installsrc import install_source
-from .providers.registry import get_provider
 from .toolctx import ToolContext
+from .wtconfig import repo_root
 
 PLUGIN_REF = "omc@oh-my-clanker"
 MARKETPLACE_NAME = "oh-my-clanker"
@@ -105,6 +108,114 @@ def _install(ctx: ToolContext, ref: str, *, manual_fix: str) -> None:
         )
 
 
+def _checked(ctx: ToolContext, argv: list[str]) -> str:
+    try:
+        cp = ctx.run(argv)
+    except OSError as exc:
+        raise OmcError(f"could not run `{shlex.join(argv)}`: {exc}") from exc
+    if cp.returncode:
+        detail = (cp.stderr or cp.stdout or "").strip()
+        raise OmcError(f"`{shlex.join(argv)}` failed (exit {cp.returncode}): {detail}")
+    return cp.stdout or ""
+
+
+def _claude_json(ctx: ToolContext, argv: list[str]):
+    output = _checked(ctx, argv)
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise OmcError(f"could not parse `{shlex.join(argv)}` output as JSON") from exc
+
+
+def _available(ctx: ToolContext) -> None:
+    data = _claude_json(ctx, ["claude", "plugin", "list", "--available", "--json"])
+    available = data.get("available") if isinstance(data, dict) else None
+    if not isinstance(available, list) or not any(
+        isinstance(p, dict) and p.get("pluginId") == PLUGIN_REF for p in available
+    ):
+        raise OmcError(f"refusing plugin replacement: marketplace does not offer {PLUGIN_REF}")
+
+
+def _source_matches(entry: dict, source: str) -> bool:
+    if entry.get("source") == "directory" and source.startswith("/"):
+        return Path(str(entry.get("path", ""))).resolve() == Path(source).resolve()
+    return entry.get("source") == "github" and entry.get("repo") == source
+
+
+def _check_project_source(ctx: ToolContext, source: str) -> None:
+    root = repo_root(ctx)
+    if root is None:
+        return
+    declaration = None
+    for name in ("settings.json", "settings.local.json"):
+        path = Path(root) / ".claude" / name
+        try:
+            settings = json.loads(path.read_text())
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            raise OmcError(f"cannot inspect project marketplace settings at {path}: {exc}") from exc
+        declarations = (
+            settings.get("extraKnownMarketplaces", {}) if isinstance(settings, dict) else {}
+        )
+        entry = declarations.get(MARKETPLACE_NAME) if isinstance(declarations, dict) else None
+        if entry is not None:
+            declaration = (path, entry.get("source") if isinstance(entry, dict) else None)
+    if declaration is not None:
+        path, declared = declaration
+        if not isinstance(declared, dict) or not _source_matches(declared, source):
+            raise OmcError(
+                f"project marketplace declaration in {path} conflicts with {source}; "
+                "update that declaration before replacing the user marketplace"
+            )
+
+
+def _prepare_marketplace(ctx: ToolContext, source: str) -> bool:
+    """Refresh the intended source; return whether removal also removed plugins.
+
+    Claude 2.1.281 rejects `add` when settings declare a different source.
+    `marketplace remove` also UNINSTALLS its plugins, so prove the replacement
+    can be fetched and installed in a disposable config before doing that.
+    Never edit Claude's registry/settings files ourselves.
+    """
+    prefix = ["claude", "plugin", "marketplace"]
+    entries = _claude_json(ctx, [*prefix, "list", "--json"])
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        raise OmcError("unexpected `claude plugin marketplace list --json` output")
+    current = next((e for e in entries if e.get("name") == MARKETPLACE_NAME), None)
+    replaced = current is not None and not _source_matches(current, source)
+    if replaced:
+        _say(f"validating replacement marketplace from {source}…")
+        with TemporaryDirectory(prefix="omc-marketplace-") as scratch:
+            # Isolate user settings/cache, but retain cwd: project declarations
+            # must constrain the preflight just as they constrain the live add.
+            probe = ToolContext.from_env({**ctx.child_env(), "CLAUDE_CONFIG_DIR": scratch})
+            _checked(probe, [*prefix, "add", source])
+            _available(probe)
+            _checked(
+                probe,
+                ["claude", "plugin", "install", PLUGIN_REF, "--scope", "user"],
+            )
+            plugins = _claude_json(probe, ["claude", "plugin", "list", "--json"])
+            plugin = _find(plugins, "omc") if isinstance(plugins, list) else None
+            if plugin is None or _problems(plugin):
+                raise OmcError("replacement omc plugin failed its isolated load check")
+        _say("replacing the stale oh-my-clanker marketplace registration…")
+        _checked(ctx, [*prefix, "remove", MARKETPLACE_NAME, "--scope", "user"])
+    if current is None or replaced:
+        _checked(ctx, [*prefix, "add", source])
+        actual = _claude_json(ctx, [*prefix, "list", "--json"])
+        if not isinstance(actual, list) or not any(
+            isinstance(e, dict) and e.get("name") == MARKETPLACE_NAME and _source_matches(e, source)
+            for e in actual
+        ):
+            raise OmcError("oh-my-clanker marketplace still points at a different source")
+    if not replaced:
+        _checked(ctx, [*prefix, "update", MARKETPLACE_NAME])
+    _available(ctx)
+    return replaced
+
+
 def ensure_plugin(
     ctx: ToolContext, provider: str, *, check_only: bool = False, update: bool = False
 ) -> str:
@@ -139,7 +250,12 @@ def ensure_plugin(
         return "ok"
 
     source = marketplace_source(ctx.env)
-    omc_fix = f"claude plugin marketplace add {source} && claude plugin install {PLUGIN_REF}"
+    if omc is None or omc_problems or update:
+        _check_project_source(ctx, source)
+    omc_fix = (
+        f"claude plugin marketplace add {shlex.quote(source)} && "
+        f"claude plugin install {PLUGIN_REF} --scope user"
+    )
     actions: list[str] = []
 
     if superpowers is None:
@@ -156,11 +272,19 @@ def ensure_plugin(
         )
         actions.append("installed superpowers")
 
+    replaced = False
+    if omc is None or omc_problems or update:
+        try:
+            replaced = _prepare_marketplace(ctx, source)
+        except OmcError as exc:
+            raise OmcError(
+                f"{exc}\n  if the old marketplace is still registered, remove it first: "
+                f"claude plugin marketplace remove {MARKETPLACE_NAME} --scope user\n"
+                f"  fix manually: {omc_fix}"
+            ) from exc
+
     if omc is None:
         _say(f"installing the omc plugin from {source}…")
-        # The marketplace may already be registered from an earlier attempt —
-        # a failed add is fine as long as the install below succeeds.
-        ctx.run(["claude", "plugin", "marketplace", "add", source])
         _install(ctx, PLUGIN_REF, manual_fix=omc_fix)
         actions.append("installed")
     elif omc_problems:
@@ -168,22 +292,15 @@ def ensure_plugin(
             f"the omc plugin is installed but failed to load ({omc_problems[0]}) "
             f"— reinstalling from {source}…"
         )
-        # Refresh the marketplace snapshot first so the reinstall picks up a
-        # fixed manifest; add/update/uninstall are best-effort self-heal steps.
-        ctx.run(["claude", "plugin", "marketplace", "add", source])
-        ctx.run(["claude", "plugin", "marketplace", "update", MARKETPLACE_NAME])
-        ctx.run(["claude", "plugin", "uninstall", PLUGIN_REF])
+        if not replaced:
+            _checked(ctx, ["claude", "plugin", "uninstall", PLUGIN_REF])
         _install(ctx, PLUGIN_REF, manual_fix=omc_fix)
         actions.append("repaired")
     elif update:
-        argvs = get_provider("claude").plugin_update_argvs(source)
-        for i, argv in enumerate(argvs):
-            cp = ctx.run(argv)
-            # Non-last (marketplace add/update) failures are benign self-heal
-            # steps; only the final `plugin update` decides.
-            if cp.returncode != 0 and i == len(argvs) - 1:
-                detail = (cp.stderr or cp.stdout or "").strip()[:200]
-                raise OmcError(f"`{' '.join(argv)}` failed: {detail}")
+        if replaced:
+            _install(ctx, PLUGIN_REF, manual_fix=omc_fix)
+        else:
+            _checked(ctx, ["claude", "plugin", "update", PLUGIN_REF])
         actions.append("updated")
 
     if not actions:
