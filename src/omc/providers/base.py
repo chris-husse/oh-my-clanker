@@ -64,7 +64,7 @@ class Provider(ABC):
         allowed_tools: list[str] | None = None,
     ) -> list[str]:
         """Like headless_argv, but for LIVE streaming consumption. Default:
-        same argv — codex/opencode already emit incremental text. Providers
+        same argv — codex already emits incremental text. Providers
         that buffer their print mode (claude) override with a streaming
         output format."""
         return self.headless_argv(prompt, model=model, allowed_tools=allowed_tools)
@@ -88,7 +88,7 @@ class Provider(ABC):
         """Model for documentation/wiki runs when docs_model is unconfigured.
 
         The standard-coding-tier floor. "" = pass no model flag and let the
-        provider CLI use its own default coding model (codex/opencode ids are
+        provider CLI use its own default coding model (codex ids are
         free-text and move fast — pinning one here would rot)."""
         return ""
 

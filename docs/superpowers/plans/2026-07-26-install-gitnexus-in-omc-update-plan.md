@@ -25,7 +25,7 @@
 - Modify `src/omc/watch.py` — prerequisite gate replaces the hard error. (Task 3)
 - Modify `src/omc/start.py` — `ensure_gitnexus` after `require_tools`, skipped on `--dry-run`. (Task 4)
 - Modify `src/omc/installer.py` — config load up front, `require_tools`, pass `marketplace_source`, best-effort marketplace steps. (Task 5, Task 6)
-- Modify `src/omc/providers/{base,claude,codex,opencode}.py` — `plugin_update_argvs(self, marketplace_source=None)`. (Task 6)
+- Modify `src/omc/providers/{base,claude,codex}.py` — `plugin_update_argvs(self, marketplace_source=None)`. (Task 6)
 - Modify `src/omc/dependency.py` — stale hint. (Task 7)
 - Rewrite `skills/gitnexus-ensure/SKILL.md` — thin wrapper. (Task 7)
 - Tests: `tests/unit/test_gitnexus_update.py`, `test_internal.py`, `test_watch.py`, `test_start.py`, `test_installer.py`, `test_providers.py`.
@@ -762,7 +762,7 @@ git commit -m "feat(update): require git/wt/provider, then install-or-update Git
 **Model:** standard coding tier.
 
 **Files:**
-- Modify: `src/omc/providers/base.py:95`, `src/omc/providers/claude.py:108`, `src/omc/providers/codex.py:47`, `src/omc/providers/opencode.py:58`
+- Modify: `src/omc/providers/base.py:95`, `src/omc/providers/claude.py:108`, `src/omc/providers/codex.py:47`
 - Modify: `src/omc/installer.py` (plugin loop)
 - Test: `tests/unit/test_providers.py`, `tests/unit/test_installer.py`
 
@@ -846,7 +846,7 @@ Expected: the new provider tests FAIL (`plugin_update_argvs` takes no arg yet); 
         return argvs
 ```
 
-`src/omc/providers/codex.py:47` and `src/omc/providers/opencode.py:58`: add the parameter, ignore it:
+`src/omc/providers/codex.py:47`: add the parameter, ignore it:
 
 ```python
     def plugin_update_argvs(self, marketplace_source: str | None = None):
@@ -1013,6 +1013,6 @@ git commit -m "chore: verification pass — lint/type/test green"
 ## Self-review notes
 
 - **Spec coverage:** ensure_gitnexus (Task 1); internal verb (Task 2); watch gate (Task 3); start gate (Task 4); update require_tools + install-or-update (Task 5); marketplace self-heal (Task 6); skill wrapper + hints (Task 7); E2E untouched (Task 8 Step 4).
-- **Type consistency:** `ensure_gitnexus(ctx, *, approved_origin=...)` and `_clone_if_missing(ctx, root, approved_origin)` / `_build(ctx, root)` signatures are consistent across Tasks 1–4. `plugin_update_argvs(self, marketplace_source=None)` is uniform across base/claude/codex/opencode (Task 6). `require_tools(ctx, cfg: Config | GlobalConfig)` widened in Task 5.
+- **Type consistency:** `ensure_gitnexus(ctx, *, approved_origin=...)` and `_clone_if_missing(ctx, root, approved_origin)` / `_build(ctx, root)` signatures are consistent across Tasks 1–4. `plugin_update_argvs(self, marketplace_source=None)` is uniform across base/claude/codex (Task 6). `require_tools(ctx, cfg: Config | GlobalConfig)` widened in Task 5.
 - **Ordering interaction (Task 5):** `require_tools` runs before `update_gitnexus`; a missing `wt` aborts update before GitNexus installs — this is the user-confirmed require_tools-first behavior. The autouse `_no_real_gitnexus` fixture keeps installer tests network-free.
 ```

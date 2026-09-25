@@ -47,9 +47,10 @@ def test_codex_plugin_manifest():
     assert data["skills"] == "./skills/"
 
 
-def test_opencode_entry_registers_skills_dir():
-    js = (ROOT / ".opencode" / "plugins" / "omc.js").read_text()
-    assert "skills" in js and "config" in js
+def test_distributed_plugin_payloads_match_supported_providers():
+    payloads = {path.parent.name for path in ROOT.glob(".*-plugin/plugin.json")}
+    payloads.update(path.parents[1].name for path in ROOT.glob(".*/plugins/*.js"))
+    assert payloads == {".claude-plugin", ".codex-plugin"}
 
 
 USER_FACING_SKILLS = (
@@ -242,12 +243,13 @@ def test_plan_skill_contract():
 
 def test_implement_skill_contract():
     text = (ROOT / "skills" / "implement" / "SKILL.md").read_text()
+    # Lifecycle tests cover direct implementation authority and continuation;
+    # this manifest check must not require the old existing-spec approval gate.
     for needle in (
         "`spec`",
         "writing-plans",
         "subagent-driven-development",
         "finish",
-        "silently resume",
         "/omc:explain",
         "model-tier policy",
         "`Model:`",

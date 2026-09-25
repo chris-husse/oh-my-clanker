@@ -188,7 +188,7 @@ mirroring `ensure_plugin` (`src/omc/plugin.py:58-63`):
   `plugin_update_argvs(self, marketplace_source: str | None = None)`
   (`src/omc/providers/base.py:95`). Claude prepends
   `["claude", "plugin", "marketplace", "add", marketplace_source]` to today's
-  two argvs; codex/opencode ignore the parameter (unchanged behavior).
+  two argvs; codex ignores the parameter (unchanged behavior).
 - In `run_update`, compute `source = marketplace_source(ctx.env)`
   (already in `src/omc/plugin.py:25`) and pass it to `plugin_update_argvs`.
 - The `marketplace add` step is **best-effort**: a re-add of an
@@ -277,7 +277,7 @@ installed.
     old hard error, and does both **before** acquiring the watch mutex — a test
     asserts no lock is left when a prerequisite fails.
 - **Provider unit tests**: `plugin_update_argvs(source)` for claude includes the
-  `marketplace add`; codex/opencode ignore the argument (unchanged output).
+  `marketplace add`; codex ignores the argument (unchanged output).
 - **Docker E2E unchanged**: `docker/Dockerfile.e2e:58-70` already prebakes the
   clone+build, so `ensure_gitnexus` finds it healthy and no-ops — no image
   change.
@@ -286,5 +286,5 @@ installed.
 
 - Reworking the cross-marketplace superpowers dependency documented in
   `docker/PLUGIN-NOTES.md` — untouched.
-- Any change to codex/opencode plugin install/update behavior beyond accepting
+- Any change to codex plugin install/update behavior beyond accepting
   (and ignoring) the new `marketplace_source` argument.

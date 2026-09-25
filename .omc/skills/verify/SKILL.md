@@ -1,21 +1,37 @@
 ---
 name: verify
-description: omc's own verify stage - the Docker smoke suite (container harness, no LLM tokens needed).
+description: omc's Docker smoke suite, plus live lifecycle coverage for workflow/provider changes.
 ---
 
 # verify (this repo)
 
-Run:
+Run the token-free container smoke suite for every verify stage:
 
 ```sh
 just e2e-tests tests/e2e/test_e2e_smoke.py
 ```
 
-Passing means: exit code 0 (all smoke tests green — container toolchain,
-configure gate, install re-root, wt wiring). Requires Docker; the first run
-builds the E2E image and can take minutes — that is normal, not a hang. Any
-failing test means the stage FAILED; include the failing output in your
-summary.
+When the change affects `omc start` or provider launch, start/plan/implement/
+finish workflow skills, provider plugin setup, or conversation turn handling,
+require passing live evidence for every Codex and Claude lifecycle case on a
+fresh checkout image. Run the matrix serially on a trusted local machine or
+private runner when that evidence is missing:
 
-(The full live matrix — `just e2e-tests` — needs provider tokens in `.env`
-and real money; it is NOT part of this stage.)
+```sh
+CODEX_AUTH_VOLUME=omc-e2e-codex-auth just lifecycle-tests
+```
+
+The account volume needs a prior `just codex-login` (or the documented
+separate-home browser fallback); Claude needs `CLAUDE_CODE_OAUTH_TOKEN` or
+`ANTHROPIC_API_KEY` in the gitignored `.env`. Do not use a public CI runner or
+publish credentials. Use the default checkout image: unset
+`OMC_E2E_PREBUILT_IMAGE` and `OMC_E2E_PREBUILT_SOURCE`. These tests make real
+model calls and can take over an hour. A selected provider with unavailable
+auth fails rather than disappearing from the matrix. Cite exact source/image,
+model, command, and case results when using already-recorded evidence; split
+runs count only when each case passed against the same workflow/provider source
+and any failed or stopped run is disclosed. Changes limited to documentation,
+command selection, or evidence filenames do not require repeating successful
+model calls. The smoke command must exit 0, and any failing selected lifecycle
+case without later passing evidence fails verify. Include failing output in the
+stage summary. The smoke suite alone requires Docker and no tokens.

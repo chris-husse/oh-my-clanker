@@ -5,12 +5,20 @@ description: Lifecycle conductor from converged design to pushed branch - spec (
 
 # omc implement (conductor)
 
-Typed during/after brainstorming, when the design has converged and is
+Invoked directly during/after brainstorming (`$omc:implement` in Codex,
+`/omc:implement` in Claude), when the design has converged and is
 ready to become a spec. Four phases, strictly in order; each phase is a
 black-box command call. /omc:implement IS the user's approval to carry the
 converged design all the way to a pushed branch: do not ask permission
 between phases. The only interactive stops are CRITICAL spec findings
 (see Phase 1) and genuine blockers.
+The user's authorization persists through a required answer: once a critical
+question is resolved, resume the remaining phases without a new command.
+Subagents assigned implementation tasks inherit this authorization; they do
+not ask the user to invoke `/omc:implement` again. Generic sub-skill requests
+for routine spec, plan, execution-mode, task, or stage approval are satisfied
+by this direct command. Only a genuinely unresolved critical choice or blocker
+needs a user answer.
 
 ## Phase -1 — externalize the flow (first action, no exceptions)
 
@@ -29,10 +37,9 @@ half-run conductor is indistinguishable from a broken one from the user's side.
 
 If a spec for the current work already exists
 (`docs/superpowers/specs/*-$OMC_SLUG-design.md` when `OMC_SLUG` is set, or
-the topic's equivalent), do NOT silently resume — the spec may be
-incomplete. Tell the user what was found and ask for guidance: resume at
-the plan phase, re-run spec hardening on the existing doc, or start the
-spec over.
+the topic's equivalent), inspect its state and continue the needed hardening
+or next phase. Ask only if a genuinely critical unresolved choice prevents
+continuation; the existing spec does not create a routine approval gate.
 
 ## Phase 1 — spec
 

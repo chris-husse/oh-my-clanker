@@ -43,7 +43,6 @@ def test_configure_defaults(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "/plugin marketplace add" in out  # claude hint
     assert "codex plugin marketplace add" in out  # codex hint
-    assert "opencode" in out  # opencode hint
 
 
 def test_configure_set_global(tmp_path, monkeypatch):
@@ -52,15 +51,23 @@ def test_configure_set_global(tmp_path, monkeypatch):
         [
             "configure",
             "--set",
-            "llm.default=opencode",
+            "llm.default=codex",
             "--set",
-            "llm.providers.opencode.model=anthropic/claude-sonnet-5",
+            "llm.providers.codex.model=gpt-6-sol",
         ]
     )
     assert rc == 0
     cfg = store.load_global(home)
-    assert cfg.llm.default == "opencode"
-    assert cfg.llm.providers["opencode"].model == "anthropic/claude-sonnet-5"
+    assert cfg.llm.default == "codex"
+    assert cfg.llm.providers["codex"].model == "gpt-6-sol"
+
+
+def test_configure_rejects_unsupported_provider_before_writing(tmp_path, monkeypatch, capsys):
+    home = _home(tmp_path, monkeypatch)
+    assert main(["configure", "--set", "llm.default=retired"]) == 1
+    assert not store.global_config_path(home).exists()
+    err = capsys.readouterr().err
+    assert "retired" in err and "claude" in err and "codex" in err
 
 
 def test_configure_set_worktree_routes_to_project_file(tmp_path, monkeypatch):

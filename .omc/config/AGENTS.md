@@ -4,7 +4,7 @@
 symlinks send you here.) Deeper truth map: `.omc/skills/explain-context/SKILL.md`.
 
 This repo is a uv-installed Python CLI (`src/omc/`) plus a skills plugin
-(`skills/`, installable in Claude Code / Codex / OpenCode from this repo).
+(`skills/`, installable in Claude Code / Codex from this repo).
 Design records live in `docs/superpowers/specs/`; the build ledger in
 `.superpowers/sdd/progress.md`.
 

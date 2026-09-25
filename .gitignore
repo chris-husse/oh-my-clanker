@@ -16,3 +16,6 @@ dist/
 # machine-local omc chain symlinks (targets differ per machine)
 /AGENTS.md
 /CLAUDE.md
+
+# Live conversational E2E evidence (selected, sanitized only)
+tests/e2e/scenario-artifacts/

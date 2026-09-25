@@ -69,7 +69,8 @@ def parse_verdict(text: str) -> Verdict | None:
 
 
 def build_prompt(context: str) -> str:
-    return skill_prompt("slug").replace("$ARGUMENTS", context)
+    body = skill_prompt("slug").replace("$ARGUMENTS", "(read the JSON input value appended below)")
+    return body + "\nOMC_SLUG_CONTEXT_JSON: " + json.dumps(context, ensure_ascii=True)
 
 
 def fetch_slug(ctx: ToolContext, cfg: Config, context: str) -> str:

@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from ..errors import ConfigError
+from ..providers.registry import provider_names
 from .schema import (
     Config,
     GlobalConfig,
@@ -52,6 +53,7 @@ def load_global(home: Path) -> GlobalConfig | None:
 
 
 def save_global(home: Path, cfg: GlobalConfig) -> None:
+    _validate_llm_providers(cfg.llm)
     _save_yaml(global_config_path(home), cfg)
 
 
@@ -93,6 +95,20 @@ def validate_backend(value: str) -> str:
     )
 
 
+def _validate_provider(name: object, location: str) -> None:
+    names = provider_names()
+    if not isinstance(name, str) or name not in names:
+        raise ConfigError(
+            f"unsupported provider {name!r} in {location}; choose {' or '.join(names)}"
+        )
+
+
+def _validate_llm_providers(cfg: LLMConfig) -> None:
+    _validate_provider(cfg.default, "llm.default")
+    for name in cfg.providers:
+        _validate_provider(name, "llm.providers")
+
+
 def validate_worktree_value(name: str, value: object) -> str:
     """WorktreeConfig values flow from a repo-committed file straight into `git`
     argv, so they are an option-injection surface (a committed
@@ -124,6 +140,7 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
         name, _, leaf = tail.partition(".")
         if leaf not in ("model", "docs_model"):
             raise ConfigError(f"unknown config key: providers.{tail}")
+        _validate_provider(name, "llm.providers")
         setattr(cfg.providers.setdefault(name, ProviderConfig()), leaf, value)
         return
     if isinstance(cfg, NotificationsConfig):
@@ -165,6 +182,8 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
         raise ConfigError(f"{dotted} is a section, not a settable key")
     if head == "schema_version":
         raise ConfigError("schema_version is not settable")
+    if isinstance(cfg, LLMConfig) and head == "default":
+        _validate_provider(value, "llm.default")
     setattr(cfg, head, value)
 
 
@@ -181,6 +200,7 @@ def _hydrate(cls: type, data: dict, path: str):
                 raise ConfigError(f"invalid value for {name!r} in {path}: expected an object")
             providers = {}
             for k, v in value.items():
+                _validate_provider(k, "llm.providers")
                 if not isinstance(v, dict):
                     raise ConfigError(
                         f"invalid value for llm.providers[{k!r}] in {path}: expected an object"
@@ -194,6 +214,8 @@ def _hydrate(cls: type, data: dict, path: str):
         else:
             kwargs[name] = value
     obj = cls(**kwargs)
+    if cls is LLMConfig:
+        _validate_llm_providers(obj)
     if cls is NotificationsConfig:
         if not isinstance(obj.enabled, bool):
             raise ConfigError(

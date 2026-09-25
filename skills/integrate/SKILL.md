@@ -23,8 +23,12 @@ wrong"). Empty → the inventory decides the mode.
   but still run the full inventory — fishy feelings usually have neighbors.
 
 **Non-interactive/headless runs: propose only — zero writes**, and skip
-heavy steps (indexing) with a note. The interactive session is where files
-get written.
+heavy steps (indexing) with a note. Complete the inventory, grounded draft
+content for every applicable Phase 2 slot, and the wrap-up in one response.
+Proceed from inventory into drafting without waiting for approval; approval
+gates apply to writes, not to producing proposals. Record missing information
+as assumptions or open questions alongside the drafts and continue through
+the remaining slots. The interactive session is where files get written.
 
 ## Phase 1 — foundation
 
@@ -55,10 +59,17 @@ get written.
 
 ## Phase 2 — design each project skill (the heart)
 
-Go slot by slot, in this order, ONE at a time — investigate, propose,
-iterate, and **write only on explicit approval** (these are the project's
-files; in review mode show the existing file beside your proposal and flag
-drift and gaps, never silently replace):
+**Interactive:** go slot by slot, in this order, ONE at a time — investigate,
+propose, iterate, and **write only on explicit approval** (these are the
+project's files).
+
+**Headless:** investigate and present draft content for each applicable slot
+below in order, then continue directly to the next. For an inapplicable slot,
+state the project evidence for leaving it unconfigured. Finish the complete
+proposal in this turn.
+
+In review mode, show the existing file beside your proposal and flag drift
+and gaps; never silently replace it.
 
 ### `.omc/skills/check`
 The fast "am I on the right track" gate: build only what the unit tests
@@ -131,6 +142,11 @@ propose the content. omc never edits this file after seeding; this is the
 user's voice.
 
 ## Phase 3 — wrap up
+
+**Headless:** summarize proposed changes and open questions, with every
+surface left unchanged. The drafts are ready for a later interactive review.
+
+**Interactive:**
 
 1. The after-table: created / updated / left alone, per surface.
 2. What's now active: `/omc:finish` runs the stage gates you just designed;

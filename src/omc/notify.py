@@ -220,7 +220,7 @@ def run_notify(ctx: ToolContext, args: argparse.Namespace) -> int:
         event, body = payload_from_claude(text)
     elif args.provider == "codex":
         event, body = payload_from_codex(args.payload)
-    else:  # opencode: the generated plugin passes explicit flags
-        event, body = (args.event or "unknown", args.message or GENERIC_BODY)
+    else:
+        return 0  # the CLI parser accepts only registered providers
     deliver(cfg, ctx=ctx, provider=args.provider, event=event, body=body, cwd=os.getcwd())
     return 0

@@ -33,7 +33,7 @@ without its own tsc the build dies), then `npm ci && npm run build` in
 |---|---|---|
 | `gitnexus-ensure` | internal | CLI healthy (`node <cli> --version`) → done; missing → approved-source clone + two-step npm build + verify. |
 | `gitnexus-index` | internal | ensure → primary root → `gitnexus analyze` with index-only flags (`--skip-agents-md`; suppress hook/skill installs where flags exist). Incremental (analyze updates stale indexes). |
-| `gitnexus-document` | internal | ensure → index present (else run gitnexus-index) → `gitnexus wiki --provider <omc default provider> [--model <cfg>]` → sync `.gitnexus/wiki/` → `.omc/docs/gitnexus/docs/`. gitnexus's wiki providers include `claude`/`codex`/`opencode` natively (it drives the local agent CLI — same auth omc already requires), so the mapping is IDENTITY; never fall through to gitnexus's `openai` default. |
+| `gitnexus-document` | internal | ensure → index present (else run gitnexus-index) → `gitnexus wiki --provider <omc default provider> [--model <cfg>]` → sync `.gitnexus/wiki/` → `.omc/docs/gitnexus/docs/`. gitnexus's wiki providers include `claude`/`codex` natively (it drives the local agent CLI — same auth omc already requires), so the mapping is IDENTITY; never fall through to gitnexus's `openai` default. |
 | `gitnexus-explain` | internal | ensure → index present (else "run /omc:index first") → COMPOSE `query` → `context` → `impact` → `cypher` (no CLI explain command exists) + read `.omc/docs/gitnexus/docs/` when present → cited findings. |
 | `index` | user-facing | delegate to gitnexus-index. |
 | `document` | user-facing | delegate to gitnexus-document. |
@@ -74,6 +74,6 @@ refusal being pure text).
 - analyze suppression flags exist: `--skip-agents-md` and `--skip-skills`
   (analyze-config.ts) — the index skill passes both.
 - `wiki --provider` accepts `openai, openrouter, azure, custom, cursor,
-  claude, codex, opencode` (cli/index.ts) — identity mapping confirmed.
+  claude, codex` (cli/index.ts) — identity mapping confirmed.
 
 Still open: in-container build duration (pre-bake should hide it).

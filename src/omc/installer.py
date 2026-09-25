@@ -21,7 +21,6 @@ _PLUGIN_REMOVAL = """\
 The omc plugin (if installed) is removed per harness:
   Claude Code:  /plugin uninstall omc
   Codex:        remove 'omc' via /plugins
-  OpenCode:     drop the omc entry from opencode.json's "plugin" array
 """
 
 

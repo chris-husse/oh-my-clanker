@@ -2,117 +2,92 @@
 
 # Configuration
 
-The `omc.config` package owns everything about omc's on-disk settings: what the config file looks like, how it is loaded and validated, and how individual keys are written. The user-facing `omc configure` command (`src/omc/configure.py`) sits on top of this package, providing both a scripted (`--defaults` / `--set`) and an interactive way to produce a valid config.
+The `omc.config` package (plus `omc/wtconfig.py` and `omc/configure.py`, which build on it) owns every piece of persisted settings omc reads or writes. It defines the schema, the on-disk YAML stores, the merge into a runtime view, and the `omc configure` command that walks a user through setting it all up.
 
-Config lives at `<home>/config.json`, where `home` is the omc home directory carried on `ToolContext`. Everything in this module takes `home` (or a `ToolContext`) explicitly — the config layer never reads `~/.omc` itself. That boundary is owned by `ToolContext` alone.
+## Two files, two owners
 
-## The shape of the config
+omc splits settings across two files because they have different owners and different lifecycles:
 
-`config/schema.py` defines the config as a small tree of frozen-by-convention dataclasses. The defaults encoded here *are* the config a brand-new user gets:
+| File | Scope | Contains | Committed? |
+|---|---|---|---|
+| `~/.omc/config.yaml` | Personal, machine-wide | `llm` (provider/model choice, docs model), `notifications` | No — lives in the user's home |
+| `<repo>/.omc/config.yaml` | Per-project, team-shared | `worktree` (`branch_prefix`, `base_branch`) | Yes — committed to the repo |
+
+`GlobalConfig` and `ProjectConfig` (`schema.py`) are the dataclasses persisted at those two locations. `Config` is a third dataclass — never persisted itself — that represents the *runtime composite* consumers actually use (`llm` + `notifications` from global, `worktree` from project). This split exists so that a solo contributor's LLM choice never ends up in a commit, while worktree conventions (branch prefix, base branch) travel with the repo for every teammate.
+
+A now-obsolete combined format, `~/.omc/config.json`, is still readable via `store.load_legacy()` purely so `omc configure` can migrate it into the two YAML files and delete it — nothing else touches it.
+
+## Composing the runtime view
+
+`resolve.py` is the read path everything else in the codebase should use:
 
 ```python
-Config
-├── schema_version: int = 1
-├── llm: LLMConfig
-│   ├── default: str = "claude"
-│   └── providers: dict[str, ProviderConfig]   # {"claude": ProviderConfig()}
-│       └── ProviderConfig.model: str = ""      # "" = provider's own default
-└── worktree: WorktreeConfig
-    ├── branch_prefix: str = "feature/"
-    └── base_branch: str = "main"
+resolve.load_effective(ctx) -> Config | None
 ```
 
-A few conventions are load-bearing:
-
-- **`schema_version`** is present so future migrations have a version to branch on. It is deliberately *not* settable through the normal key-setting path (see `set_key` below).
-- **An empty `ProviderConfig.model`** means "let the provider CLI pick its own default model" — it is not an error state.
-- **`providers` is a dict**, not a fixed set of fields. This is the one place the config tree is open-ended: users add providers by name, and both the loader and the setter special-case this dict.
-
-## Loading and persistence
-
-`config/store.py` is the read/write layer. All paths route through `config_path(home)`, which is simply `home / "config.json"` — every other function calls it rather than joining the path itself.
-
-### `load(home) -> Config | None`
-
-Returns `None` when no config file exists yet (callers treat this as "use defaults"), and otherwise parses the JSON and hydrates it into a `Config`. Failures are surfaced as `ConfigError` (from `omc.errors`) rather than raw JSON exceptions:
-
-- malformed JSON → `ConfigError` wrapping the `JSONDecodeError`
-- a top-level value that isn't an object → `ConfigError`
-
-### `save(home, cfg)`
-
-Creates `home` if needed (`mkdir(parents=True, exist_ok=True)`) and writes `asdict(cfg)` as indented JSON with a trailing newline. Because it serializes the whole dataclass tree, a saved file always contains every key at its current value — including defaults.
-
-### `_hydrate` — validation on the way in
-
-`load` delegates to the recursive `_hydrate(cls, data, path)`, which is where the config file is validated against the schema. It is strict by design:
-
-1. It computes the dataclass's field names and rejects **any unknown key** with a `ConfigError` that names the offending keys and the file path. Typos fail loudly instead of being silently ignored.
-2. For each field it checks the expected shape. A field typed as a nested dataclass (e.g. `llm`, `worktree`) must be a JSON object, or it raises.
-3. `llm.providers` is handled specially: the value must be an object, and every entry must itself be an object, each hydrated into a `ProviderConfig`.
-4. Nested dataclass fields recurse back into `_hydrate`; scalar fields are passed through as-is.
-
-The recursion means validation happens at every level of the tree with consistent, path-qualified error messages.
+It loads the global config — returning `None` if it's absent, since gated commands require the user to have run `omc configure` at least once — then fills in `worktree` via `project_config(ctx)`. `project_config` finds the repo root with `wtconfig.repo_root(ctx)` and loads `<repo>/.omc/config.yaml`; if there's no repo, or no project file, it falls back to `ProjectConfig()` defaults (`branch_prefix="feature/"`, `base_branch="main"`). This is deliberate: a directory that isn't yet an omc-integrated repo should still get sane worktree defaults instead of erroring.
 
 ```mermaid
-graph TD
-    load --> config_path
-    load --> hydrate["_hydrate"]
-    hydrate --> hydrate
-    save --> config_path
-    setkey["set_key"] --> setkey
+flowchart LR
+    A[load_effective] --> B[store.load_global]
+    A --> C[project_config]
+    C --> D[wtconfig.repo_root]
+    C --> E[store.load_project]
+    B -->|None| F[return None]
+    B --> G[Config: llm + notifications + worktree]
+    E --> G
 ```
 
-### `set_key(cfg, dotted, value)` — writing one leaf
+## Storage layer: `store.py`
 
-`set_key` walks a dotted path like `worktree.base_branch` or `llm.providers.claude.model` and assigns a string value to the leaf. It recurses one path segment at a time and enforces the rules the schema implies:
+`store.py` handles the actual reading, writing, and validating of the YAML/JSON on disk.
 
-- **`llm.providers.<name>.model`** is the escape hatch for the open-ended provider dict: it `setdefault`s a `ProviderConfig()` for `<name>` and sets its model, *creating* the provider entry if it didn't exist. Any provider sub-key other than `model` is rejected.
-- An unknown head segment (not a field of the current dataclass) → `ConfigError: unknown config key`.
-- Pointing at a **section** (a nested dataclass) with no remaining path → `ConfigError` ("is a section, not a settable key"). You set leaves, not whole sub-trees.
-- **`schema_version`** is explicitly refused — it is managed by the code, not the user.
+- **Path helpers**: `global_config_path`, `project_config_path`, `legacy_config_path`.
+- **Load/save**: `load_global`/`save_global`, `load_project`/`save_project` — all YAML via `yaml.safe_load`/`yaml.safe_dump`. A missing file returns `None` (not an error); malformed YAML or a non-mapping top level raises `ConfigError`.
+- **`_hydrate(cls, data, path)`**: recursively builds a dataclass from a dict, rejecting any unknown key with `ConfigError` (this is what keeps a stray key in `~/.omc/config.yaml` — or a `worktree` key leaking into the global file, or `llm` into the project file — from silently succeeding). It recurses into nested dataclasses and has special-case handling for `LLMConfig.providers`, which is a `dict[str, ProviderConfig]` rather than a fixed set of fields.
+- **`set_key(cfg, dotted, value)`**: the engine behind `omc configure --set KEY=VALUE`. It walks a dotted path (`llm.providers.claude.model`, `notifications.enabled`, `worktree.base_branch`) against the dataclass tree, creating provider entries on demand and coercing types where the schema needs it (`notifications.enabled` must be the literal string `"true"`/`"false"`; anything else is a `ConfigError`, since a string `"false"` would otherwise be truthy).
 
-Note that `set_key` only ever assigns strings; it does no type coercion. The schema's non-string field is `schema_version`, which is unsettable, so this is consistent today — but it's a constraint to keep in mind if a new numeric or boolean key is ever added.
+### Why `worktree.*` values get extra scrutiny
 
-## The `configure` command
+`WorktreeConfig.base_branch` and `branch_prefix` are committed, team-shared, and eventually get passed as arguments to `git`. That makes them an **option-injection surface**: a committed `base_branch: "--upload-pack=/x"` would be interpreted by git as a flag, not a branch name. `validate_worktree_value` rejects values that are empty (for `base_branch`), start with `-`, or contain whitespace/control characters. Both the load path (`_hydrate`, for values coming from a committed file) and the `set_key` path (for values coming from `--set`) run this same check — an attacker who can edit the committed config gets caught at load time, one who tries `omc configure --set worktree.base_branch=--upload-pack=/x` gets caught immediately.
 
-`src/omc/configure.py` is the CLI entry point (`omc configure`), reached via `main → _dispatch → run_configure` in `src/omc/cli.py`. It has two modes.
+### Why `notifications.backend` is validated similarly
 
-### Scripted mode — `--defaults` / `--set`
+`validate_backend` restricts the value to the literal string `"macos"` or `file://` followed by an absolute path — again enforced on both the load and `set_key` paths — so a malformed or unexpected backend can't silently become a no-op or an unintended file write target.
 
-When either `--defaults` or one or more `--set KEY=VALUE` pairs are passed, `run_configure` runs non-interactively:
+## Schema: `schema.py`
 
-- `--defaults` starts from a **fresh `Config()`**; without it, the starting point is whatever `store.load` returns (or a fresh `Config` if none exists).
-- Any `--set` pairs are then applied on top via `store.set_key`. Passing `--defaults` and `--set` together is a supported combination — defaults establish the baseline and the sets override specific keys; the sets are never dropped.
-- A `--set` argument without an `=` is a `Refusal` (`"--set expects KEY=VALUE"`).
+Plain dataclasses, no logic beyond `field(default_factory=...)`:
 
-The result is saved and the plugin-install hints are printed. The label reflects what happened ("Wrote defaults to …" vs "Updated …").
+- `ProviderConfig` — `model` (session model; blank = provider default) and `docs_model` (used only for bulk documentation/wiki generation — see `omc.providers.registry.docs_model_for`). These are kept deliberately separate: docs generation runs unattended for potentially long stretches, so it must never inherit whatever high-effort/thinking model the interactive session is configured to use.
+- `LLMConfig` — `default` provider name plus `providers: dict[str, ProviderConfig]`.
+- `WorktreeConfig` — `branch_prefix`, `base_branch`.
+- `NotificationsConfig` — `enabled` (opt-in, default `False`), `backend`.
+- `Config` — the runtime composite described above.
+- `GlobalConfig` / `ProjectConfig` — the two persisted shapes.
 
-### Interactive mode — the walkthrough
+## `omc configure`: writing the files
 
-With no flags, `run_configure` requires a TTY; without one it raises a `Refusal` pointing the user at `--defaults` / `--set`. Given a TTY, it loads the existing config (or defaults) and hands off to `_walkthrough`, then saves.
+`configure.py`'s `run_configure` has two modes:
 
-`_walkthrough` is the only part of this module that reaches outside the config package. Using `questionary` prompts, it:
+1. **Non-interactive** (`--defaults` and/or `--set KEY=VALUE`, used in scripts/tests): starts from `GlobalConfig()` if `--defaults` was passed, otherwise from whatever's on disk (or the legacy JSON). Each `--set` pair is routed by its top-level key — anything under `worktree.*` goes to the project config (and requires being inside a repo; refused otherwise), everything else goes to global. `--defaults` seeds a project file only if one doesn't already exist — it will never clobber committed team settings.
+2. **Interactive** (a bare `omc configure`, requires a TTY): `_walkthrough_global` and `_walkthrough_project` drive `questionary` prompts to pick LLM providers/models and worktree conventions, then save both files.
 
-1. Lists available providers via `provider_names()` and lets the user check which they use, pre-checking those already configured.
-2. For each selected provider, offers its `models()` as choices (falling back to a free-text model id when the provider exposes no known models, or when the user picks "Other…"). The empty string is stored when the user leaves it blank.
-3. Sets `llm.default` — automatically when only one provider is selected, otherwise via a prompt.
-4. Prompts for `worktree.branch_prefix` and `worktree.base_branch`.
+Either path finishes the same way:
+- `_migrate_legacy` deletes `~/.omc/config.json` once its content has been folded into the new global YAML (and warns if a legacy `worktree.*` section couldn't be carried into a project file because there was no repo in scope this run).
+- `_ensure_repo_chain` calls `agentsmd.ensure_agents_chain` (only when inside a repo) to set up the `AGENTS.md`/`CLAUDE.md` symlink chain.
+- Plugin installation hints are printed for Claude Code and Codex.
 
-It reads the provider registry through `get_provider` / `provider_names` (`omc/providers/registry.py`) and each provider's `models()` (`omc/providers/base.py`). This is the bridge from config to the provider subsystem: the set of valid providers and their model lists comes from the registry, not from the config schema. `_walkthrough` is PTY-driven and covered by E2E tests rather than unit tests (`# pragma: no cover`).
+## `wtconfig.py`: the other half of "project config"
 
-## How it connects
+`wtconfig.py` isn't part of the `config` package but is tightly coupled to it — it's where `repo_root(ctx)` lives, the function `resolve.project_config` and `configure._ensure_repo_chain` both depend on to find `<repo>/.omc/config.yaml`. It also owns:
 
-- **`ToolContext`** supplies `home`; the config layer is handed the path and never derives it. This keeps config within the single subprocess/env boundary the codebase mandates.
-- **`omc.errors`** — every validation or user-input failure raises a typed error: `ConfigError` for bad config data, `Refusal` for bad CLI invocation. These map to omc's exit-code convention (1 for errors, 2 for refusals).
-- **Provider registry** (`omc/providers/`) — the interactive walkthrough is the consumer here; the config only stores provider *names* and *model ids* as strings, deferring the notion of "which providers exist" to the registry.
-- **`omc start`** and worktree tooling read the persisted `llm.default`, per-provider `model`, and the `worktree` settings to decide which LLM to launch and how to name branches.
+- `primary_root(ctx)` — the first entry in `git worktree list --porcelain`, i.e. the primary checkout, used by `internal.py`'s rebase-main and gitnexus flows and by `watch.py`.
+- `ensure_wt_config(ctx, root)` — creates `.config/wt.toml` (Worktrunk's own config) from `WT_TEMPLATE` if absent, and otherwise only *sniffs* it: if it doesn't already copy ignored files into new worktrees (checked via `_has_copy_ignored`), it prints a pointer to `/omc:check-wt-config` on stderr but **never edits an existing file**. This matters because worktree snapshotting (`.gitnexus/`, `.omc/docs/`, `.env`, caches) depends on that copy-ignored behavior, but a user's existing wt.toml customizations are never something omc should silently rewrite.
 
-## Extending the schema
+## Consumers
 
-To add a setting:
-
-1. Add the field (with a default) to the relevant dataclass in `schema.py`. `_hydrate` and `save` pick it up automatically because they iterate `fields(...)`.
-2. If it's a **new nested section**, type it as a dataclass with a `default_factory` — `_hydrate` and `set_key` already recurse into nested dataclasses.
-3. If the new field is **non-string**, remember that `set_key` assigns raw strings; add coercion there (and revisit the current all-string assumption) before exposing it via `--set`.
-4. Follow the repo's red→green rule: write the failing test for the new key's load/save/set behavior first, watch it fail, then implement.
+- `resolve.load_effective` is called wherever a command needs the full runtime config (LLM provider selection, worktree naming).
+- `configure.run_configure` is dispatched from the CLI (`omc configure`).
+- `wtconfig.repo_root`/`primary_root` are used by `internal.py` (rebase-main, gitnexus indexing), `watch.py`, and `start.py` — anywhere a command needs to know which checkout is "primary" versus a worktree snapshot.
+- `providers.registry.docs_model_for` reads `ProviderConfig.docs_model` directly to resolve the model used for `/omc:document`, falling back to `get_provider(name).docs_model_default()` (e.g. `"sonnet"` for Claude) rather than ever using the session's configured model.

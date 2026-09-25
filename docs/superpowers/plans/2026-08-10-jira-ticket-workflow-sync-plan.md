@@ -345,7 +345,7 @@ def test_run_headless_allows_mcp_tool_patterns():
 - Consumes: Task 1's stub tools/fixtures and `$STUB_JIRA_MUTATIONS_LOG`; Task 2's `OMC_TICKET` verdict; Task 4's headless allowance; existing harness helpers `PROVIDERS, configure_omc, make_work_repo, require_token, run_in, wire_mcp` and the `container` fixture (same usage as `tests/e2e/test_e2e_start.py`).
 - Produces: nothing downstream — terminal task.
 
-- [ ] **Step 1: Extend `wire_mcp`** — in `tests/e2e/harness.py`, give the stub a fixed in-container mutations log. Add module constant `MUTATIONS_LOG = "/tmp/stub-jira-mutations.jsonl"`, and in `wire_mcp` add the env key to all three provider specs: claude's `jira_spec["env"]` becomes `{"STUB_JIRA_MODE": mode, "STUB_JIRA_MUTATIONS_LOG": MUTATIONS_LOG}`; codex's toml env line becomes `env = {{ STUB_JIRA_MODE = "{mode}", STUB_JIRA_MUTATIONS_LOG = "{MUTATIONS_LOG}" }}`; opencode's command list gains a second `env` assignment `f"STUB_JIRA_MUTATIONS_LOG={MUTATIONS_LOG}"` after `stub_env`.
+- [ ] **Step 1: Extend `wire_mcp`** — in `tests/e2e/harness.py`, give the stub a fixed in-container mutations log. Add module constant `MUTATIONS_LOG = "/tmp/stub-jira-mutations.jsonl"`, and in `wire_mcp` add the env key to both provider specs: claude's `jira_spec["env"]` becomes `{"STUB_JIRA_MODE": mode, "STUB_JIRA_MUTATIONS_LOG": MUTATIONS_LOG}`; codex's toml env line becomes `env = {{ STUB_JIRA_MODE = "{mode}", STUB_JIRA_MUTATIONS_LOG = "{MUTATIONS_LOG}" }}`.
 
 - [ ] **Step 2: Write the E2E tests** — create `tests/e2e/test_e2e_ticket_sync.py`:
 

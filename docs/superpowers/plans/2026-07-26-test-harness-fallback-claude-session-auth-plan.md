@@ -109,7 +109,7 @@ In `tests/e2e/harness.py`, immediately after the `_TOKEN_GUIDANCE` dict (line 25
 # so a match identifies the provider on its own; no provider argument is needed.
 #
 # VERIFIED strings only, captured from live container runs (the first is also
-# recorded in docker/PLUGIN-NOTES.md). codex and opencode have no entries because
+# recorded in docker/PLUGIN-NOTES.md). codex has no entries because
 # their auth-failure output has never been observed here — do not guess one, and
 # never broaden these to a fragment like "OAuth", "401", or "Authentication
 # failed": the stub Jira MCP's auth-error mode emits "Authentication failed (HTTP
@@ -360,7 +360,7 @@ CLAUDE_CODE_OAUTH_TOKEN=
 Replace:
 
 ```
-# Anthropic API key: used by the `opencode` provider AND as claude auth fallback.
+# Anthropic API key: accepted as Claude auth fallback.
 # Get one: https://console.anthropic.com/settings/keys
 ANTHROPIC_API_KEY=
 ```
@@ -368,9 +368,8 @@ ANTHROPIC_API_KEY=
 with:
 
 ```
-# Anthropic API key: REQUIRED by the `opencode` provider; also accepted by
-# `claude` as an alternative to the token above. A Claude subscription token
-# cannot drive opencode or codex — those need real API keys.
+# Anthropic API key: accepted by `claude` as an alternative to the token above.
+# A Claude subscription token cannot authenticate Codex.
 # Get one: https://console.anthropic.com/settings/keys
 ANTHROPIC_API_KEY=
 ```
@@ -400,7 +399,7 @@ Expected: PASS.
 Run: `just e2e-tests 'tests/e2e/test_e2e_slug_matrix.py::test_slug_free_text_description_needs_no_tracker[claude]'`
 Expected: `1 passed`.
 
-`just` word-splits recipe arguments, so a `-k "a and b"` expression breaks — pass the single quoted node id exactly as shown. The `omc-e2e:test` image is already built and cached locally. This worktree's `.env` has a valid `CLAUDE_CODE_OAUTH_TOKEN`; `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are empty, so codex- and opencode-parametrized tests will fail their presence gate by design — run only claude-parametrized node ids.
+`just` word-splits recipe arguments, so a `-k "a and b"` expression breaks — pass the single quoted node id exactly as shown. The `omc-e2e:test` image is already built and cached locally. This worktree's `.env` has a valid `CLAUDE_CODE_OAUTH_TOKEN`; `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are empty, so Codex-parametrized tests will fail their presence gate by design — run only claude-parametrized node ids.
 
 - [ ] **Step 3: Confirm the MCP path is not broken by the detector**
 

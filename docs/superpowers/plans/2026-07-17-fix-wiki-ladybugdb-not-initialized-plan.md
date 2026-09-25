@@ -61,7 +61,7 @@ Create `gitnexus/test/unit/wiki-keepalive.test.ts`. It follows the exact mock pa
 ```ts
 /**
  * Wiki keepalive: the generator must touch the __wiki__ pool entry every 60s
- * for the WHOLE run. Local agent CLI providers (claude/codex/opencode) buffer
+ * for the WHOLE run. Local agent CLI providers (claude/codex) buffer
  * stdout until process exit, so the old onChunk-based touch never fired during
  * long LLM calls; the pool's 5-minute idle sweep evicted __wiki__ mid-run and
  * the next graph query threw 'LadybugDB not initialized for repo "__wiki__"'.
@@ -218,7 +218,7 @@ Change to:
     await initWikiDb(this.lbugPath);
 
     // Keepalive: touch the __wiki__ pool entry every 60s for the whole run.
-    // Local agent CLI providers (claude/codex/opencode) buffer stdout until
+    // Local agent CLI providers (claude/codex) buffer stdout until
     // process exit, so no streaming callback can be relied on to reset the
     // pool's 5-minute idle timeout during long LLM calls — without this the
     // idle sweeper evicts __wiki__ mid-run and the next graph query throws
@@ -267,7 +267,7 @@ cd /Users/chriphus/Projects/GitNexus
 git add gitnexus/src/core/wiki/generator.ts gitnexus/test/unit/wiki-keepalive.test.ts
 git commit -m "fix(wiki): keep __wiki__ pool entry alive for the whole generator run
 
-Buffered local-CLI providers (claude/codex/opencode) emit stdout only at
+Buffered local-CLI providers (claude/codex) emit stdout only at
 process exit, so the onChunk-based touch never fired mid-call and the pool's
 5-minute idle sweep evicted __wiki__ during long LLM calls, failing the next
 graph query with 'LadybugDB not initialized for repo __wiki__'."

@@ -15,7 +15,7 @@ Run the `gitnexus-ensure` skill. Resolve the primary worktree root
 
 Determine the provider: omc's configured default (`llm.default` in
 `~/.omc/config.yaml`; if unreadable, ask rather than guess). gitnexus's wiki
-providers include `claude`, `codex`, and `opencode` natively — it drives the
+providers include omc's supported `claude` and `codex` natively — it drives the
 LOCAL agent CLI, so this uses the same auth omc already requires. Pass the
 provider EXPLICITLY (never fall through to gitnexus's `openai` default, which
 needs credentials the user may not have).
@@ -26,7 +26,7 @@ wiki generation is bulk grounded summarization, and a thinking-heavy session
 model turns it into an hours-long silent run. When `docs_model` is unset, use
 the provider's docs floor: `claude-sonnet-5` for claude (pass it explicitly —
 gitnexus caches models in its own config and a stale choice would otherwise
-resurrect); for codex/opencode omit `--model` (their CLI default is the
+resurrect); for codex omit `--model` (its CLI default is the
 coding model):
 
 ```sh

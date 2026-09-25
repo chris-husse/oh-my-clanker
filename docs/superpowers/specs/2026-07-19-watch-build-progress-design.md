@@ -38,16 +38,16 @@ def stream(self, argv, *, on_line, cwd=None, extra_env=None) -> int
 
 ## 2. Provider streaming variants
 
-Only claude buffers; codex and opencode already emit incremental text. Two
+Only claude buffers; codex already emits incremental text. Two
 additions to the provider interface (base defaults, claude overrides):
 
 - `headless_stream_argv(prompt, *, model, allowed_tools=None)` —
   claude: identical to `headless_argv` but `--output-format stream-json
-  --verbose`; codex/opencode: same argv as `headless_argv`.
+  --verbose`; codex: same argv as `headless_argv`.
 - `decode_stream_line(line) -> list[str]` — claude: parse the stream-json
   event and return human-readable text fragments (assistant text, a
   one-line `$ <command>` echo per tool_use, tool_result content, and the
-  final `result` text); non-JSON lines pass through. codex/opencode:
+  final `result` text); non-JSON lines pass through. codex:
   identity (`[line]`).
 
 Empirically verified (2026-07-19 probe): stream-json events arrive live

@@ -18,13 +18,11 @@ macOS notifications:
   produces the observed "broken one gets replaced by the real one" effect.
 
 The COPS-988 design (2026-07-17) did not anticipate the harness posting its
-own notifications. On Codex and OpenCode the omc alert is NOT noise — those
-harnesses have no native desktop notification path (Codex's only channel IS
-the `notify` hook omc wires; OpenCode's plugin bus only reaches the user
-through omc's sink).
+own notifications. On Codex the omc alert is NOT noise — it has no native desktop
+notification path; its only channel is the `notify` hook omc wires.
 
 Decision (user): when the harness can notify natively, let it — omc must not
-duplicate. Codex/OpenCode keep omc's alerts.
+duplicate. Codex keeps omc's alerts.
 
 ## 2. Approach
 
@@ -68,7 +66,7 @@ notification for permission prompts / idle / turn end (observed live,
 2026-07-23); omc's osascript ping would duplicate it as a dead
 `omc: <slug>` alert.
 
-Codex and OpenCode keep the default `False` — no native channel exists;
+Codex keeps the default `False` — no native channel exists;
 that is why their wiring exists at all.
 
 ### `src/omc/notify.py`
@@ -84,7 +82,7 @@ that is why their wiring exists at all.
 Explicitly unchanged: wiring (`wire_worktree`, `notification_setup`,
 merge logic), payload normalization, config schema
 (`NotificationsConfig`), the sink argv contract, and hook wiring for all
-three providers (Claude stays `Notification` + `Stop` — the events now feed
+both providers (Claude stays `Notification` + `Stop` — the events now feed
 the file backend only, when the backend is macos they are suppressed).
 
 ## 4. Not doing (deliberate)
@@ -96,14 +94,14 @@ the file backend only, when the backend is macos they are suppressed).
   bites.
 - No un-wiring of existing worktrees (nothing to un-wire under
   delivery-time suppression).
-- No changes to Codex/OpenCode behavior.
+- No changes to Codex behavior.
 
 ## 5. Testing
 
 Unit (existing fake-`ToolContext` patterns in the notify tests):
 
 1. `claude` + `macos` backend → NO osascript invocation.
-2. `codex` and `opencode` + `macos` → osascript still invoked.
+2. `codex` + `macos` → osascript still invoked.
 3. `claude` + `file://` → line still appended.
 4. Unknown provider string → delivers normally (defensive default).
 
@@ -112,12 +110,12 @@ unaffected and must stay green.
 
 Manual live check (recorded in the build ledger): start a Claude session on
 macOS, trigger a permission prompt, confirm exactly one (clickable)
-notification arrives; a Codex or OpenCode session still produces the omc
+notification arrives; a Codex session still produces the omc
 alert.
 
 ## 6. Result
 
 - Claude sessions: one proper clickable alert, ever.
-- Codex/OpenCode sessions: omc's osascript alert remains (their only
+- Codex sessions: omc's osascript alert remains (their only
   channel).
-- File log: complete feed across all three providers.
+- File log: complete feed across both providers.

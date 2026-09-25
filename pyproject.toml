@@ -34,6 +34,7 @@ path = "hatch_build.py"
 testpaths = ["tests"]
 markers = [
     "e2e: dockerized end-to-end tests (opt-in, slow, real LLMs)",
+    "e2e_provider(name): declare provider intent for E2E container prerequisites",
     "expensive: LLM-heavy E2E (documentation generation) - run only with explicit user agreement",
 ]
 

@@ -61,8 +61,7 @@ Update assertions that reference the old hardcoded model IDs or
   `"--model sonnet"`.
 
 Tests that use version-pinned IDs as user config values (e.g.
-`test_config_store.py` setting `"claude-fable-5"` via `set_key`,
-`test_configure.py` setting `"anthropic/claude-sonnet-5"` for OpenCode) are
+`test_config_store.py` setting `"claude-fable-5"` via `set_key`) are
 unaffected — they test the config plumbing, not the default model list.
 
 ## Backwards compatibility
@@ -76,6 +75,6 @@ re-select one.
 ## What this does NOT do
 
 - No network calls, no API-key requirement, no `/v1/models` query.
-- No changes to Codex or OpenCode providers (they already return `[]` for
+- No changes to Codex provider (it already returns `[]` for
   free-text entry).
 - No changes to the `Provider` ABC contract or `configure.py` consumer logic.

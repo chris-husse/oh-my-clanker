@@ -134,8 +134,8 @@ def test_yaml_non_mapping_rejected(tmp_path):
 
 def test_set_key_on_split_schemas():
     gcfg = GlobalConfig()
-    store.set_key(gcfg, "llm.default", "opencode")
-    assert gcfg.llm.default == "opencode"
+    store.set_key(gcfg, "llm.default", "codex")
+    assert gcfg.llm.default == "codex"
     pcfg = ProjectConfig()
     store.set_key(pcfg, "worktree.base_branch", "master")
     assert pcfg.worktree.base_branch == "master"
@@ -481,7 +481,6 @@ def test_configure_defaults(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "/plugin marketplace add" in out  # claude hint
     assert "codex plugin marketplace add" in out  # codex hint
-    assert "opencode" in out  # opencode hint
 
 
 def test_configure_set_global(tmp_path, monkeypatch):
@@ -490,15 +489,15 @@ def test_configure_set_global(tmp_path, monkeypatch):
         [
             "configure",
             "--set",
-            "llm.default=opencode",
+            "llm.default=codex",
             "--set",
-            "llm.providers.opencode.model=anthropic/claude-sonnet-5",
+            "llm.providers.codex.model=example-model",
         ]
     )
     assert rc == 0
     cfg = store.load_global(home)
-    assert cfg.llm.default == "opencode"
-    assert cfg.llm.providers["opencode"].model == "anthropic/claude-sonnet-5"
+    assert cfg.llm.default == "codex"
+    assert cfg.llm.providers["codex"].model == "example-model"
 
 
 def test_configure_set_worktree_routes_to_project_file(tmp_path, monkeypatch):

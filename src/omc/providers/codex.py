@@ -26,7 +26,10 @@ class CodexProvider(Provider):
     def session_argv(self, *, session_name, model, seed, notify_sink_argv=None):
         # No session-name flag exists — codex names sessions internally; omc's
         # terminal title carries the slug instead.
-        argv = ["codex"]
+        # Codex now updates the terminal title itself. An empty item list
+        # disables those writes, preserving omc's slug for this session only.
+        # Verified with the real 0.156.1 TUI: default emits OSC 0; [] emits none.
+        argv = ["codex", "-c", "tui.terminal_title=[]"]
         if model:
             argv += ["-m", model]
         if notify_sink_argv:
@@ -39,7 +42,7 @@ class CodexProvider(Provider):
         return argv
 
     def title_env(self):
-        return {}  # no suppression env exists; our OSC write happens after codex starts
+        return {}  # title suppression is a session_argv config override
 
     def install_hint(self):
         return "npm install -g @openai/codex"

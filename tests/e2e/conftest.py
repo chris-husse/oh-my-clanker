@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from .codex_auth import codex_account, selected_volume
 from .harness import ALL_TOKEN_VARS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -48,25 +49,31 @@ def _target_arch() -> str:
     return _DOCKER_ARCH.get(machine, machine)
 
 
-def _forward_tokens(c):
+def _forward_tokens(c, *, use_codex_account=False):
     """Forward whatever provider credentials the host has into the container.
     Absent vars are simply not forwarded — require_token does the gating."""
     for var in ALL_TOKEN_VARS:
+        if var == "OPENAI_API_KEY" and os.environ.get("CODEX_AUTH_VOLUME"):
+            if use_codex_account:
+                selected_volume()
+            continue
         if os.environ.get(var):
             c = c.with_env(var, os.environ[var])
     return c
 
 
 def _finish_container_setup(c):
-    """Post-start steps every container needs, in order."""
-    # finish plugin registration (needs network; baked layer may have been offline)
-    c.get_wrapped_container().exec_run(["bash", "/repo/docker/setup-plugins.sh"])
-    # codex >=0.144 doesn't use a bare OPENAI_API_KEY env — it needs an explicit
-    # stdin login that writes ~/.codex/auth.json (real users run this themselves).
-    if os.environ.get("OPENAI_API_KEY"):
-        c.get_wrapped_container().exec_run(
-            ["bash", "-c", "printenv OPENAI_API_KEY | codex login --with-api-key"]
-        )
+    """Provider setup waits until a test explicitly selects a provider."""
+
+
+@pytest.fixture
+def e2e_provider(request):
+    """Account prerequisites follow the test's declared provider intent."""
+    params = getattr(getattr(request.node, "callspec", None), "params", {})
+    if "provider" in params:
+        return params["provider"]
+    marker = request.node.get_closest_marker("e2e_provider")
+    return marker.args[0] if marker else None
 
 
 @pytest.fixture(scope="session")
@@ -75,6 +82,21 @@ def e2e_image():
     from testcontainers.core.image import DockerImage
 
     try:
+        # Local development can reuse a known image while editing the test-only
+        # conversation driver. The default always rebuilds from this checkout.
+        if prebuilt := os.environ.get("OMC_E2E_PREBUILT_IMAGE"):
+            import docker
+
+            if not os.environ.get("OMC_E2E_PREBUILT_SOURCE"):
+                pytest.fail("OMC_E2E_PREBUILT_SOURCE must name the prebuilt image's source commit")
+            try:
+                docker.from_env().images.get(prebuilt)
+            except docker.errors.ImageNotFound:
+                pytest.fail(
+                    f"OMC_E2E_PREBUILT_IMAGE={prebuilt} is absent; build it or unset the override"
+                )
+            yield prebuilt
+            return
         with DockerImage(
             path=str(REPO_ROOT),
             dockerfile_path="docker/Dockerfile.e2e",
@@ -88,34 +110,32 @@ def e2e_image():
 
 
 @pytest.fixture
-def container(e2e_image):
+def container(e2e_image, e2e_provider):
     from testcontainers.core.container import DockerContainer
 
-    c = _forward_tokens(DockerContainer(e2e_image).with_command("sleep infinity"))
-    try:
-        c.start()
-        _finish_container_setup(c)
+    use_codex_account = e2e_provider == "codex"
+    c = _forward_tokens(
+        DockerContainer(e2e_image).with_command("sleep infinity"),
+        use_codex_account=use_codex_account,
+    )
+    with codex_account(c, _finish_container_setup, use_account=use_codex_account):
         yield c
-    finally:
-        c.stop()
 
 
 @pytest.fixture
-def container_with_artifacts(e2e_image):
+def container_with_artifacts(e2e_image, e2e_provider):
     """A container with tests/e2e/artifacts mounted rw at /artifacts — the
     permanent-E2E-artifact channel (committed wiki docs sync back out)."""
     from testcontainers.core.container import DockerContainer
 
     artifacts = REPO_ROOT / "tests" / "e2e" / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
+    use_codex_account = e2e_provider == "codex"
     c = _forward_tokens(
         DockerContainer(e2e_image)
         .with_command("sleep infinity")
-        .with_volume_mapping(str(artifacts), "/artifacts", "rw")
+        .with_volume_mapping(str(artifacts), "/artifacts", "rw"),
+        use_codex_account=use_codex_account,
     )
-    try:
-        c.start()
-        _finish_container_setup(c)
+    with codex_account(c, _finish_container_setup, use_account=use_codex_account):
         yield c
-    finally:
-        c.stop()

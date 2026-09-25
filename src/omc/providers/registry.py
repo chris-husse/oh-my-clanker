@@ -4,11 +4,8 @@ from ..errors import OmcError
 from .base import Provider
 from .claude import ClaudeProvider
 from .codex import CodexProvider
-from .opencode import OpencodeProvider
 
-_PROVIDERS: dict[str, Provider] = {
-    p.name: p for p in (ClaudeProvider(), CodexProvider(), OpencodeProvider())
-}
+_PROVIDERS: dict[str, Provider] = {p.name: p for p in (ClaudeProvider(), CodexProvider())}
 
 
 def provider_names() -> list[str]:

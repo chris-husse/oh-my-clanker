@@ -22,14 +22,12 @@ omc's in-session skills install as a plugin — once per harness you use:
                          /plugin install omc@oh-my-clanker
   Codex:        codex plugin marketplace add chris-husse/oh-my-clanker
                 then install 'omc' from /plugins
-  OpenCode:     add to opencode.json:
-                "plugin": ["omc@git+https://github.com/chris-husse/oh-my-clanker.git"]
 
 omc's start skill hands off to superpowers — install it too:
 
   Claude Code:  installed for you above; by hand:
                 /plugin install superpowers@claude-plugins-official
-  Codex/OpenCode: install it from https://github.com/obra/superpowers
+  Codex:        install it from https://github.com/obra/superpowers
 """
 
 

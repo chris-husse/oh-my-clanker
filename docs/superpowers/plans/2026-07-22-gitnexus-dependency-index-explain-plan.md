@@ -792,7 +792,7 @@ In `src/omc/internal.py`: extend `_USAGE` (inside the existing string, after the
 ```python
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] | wt-template"
-    " | notify --provider NAME [--event E] [--message M] [payload]"
+    " | notify --provider NAME [payload]"
     " | gitnexus [--git REF] <query|context|impact|cypher> [args…]"
     " | dependency <ensure|document|list> [args…]"
     " | build-progress LOGFILE}"

@@ -26,7 +26,7 @@ provider spawns `claude -p --output-format text --no-session-persistence`
 (`local-cli-client.ts`), which emits stdout only at process exit — `onChunk`
 never fires mid-call. Any single LLM call longer than 5 minutes (routine for
 wiki generation on a real repo) lets the sweeper close `__wiki__`; the next
-graph query throws the reported error. The codex/opencode/cursor providers are
+graph query throws the reported error. The codex/cursor providers are
 buffered the same way.
 
 Secondary quirk: omc passes `--provider`/`--model` on every watch tick, and the
@@ -68,7 +68,7 @@ after `await initWikiDb(this.lbugPath)`:
 now-redundant `onChunk` touch plumbing in `streamOpts` (`lastTouch` and the
 `touchWikiDb()` call) is removed. A comment at the timer documents the
 provider quirk per repo convention (comments at the dependent site): local
-agent CLIs (claude/codex/opencode) buffer stdout until exit, so no streaming
+agent CLIs (claude/codex) buffer stdout until exit, so no streaming
 callback can be relied on for liveness.
 
 No changes to `pool-adapter.ts` — its eviction semantics are shared with the

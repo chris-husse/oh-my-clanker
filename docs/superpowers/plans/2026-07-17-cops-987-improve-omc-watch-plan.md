@@ -721,7 +721,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 6: `omc update` — one-stop: uv upgrade + per-provider plugin updates
 
 **Files:**
-- Modify: `src/omc/providers/base.py` (new abstract method), `src/omc/providers/claude.py`, `src/omc/providers/codex.py`, `src/omc/providers/opencode.py`
+- Modify: `src/omc/providers/base.py` (new abstract method), `src/omc/providers/claude.py`, `src/omc/providers/codex.py`
 - Modify: `src/omc/installer.py` (`run_update`)
 - Test: `tests/unit/test_providers.py`, `tests/unit/test_installer.py`
 
@@ -742,7 +742,6 @@ def test_plugin_update_argvs_are_pure_and_per_provider():
     assert ["claude", "plugin", "update", "omc@oh-my-clanker"] in claude
     codex = get_provider("codex").plugin_update_argvs()
     assert codex == [["codex", "plugin", "marketplace", "upgrade"]]
-    assert get_provider("opencode").plugin_update_argvs() == []  # not scriptable yet
 ```
 
 Append to `tests/unit/test_installer.py` (the file already builds ToolContexts with stub `uv`; follow its `_ctx`-style helper for PATH stubs, or add one):
@@ -855,16 +854,6 @@ Expected: FAIL — `plugin_update_argvs` undefined; `run_update` never touches c
         # filter exists); plugins resolve from the refreshed snapshot. Verified
         # empirically in docker/PLUGIN-NOTES.md (Task 9 records the run).
         return [["codex", "plugin", "marketplace", "upgrade"]]
-```
-
-`src/omc/providers/opencode.py`:
-
-```python
-    def plugin_update_argvs(self):
-        # opencode manages its plugin cache itself (git-ref entry in
-        # opencode.json); no scriptable update verified yet — see
-        # docker/PLUGIN-NOTES.md (Task 9 investigation).
-        return []
 ```
 
 - [ ] **Step 4: Implement `run_update`**
@@ -1208,16 +1197,16 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 9: Docker verification — chain E2E, codex/opencode plugin update investigation
+### Task 9: Docker verification — chain E2E, codex plugin update investigation
 
 **Files:**
 - Create: `tests/e2e/test_e2e_chain.py`
-- Modify: `docker/PLUGIN-NOTES.md` (append findings), `src/omc/providers/codex.py` / `src/omc/providers/opencode.py` (only if findings contradict Task 6's argvs)
+- Modify: `docker/PLUGIN-NOTES.md` (append findings), `src/omc/providers/codex.py` (only if findings contradict Task 6's argvs)
 - Test: itself (E2E) + `tests/unit/test_providers.py` (only on contradiction)
 
 **Interfaces:**
 - Consumes: the built E2E image (`docker build -f docker/Dockerfile.e2e -t omc-e2e:dev .`), Task 3's chain, Task 6's argvs.
-- Produces: an executable record that the chain works in a clean container and that the codex/opencode update paths do what Task 6 claims.
+- Produces: an executable record that the chain works in a clean container and that the codex update paths do what Task 6 claims.
 
 - [ ] **Step 1: Write the chain E2E test**
 
@@ -1294,17 +1283,13 @@ codex plugin marketplace list          # did the snapshot refresh?
 
 Record the exact commands + output in a new `## omc update: per-provider plugin update verification (COPS-987)` section appended to `docker/PLUGIN-NOTES.md`. If `upgrade` does NOT refresh (or needs different arguments), fix `CodexProvider.plugin_update_argvs` AND the assertion in `tests/unit/test_providers.py::test_plugin_update_argvs_are_pure_and_per_provider`, and re-run the unit suite.
 
-- [ ] **Step 4: Investigate opencode plugin updating**
-
-In the same container: `opencode --help 2>&1 | head -40`, look for plugin/cache subcommands; check `~/.config/opencode/` cache layout; consult the plugin entry docs (`opencode.json` `"plugin"` array). Answer: is there a scriptable "re-fetch the git-ref plugin" command? Record findings in the same PLUGIN-NOTES.md section. If a verified command exists, implement it in `OpencodeProvider.plugin_update_argvs` (+ update the unit test's `== []` assertion); if not, the `[]` + in-app hint stands, with the note explaining why.
-
 - [ ] **Step 5: Full suite, lint, commit**
 
 ```bash
 uv run pytest tests/unit -q
 uv run ruff check src tests && uv run ruff format --check src tests
 git add tests/e2e/test_e2e_chain.py docker/PLUGIN-NOTES.md src/omc/providers tests/unit/test_providers.py
-git commit -m "test: chain v2 E2E + codex/opencode plugin-update verification record
+git commit -m "test: chain v2 E2E + codex plugin-update verification record
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```

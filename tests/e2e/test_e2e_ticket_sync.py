@@ -1,9 +1,8 @@
 """Hermetic E2E coverage for the ticket-sync flow.
 
-No real tracker is ever touched: the stub Jira MCP records every write as a JSON
-line in $STUB_JIRA_MUTATIONS_LOG (harness.MUTATIONS_LOG), and these tests assert
-on THAT log first. Transcript greps are a secondary signal only — LLM prose
-varies run to run, the mutations log does not.
+No real tracker is ever touched: the stub Jira MCP records writes and successful
+identity/ticket reads as JSON lines. These artifacts prove the exercised path
+and its effects even when the final CLI message omits intermediate verdicts.
 """
 
 import json
@@ -22,6 +21,20 @@ IN_REVIEW_TRANSITION = "31"
 # the stub's In Progress id (docker/stub-jira-mcp/server.py TRANSITIONS), verified
 # against live-run evidence.
 IN_PROGRESS_TRANSITION = "21"
+
+# The stub's default successful-read audit survives separate MCP processes.
+READS_LOG = "/tmp/stub-jira-reads.jsonl"
+
+
+def _reads(container):
+    script = (
+        "from pathlib import Path; "
+        f"p = Path({READS_LOG!r}); "
+        "print(p.read_text() if p.exists() else '', end='')"
+    )
+    rc, out = run_in(container, ["python3", "-c", script])
+    assert rc == 0, f"could not read tracker audit: {out}"
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
 
 
 def _mutations(container):
@@ -123,6 +136,10 @@ def test_start_unassigned_claims_and_transitions(container):
     muts = [m for m in _mutations(container) if m["key"] == "PROJ-1"]
     tools = [m["tool"] for m in muts]
     assert "assignIssue" in tools, f"ticket was not assigned: {muts}\n{out[-2000:]}"
+    assert any(
+        m["tool"] == "assignIssue" and m["arguments"].get("accountId") == "stub-user-1"
+        for m in muts
+    ), f"ticket was not assigned to the current stub user: {muts}"
     assert "transitionIssue" in tools, f"ticket was not transitioned: {muts}\n{out[-2000:]}"
     in_progress = [
         m
@@ -131,7 +148,8 @@ def test_start_unassigned_claims_and_transitions(container):
         and m["arguments"].get("transitionId") == IN_PROGRESS_TRANSITION
     ]
     assert in_progress, f"no In Progress transition recorded: {muts}\n{out[-2000:]}"
-    assert "OMC_TICKET" in out, out[-2000:]
+    # Text mode emits only the final primer/seed question. The intermediate
+    # ticket verdict need not survive there; the recorded writes are the proof.
 
 
 def test_start_assigned_to_other_skips_writes_headless(container):
@@ -145,14 +163,29 @@ def test_start_assigned_to_other_skips_writes_headless(container):
     muts = [m for m in _mutations(container) if m["key"] == "PROJ-3"]
     assert muts == [], f"whole headless start flow wrote to someone else's ticket: {muts}"
 
-    # The zero-writes invariant above is the load-bearing one and covers the
-    # whole flow. The verdict itself is driven directly so the assertion cannot
-    # be made vacuous by /omc:start stopping early — see _drive_ticket_sync.
+    # Drive sync directly so a start-context gate cannot make zero writes
+    # vacuous. Only new successful reads count: slug/start may already have
+    # fetched the same ticket and user in earlier MCP processes.
     worktree = _worktree_path(container, repo, "feature/proj-3")
-    _, syncout = _drive_ticket_sync(container, worktree, "phase start for ticket PROJ-3")
+    before = _reads(container)
+    rc, syncout = _drive_ticket_sync(container, worktree, "phase start for ticket PROJ-3")
+    assert rc == 0, syncout
+    after = _reads(container)
+    assert after[: len(before)] == before, f"tracker read audit was replaced: {after}"
+    fresh = after[len(before) :]
+    assert any(
+        read["tool"] == "getIssue"
+        and read["key"] == "PROJ-3"
+        and read["result"]["key"] == "PROJ-3"
+        and read["result"]["fields"]["assignee"]["accountId"] == "other-user-9"
+        for read in fresh
+    ), f"ticket-sync did not read the other-assigned ticket: {fresh}\n{syncout[-2000:]}"
+    assert any(
+        read["tool"] == "getCurrentUser" and read["result"]["accountId"] == "stub-user-1"
+        for read in fresh
+    ), f"ticket-sync did not read the current user: {fresh}\n{syncout[-2000:]}"
     muts = [m for m in _mutations(container) if m["key"] == "PROJ-3"]
     assert muts == [], f"non-interactive ticket-sync wrote to someone else's ticket: {muts}"
-    assert "assigned-elsewhere" in syncout, syncout[-3000:]
 
 
 def test_start_auth_error_reports_and_continues(container):

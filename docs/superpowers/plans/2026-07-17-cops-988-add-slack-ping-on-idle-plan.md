@@ -4,7 +4,7 @@
 
 **Goal:** When an omc-launched LLM session needs attention (question, permission, turn end), the user gets a native macOS notification or a line in a tail-able log file.
 
-**Architecture:** Detection is per-harness (Claude Code hooks file, Codex `-c notify=` argv, OpenCode plugin file); providers *describe* wiring purely and `omc start` materializes it in the worktree. Delivery is shared: every hook invokes `omc internal notify --provider <name>`, which normalizes the payload and dispatches to the backend configured in `~/.omc/config.json` (`notifications.backend`: `"macos"` → osascript, `"file://<abs path>"` → append a tab-separated line). Invariant: notifications never break work — wiring failures warn and continue; the sink always exits 0.
+**Architecture:** Detection is per-harness (Claude Code hooks file, Codex `-c notify=` argv); providers *describe* wiring purely and `omc start` materializes it in the worktree. Delivery is shared: every hook invokes `omc internal notify --provider <name>`, which normalizes the payload and dispatches to the backend configured in `~/.omc/config.json` (`notifications.backend`: `"macos"` → osascript, `"file://<abs path>"` → append a tab-separated line). Invariant: notifications never break work — wiring failures warn and continue; the sink always exits 0.
 
 **Tech Stack:** Python 3.12 stdlib only (json, re, time, argparse, pathlib), pytest. No new dependencies.
 
@@ -29,7 +29,7 @@
 - `src/omc/configure.py` — two walkthrough prompts (enable, backend).
 - `src/omc/notify.py` — **new**: sink argv builder, payload normalizers, backends, `run_notify`, `wire_worktree` + Claude-settings merge.
 - `src/omc/internal.py` — `notify` subcommand dispatch.
-- `src/omc/providers/base.py|claude.py|codex.py|opencode.py` — `notification_setup()` + `notify_sink_argv` parameter on `session_argv()`.
+- `src/omc/providers/base.py|claude.py|codex.py` — `notification_setup()` + `notify_sink_argv` parameter on `session_argv()`.
 - `src/omc/start.py` — wiring call after worktree creation, dry-run plan line.
 - Tests: `tests/unit/test_config_store.py`, **new** `tests/unit/test_notify.py`, `tests/unit/test_providers.py`, `tests/unit/test_internal.py`, `tests/unit/test_start.py`, **new** `tests/e2e/test_e2e_notify.py`.
 - `README.md` — a short "Notifications" subsection.
@@ -511,7 +511,7 @@ git commit -m "feat: notification delivery core — macos + file backends, paylo
 
 **Interfaces:**
 - Consumes: `notify.payload_from_claude/from_codex`, `notify.deliver`, `store.load` (Task 1/2).
-- Produces: CLI `omc internal notify --provider {claude,codex,opencode} [--event E] [--message M] [payload]`; `notify.run_notify(ctx: ToolContext, args: argparse.Namespace) -> int` (always 0).
+- Produces: CLI `omc internal notify --provider {claude,codex} [payload]`; `notify.run_notify(ctx: ToolContext, args: argparse.Namespace) -> int` (always 0).
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/unit/test_internal.py`:
 
@@ -539,8 +539,8 @@ import json as _json
 from omc.config import store
 
 
-def _notify_args(provider, payload=None, event="", message=""):
-    return argparse.Namespace(provider=provider, payload=payload, event=event, message=message)
+def _notify_args(provider, payload=None):
+    return argparse.Namespace(provider=provider, payload=payload)
 
 
 def _saved_cfg(home, *, enabled, log):
@@ -560,7 +560,7 @@ def test_run_notify_disabled_is_silent_kill_switch(tmp_path):
     assert not log.exists()  # disabled config silences even wired worktrees
 
 
-def test_run_notify_codex_and_opencode_paths(tmp_path):
+def test_run_notify_codex_paths(tmp_path):
     home = tmp_path / "home"
     log = tmp_path / "n.log"
     _saved_cfg(home, enabled=True, log=log)
@@ -568,13 +568,9 @@ def test_run_notify_codex_and_opencode_paths(tmp_path):
     assert notify.run_notify(
         ctx, _notify_args("codex", payload=_json.dumps({"type": "agent-turn-complete"}))
     ) == 0
-    assert notify.run_notify(
-        ctx, _notify_args("opencode", event="session.idle", message="session ready")
-    ) == 0
     lines = [ln.split("\t") for ln in log.read_text().splitlines()]
     assert [ln[2:] for ln in lines] == [
         ["codex", "agent-turn-complete", "turn complete"],
-        ["opencode", "session.idle", "session ready"],
     ]
     assert all(ln[1] == "s-9" for ln in lines)
 
@@ -625,8 +621,6 @@ def run_notify(ctx: ToolContext, args: argparse.Namespace) -> int:
         event, body = payload_from_claude(text)
     elif args.provider == "codex":
         event, body = payload_from_codex(args.payload)
-    else:  # opencode: the generated plugin passes explicit flags
-        event, body = (args.event or "unknown", args.message or GENERIC_BODY)
     deliver(cfg, ctx=ctx, provider=args.provider, event=event, body=body, cwd=os.getcwd())
     return 0
 ```
@@ -636,7 +630,7 @@ In `src/omc/internal.py`: extend `_USAGE` to
 ```python
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] | wt-template"
-    " | notify --provider NAME [--event E] [--message M] [payload]}"
+    " | notify --provider NAME [payload]}"
 )
 ```
 
@@ -645,9 +639,7 @@ and add to `run_internal`, before the final fallthrough:
 ```python
     if cmd == "notify":
         parser = argparse.ArgumentParser(prog="omc internal notify", add_help=False)
-        parser.add_argument("--provider", required=True, choices=("claude", "codex", "opencode"))
-        parser.add_argument("--event", default="")
-        parser.add_argument("--message", default="")
+        parser.add_argument("--provider", required=True, choices=("claude", "codex"))
         parser.add_argument("payload", nargs="?", default=None)  # codex's single JSON arg
         try:
             args = parser.parse_args(rest)
@@ -679,7 +671,6 @@ git commit -m "feat: omc internal notify — payload-normalizing sink, kill-swit
 - Modify: `src/omc/providers/base.py`
 - Modify: `src/omc/providers/claude.py`
 - Modify: `src/omc/providers/codex.py`
-- Modify: `src/omc/providers/opencode.py`
 - Test: `tests/unit/test_providers.py`
 
 **Interfaces:**
@@ -719,18 +710,6 @@ def test_codex_notify_sink_argv_before_seed():
     assert p.notification_setup(sink) == {}  # codex wiring is argv-only
 
 
-def test_opencode_notification_setup_plugin_file():
-    files = get_provider("opencode").notification_setup(
-        ["omc", "internal", "notify", "--provider", "opencode"]
-    )
-    assert list(files) == [".opencode/plugin/omc-notify.js"]
-    js = files[".opencode/plugin/omc-notify.js"]
-    assert "omc internal notify --provider opencode" in js
-    for event in ("session.idle", "permission.asked", "session.error"):
-        assert event in js
-    assert "generated by omc" in js  # foreign-content detection marker
-
-
 def test_notification_setup_defaults_and_purity(tmp_path, monkeypatch):
     # default is {}; and no provider touches the filesystem or spawns anything
     monkeypatch.chdir(tmp_path)
@@ -741,9 +720,9 @@ def test_notification_setup_defaults_and_purity(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_claude_opencode_ignore_notify_sink_argv():
+def test_claude_ignore_notify_sink_argv():
     # their wiring is a FILE; argv must stay identical with/without the param
-    for name in ("claude", "opencode"):
+    for name in ("claude",):
         p = get_provider(name)
         with_arg = p.session_argv(session_name="n", model="m", seed="s", notify_sink_argv=SINK)
         without = p.session_argv(session_name="n", model="m", seed="s")
@@ -816,33 +795,6 @@ and add after it:
         return argv
 ```
 
-- [ ] **Step 6: Implement opencode.py** — extend `session_argv` with `notify_sink_argv=None` (body unchanged); add:
-
-```python
-    def notification_setup(self, sink_argv):
-        # A generated project plugin (no npm deps): opencode loads
-        # .opencode/plugin/*.js and calls `event` for every bus event. The
-        # "generated by omc" first line doubles as the foreign-content marker
-        # wire_worktree checks before ever overwriting this file.
-        cmd = " ".join(sink_argv)
-        plugin = f"""\
-// generated by omc — idle notifications (COPS-988); safe to delete.
-export const OmcNotify = async ({{ $ }}) => ({{
-  event: async ({{ event }}) => {{
-    const bodies = {{
-      "session.idle": "session ready",
-      "permission.asked": "permission needed",
-      "session.error": "session error",
-    }};
-    const body = bodies[event.type];
-    if (!body) return;
-    await $`{cmd} --event ${{event.type}} --message ${{body}}`.quiet().nothrow();
-  }},
-}});
-"""
-        return {".opencode/plugin/omc-notify.js": plugin}
-```
-
 - [ ] **Step 7: Run tests to verify they pass; run the whole unit suite**
 
 Run: `uv run pytest tests/unit -q`
@@ -851,8 +803,8 @@ Expected: PASS (existing `session_argv` call sites pass no `notify_sink_argv` an
 - [ ] **Step 8: Lint + commit**
 
 ```bash
-git add src/omc/providers/base.py src/omc/providers/claude.py src/omc/providers/codex.py src/omc/providers/opencode.py tests/unit/test_providers.py
-git commit -m "feat: providers describe notification wiring — settings file / -c notify / plugin (red->green)"
+git add src/omc/providers/base.py src/omc/providers/claude.py src/omc/providers/codex.py tests/unit/test_providers.py
+git commit -m "feat: providers describe notification wiring — settings file / -c notify (red->green)"
 ```
 
 ---
@@ -885,7 +837,6 @@ def test_wire_worktree_writes_fresh_files(tmp_path):
     assert written == [".claude/settings.local.json"]
     settings = _json.loads((tmp_path / ".claude/settings.local.json").read_text())
     assert "Notification" in settings["hooks"] and "Stop" in settings["hooks"]
-    assert _wire(tmp_path, "opencode") == [".opencode/plugin/omc-notify.js"]
     assert _wire(tmp_path, "codex") == []  # argv-wired, no files
 
 
@@ -922,13 +873,6 @@ def test_wire_worktree_leaves_corrupt_settings_alone(tmp_path, capsys):
     assert "leaving it alone" in capsys.readouterr().err
 
 
-def test_wire_worktree_leaves_foreign_plugin_alone(tmp_path, capsys):
-    target = tmp_path / ".opencode" / "plugin" / "omc-notify.js"
-    target.parent.mkdir(parents=True)
-    target.write_text("// the user's own plugin\n")
-    assert _wire(tmp_path, "opencode") == []
-    assert target.read_text() == "// the user's own plugin\n"
-    assert "leaving it alone" in capsys.readouterr().err
 ```
 
 and append to `tests/unit/test_start.py`:
@@ -1177,7 +1121,7 @@ Opt in during `omc configure` (or `omc configure --set notifications.enabled=tru
 and every omc-launched session pings you the moment it needs attention — a
 question, a permission prompt, a finished turn — instead of idling unseen in
 its tab. Delivery is per-harness under the hood (Claude Code hooks, codex's
-`notify` program, an OpenCode plugin), all funneling into
+`notify` program), all funneling into
 `omc internal notify`.
 
 Two backends (`notifications.backend`):

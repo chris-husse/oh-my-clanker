@@ -42,10 +42,9 @@ Append to `tests/unit/test_providers.py` (it already imports `get_provider` from
 ```python
 def test_notifies_natively_flags():
     # claude: the harness posts its own clickable desktop notification;
-    # codex/opencode: no native channel — omc's alert is their only one.
+    # codex: no native channel — omc's alert is its only one.
     assert get_provider("claude").notifies_natively() is True
     assert get_provider("codex").notifies_natively() is False
-    assert get_provider("opencode").notifies_natively() is False
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -76,7 +75,7 @@ In `src/omc/providers/claude.py`, add after the `notification_setup` method:
         return True
 ```
 
-Codex and OpenCode deliberately keep the default `False` — no native channel exists (that is why their hook wiring exists at all). Do not touch those files.
+Codex deliberately keeps the default `False` — no native channel exists (that is why its hook wiring exists at all). Do not touch that adapter.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -154,25 +153,6 @@ def test_macos_backend_unknown_provider_still_delivers(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     notify.deliver(
         cfg, ctx=FakeCtx(), provider="mystery", event="e", body="b", cwd=str(tmp_path)
-    )
-    assert len(calls) == 1 and calls[0][0] == "osascript"
-
-
-def test_macos_backend_delivers_for_opencode(tmp_path, monkeypatch):
-    # opencode has no native desktop channel — omc's alert must keep firing.
-    calls = []
-
-    class FakeCtx:
-        env = {"OMC_SLUG": "s-1"}
-
-        def run(self, argv, **kwargs):
-            calls.append(list(argv))
-
-    cfg = Config()
-    cfg.notifications.enabled = True
-    monkeypatch.setattr(sys, "platform", "darwin")
-    notify.deliver(
-        cfg, ctx=FakeCtx(), provider="opencode", event="e", body="b", cwd=str(tmp_path)
     )
     assert len(calls) == 1 and calls[0][0] == "osascript"
 
@@ -261,4 +241,4 @@ git commit -m "fix: suppress omc macos notification when the harness notifies na
 
 ## Post-implementation note (human, at /omc:finish time)
 
-Manual live check for the build ledger (`.superpowers/sdd/progress.md`), per spec §5: on macOS, start a Claude session and trigger a permission prompt — exactly one (clickable) notification must arrive; a Codex or OpenCode session must still produce the omc `osascript` alert.
+Manual live check for the build ledger (`.superpowers/sdd/progress.md`), per spec §5: on macOS, start a Claude session and trigger a permission prompt — exactly one (clickable) notification must arrive; a Codex session must still produce the omc `osascript` alert.

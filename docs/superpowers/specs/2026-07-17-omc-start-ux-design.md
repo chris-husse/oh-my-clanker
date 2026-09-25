@@ -36,7 +36,7 @@ New module `src/omc/plugin.py`, `ensure_plugin(ctx, cfg, *, check_only)`:
 - The marketplace `<source>` comes from uv's receipt (`installsrc`): a
   directory install uses the checkout path; a git install parses
   `owner/repo` from the URL; fallback `chris-husse/oh-my-clanker`.
-- codex/opencode: no verified scriptable probe in v1 — skipped silently
+- codex: no verified scriptable probe in v1 — skipped silently
   (documented follow-up).
 - `--dry-run` reports plugin status in the plan but NEVER installs.
 
