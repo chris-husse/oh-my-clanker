@@ -2,96 +2,76 @@
 
 # CLI & Entry Point
 
-The `omc` command-line interface. This module owns argument parsing, top-level command dispatch, and the process exit contract. It is the single front door for every user-facing `omc` subcommand — everything a person types on the command line arrives here first.
+`omc`'s command-line surface splits into two layers: a human-facing CLI (`src/omc/cli/__init__.py`) with `--help`, subcommands, and a banner; and a hidden machine-facing layer (`src/omc/internal.py`) that skills invoke as `omc internal …` to talk back to the tool. Both funnel through `main()`.
 
-Two files make up the module:
+## Dispatch flow
 
-- **`src/omc/__init__.py`** — resolves the package version.
-- **`src/omc/cli.py`** — the parser, the dispatcher, and `main()`.
-
-## Version resolution (`__init__.py`)
-
-`__version__` is read from installed package metadata via `importlib.metadata.version("omc")`. In a dev checkout where the package isn't installed, `PackageNotFoundError` is caught and the version falls back to `"0.0.0-dev"`. This string is what `--version` and the startup banner print, so it distinguishes an installed build from a working tree at a glance.
-
-## Request lifecycle
-
-`main(argv)` is the entry point (wired as the console script). It follows a fixed sequence: intercept the hidden `internal` command, parse arguments, build the environment context, print the banner, and dispatch.
+`main(argv)` in `src/omc/cli/__init__.py` is the single entry point (also the `omc` console-script target). It intercepts `internal` before argparse ever sees it — this is deliberate: `internal` never appears in `--help`, and its stdout stays machine-clean (JSON/plain values with no banner), since skills parse it programmatically.
 
 ```mermaid
 flowchart TD
-    A[main] --> B{argv[0] == internal?}
-    B -->|yes| C[run_internal — machine I/O, no banner]
-    B -->|no| D[build_parser → parse_args]
-    D --> E{command given?}
-    E -->|no| F[print help to stderr, return 2]
-    E -->|yes| G[ToolContext.from_env]
-    G --> H[banner to stderr]
-    H --> I[_dispatch]
-    I -->|OmcError| J[error to stderr, return exc.rc]
+    A["main(argv)"] -->|"argv[0] == 'internal'"| B["run_internal (internal.py)"]
+    A -->|otherwise| C["build_parser().parse_args"]
+    C --> D["print banner to stderr"]
+    D --> E["_dispatch(ctx, args)"]
+    E -->|start/watch/dependency watch| F["_load_cfg_or_bail"]
+    F -->|configured| G["run_start / run_watch / run_dependency_watch"]
+    F -->|not configured| H["print error, rc=2"]
 ```
 
-### The `internal` fast path
+For every other command, `main` builds an `argparse.ArgumentParser` via `build_parser()`, prints the `Oh My Clanker! v{version}` banner to stderr (skipped only for `version` and `print-install-path`, which must stay pure for scripting), then calls `_dispatch`. Any `OmcError` raised during dispatch is caught centrally and reported as `error: {msg}` with the error's own return code — subcommand handlers don't need their own top-level try/except.
 
-Before argparse ever runs, `main` checks whether the first raw argument is `internal`. If so it hands the remaining args straight to `run_internal` (imported lazily from `.internal`) and returns. This is deliberate: `internal` is the hidden plumbing that skills use to talk to the CLI. Keeping it ahead of `build_parser` means it never appears in `--help`, produces clean machine-readable stdout, and skips the human banner. It is not a registered subparser and should not become one.
+## `build_parser()` — the subcommand surface
 
-### Banner and exit discipline
+Each subcommand is registered via `argparse` subparsers:
 
-For every command except `version`, `main` prints `Oh My Clanker! v<version>` to **stderr** — never stdout, so it can't corrupt machine-readable output. Dispatch runs inside a `try` that catches `OmcError` and returns its carried return code (`exc.rc`). This is the one place the error contract is enforced for the whole CLI:
+- `version`, `print-install-path` — machine-pure, no banner (see `installsrc.version_string` / `installsrc.package_root`).
+- `configure` — writes `~/.omc/config.yaml` and the repo's `.omc/config.yaml`; supports `--defaults` and repeatable `--set KEY=VALUE`.
+- `start <context>` — begins work on a ticket/task (`--dry-run`, `--headless`, `--no-mutex`).
+- `watch` — keeps the primary checkout's base branch and knowledge graph fresh (`--interval`, `--once`, `--enable-documentation`, `--auto-build`, `--rebase`, `--clear-mutex`).
+- `dependency {watch,list}` — external dependency knowledge cache under `~/.omc`.
+- `install [path]`, `update`, `uninstall` — lifecycle management of the omc install itself.
 
-| Exit code | Meaning |
-|-----------|---------|
-| 0 | success |
-| 1 | error (`OmcError`) |
-| 2 | refusal / misuse — no command given, or unconfigured |
-| 3 | bail (reserved for `omc internal`) |
+`_dispatch` is a flat if/elif ladder keyed on `args.command`. Handlers for anything beyond trivial one-liners (`version`, `print-install-path`) import their implementation lazily inside the branch (`from ..start import run_start`, `from ..watch import run_watch`, etc.) — this keeps `omc --help` and `omc version` fast by not pulling in the heavier subsystems (git, GitNexus, LLM providers) until actually needed.
 
-A bare `omc` with no subcommand prints help to stderr and returns `2`.
+Commands that require configuration (`start`, `watch`, `dependency watch`) go through `_load_cfg_or_bail(ctx)` first, which calls `config.resolve.load_effective(ctx)`. A `None` result means unconfigured — the function prints `error: omc is not configured — run \`omc configure\` first.` (with an added hint if it detects a legacy `config.json` via `store.legacy_config_path`) and the caller returns exit code `2`.
 
-## The parser (`build_parser`)
+## `internal.py` — the skill↔CLI contract
 
-`build_parser` constructs a fresh `ArgumentParser` (prog `omc`) with `--version` and a subparser group. Building it fresh each call keeps it side-effect free — note that `main` calls it a second time to print help when no command is supplied. The registered subcommands:
+`run_internal(argv)` is the hidden counterpart, documented at the top of the module as intercepted before argparse, with stdout reserved for machines. Its exit-code convention is explicit: `0` ok, `2` usage error, `3` "bail" — meaning inconclusive, so the calling skill falls back to its own judgment (used by rebase conflicts, which pause rather than fail outright).
 
-- **`version`** — print version plus install source.
-- **`configure`** — pick your LLM and write `~/.omc/config.json`. Supports `--defaults` (no prompts) and repeatable `--set KEY=VALUE` for non-interactive dotted-key writes.
-- **`start CONTEXT`** — begin work on a ticket key, ticket URL, or quoted task description. Flags: `--dry-run` (print the plan, change nothing) and `--headless` (print-mode session, no exec).
-- **`watch`** — keep the primary checkout's base branch and knowledge graph fresh. `--interval` seconds between ticks (default 300), `--once` for a single tick, `--enable-documentation` to also regenerate LLM docs (flagged as costly).
-- **`install [PATH]`** — (re)install omc from a local checkout (default `.`).
-- **`update`** — update from the source omc was installed from.
-- **`uninstall`** — remove the binary and `~/.omc`.
+Subcommands:
 
-## Dispatch (`_dispatch`)
+| Command | Purpose |
+|---|---|
+| `wt-template` | Prints the worktree copy-ignore template (`WT_TEMPLATE`) verbatim, no trailing newline logic beyond `end=""`. |
+| `rebase-main [--base BRANCH]` | Rebases the current worktree onto the base branch and mirrors the knowledge snapshot from the primary checkout. |
+| `notify --provider NAME [payload]` | Dispatches provider notifications; `payload` is codex's single-JSON-arg calling convention. |
+| `gitnexus [--git REF] <query\|context\|impact\|cypher> [args…]` | Scoped proxy to the GitNexus CLI. |
+| `dependency <ensure\|document\|list> [args…]` | Manages the external dependency knowledge cache. |
+| `build-progress LOGFILE` | Follows a build log and renders progress. |
 
-`_dispatch` maps the parsed `command` to a handler. Every handler beyond parsing is **imported lazily inside the branch that needs it** (`run_configure`, `run_install`, `version_string`, etc.). This keeps startup cheap — typing `omc version` never imports the installer, and a broken optional dependency can't stop unrelated commands from running. An unrecognized command raises `OmcError`, which `main` turns into an exit code.
+### `_rebase_main` — worktree sync
 
-Handlers live in sibling modules and receive the `ToolContext` (and, where relevant, the loaded config):
+Resolves `repo_root`/`primary_root` via `wtconfig`. If they're the same path, it's a no-op (the primary checkout has nothing to rebase onto) and emits `{"ok": true, "note": "primary checkout — nothing to rebase"}`. Otherwise it fetches `origin/<base>` and runs `git rebase`:
 
-- `version` → `installsrc.version_string(ctx.env)`
-- `start` → `start.run_start`
-- `watch` → `watch.run_watch`
-- `configure` → `configure.run_configure`
-- `install` / `update` / `uninstall` → `installer.run_*`
+- **Success**: calls `mirror_snapshot(primary, root)` to copy the knowledge snapshot (`.gitnexus/`, shared `.omc/docs`) from the primary checkout into the worktree, then emits `{"ok": true, "rebased": "<old>..<new>", "synced": [...], "shared": [...]}`.
+- **Conflict**: leaves the rebase **paused** (never aborts it) and emits `{"ok": false, "conflicts": [...]}` with exit code `3` — the calling skill decides whether to resolve or bail.
 
-### The config gate
+A load-bearing invariant, called out directly in the source: `_rebase_main` must **never** invoke `gitnexus index`. Indexing is `omc watch`'s exclusive responsibility; a prior version ran `gitnexus index` here to register the freshly-copied snapshot, which minted a stale, never-unregistered registry entry per worktree that later caused "N commits behind" false reports even when the primary index was current. Worktree queries don't need registration because the proxy always pins `--repo <primary>`.
 
-`start` and `watch` require an existing configuration. Both call `_load_cfg_or_bail(ctx)`, which loads config via `store.load(ctx.home)`. If none exists it prints `error: omc is not configured — run \`omc configure\` first.` to stderr and returns `None`; the caller then returns `2` (refusal). This guarantees no work-performing command runs against an unconfigured environment.
+### `_gitnexus` — scoped query proxy
 
-## Connections to the rest of the codebase
+A safety wrapper around the GitNexus CLI, needed because GitNexus keys its *default* store to whichever branch a repo was first indexed on (possibly since deleted), while incremental analysis writes to `.gitnexus/branches/<branch>/`. An unscoped query would silently read the stale default store. So `_gitnexus` always:
 
-The CLI is intentionally thin — a router, not a worker. Its couplings:
+1. Runs from the **primary root**, not the caller's cwd.
+2. Pins `--repo <primary-root-path>` (a path, not a basename — GitNexus registers repos under remote-URL-derived names).
+3. Pins `--branch <configured base>`.
 
-- **`ToolContext` (`toolctx.py`)** is the sole subprocess/environment boundary. `main` builds it once via `ToolContext.from_env()` and threads it into every handler. Per the repo's architectural invariants, the CLI itself performs no subprocess or filesystem access beyond this.
-- **`config.store`** owns reading `~/.omc/config.json`; the CLI only decides whether the result is usable.
-- **`errors.OmcError`** defines the exit-code contract the dispatcher enforces.
-- **Command modules** (`start`, `watch`, `configure`, `installer`, `installsrc`, `internal`) do the real work. Each is reachable only through its `_dispatch` branch.
+With `--git REF` (optionally `@<hash>`), it instead scopes to an external dependency checkout via `dependency.resolve_ref`, running from that checkout with `--branch omc-pin`. This path is strictly read-only: an unindexed or empty-checkout ref (checked as a string *before* constructing a `Path`, to avoid `Path("") / ".git"` silently resolving to `./.git` in whatever repo happens to be cwd) errors with a hint to run `dependency ensure` first — it never clones on demand.
 
-A representative end-to-end flow: `omc configure` runs `main → _dispatch → run_configure`, which walks the user through provider selection by consulting `providers/registry.py` (`provider_names`, `get_provider`). `omc version` runs `main → _dispatch → version_string`, which calls into `installsrc.install_source` to report where omc was installed from (git remote, uv tool dir, redacted for display).
+Only four verbs are accepted (`query`, `context`, `impact`, `cypher`); anything else, or a missing GitNexus CLI binary, produces a usage/install-hint error rather than a raw subprocess failure.
 
-## Extending the CLI
+## Testing
 
-To add a subcommand:
-
-1. Register a subparser in `build_parser` with its help text and arguments.
-2. Add a branch to `_dispatch` that lazily imports the handler and passes `ctx` (and config, if the command should require configuration — reuse `_load_cfg_or_bail` and return `2` on `None`).
-3. Keep the handler in its own module; the CLI stays a router.
-
-Because everything routes through `main`, honor the existing conventions: banner and diagnostics go to stderr, machine output goes to stdout, and failures raise `OmcError` with the right return code rather than calling `sys.exit` directly. Per the repo's testing policy, a new command needs a test that captures its behavior and fails first — assert on artifacts and exit codes, not on the stderr banner.
+`tests/unit/test_cli.py` and `tests/unit/test_internal.py` exercise both layers against real git fixtures (bare origin + clone + worktree) rather than mocking git — this is how `test_rebase_main_never_runs_gitnexus_index` proves the no-index invariant: it stubs `node` on `PATH` to record invocations and asserts the recording file is never created. Tests also pin down output-channel contracts (`print-install-path` and `internal` subcommands must produce zero stderr banner output; `version` output must contain `"omc"`) since other tooling scripts against these guarantees.

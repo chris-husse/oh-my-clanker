@@ -101,7 +101,7 @@ subagents get top tier regardless of the task under review.
 - **Unknown lineup** (new provider, renamed models): tier definitions are
   relative ("latest & best", "one step down"), so the dispatching model
   resolves them against whatever it knows; no hard-coded id goes stale.
-- **Harness without per-subagent model switching** (Codex/OpenCode not
+- **Harness without per-subagent model switching** (Codex not
   established): honor tiers where the harness supports them; otherwise
   proceed on the session model — never silently substitute a cheaper tier.
 - **Plan missing Model lines** (hand-written/legacy plans): executors fall

@@ -22,7 +22,7 @@ from .wtconfig import WT_TEMPLATE, primary_root, repo_root
 
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] | wt-template"
-    " | notify --provider NAME [--event E] [--message M] [payload]"
+    " | notify --provider NAME [payload]"
     " | gitnexus [--git REF] <ensure|query|context|impact|cypher> [args…]"
     " | dependency <ensure|document|list> [args…]"
     " | build-progress LOGFILE}"
@@ -183,8 +183,6 @@ def run_internal(argv: list[str]) -> int:
     if cmd == "notify":
         parser = argparse.ArgumentParser(prog="omc internal notify", add_help=False)
         parser.add_argument("--provider", required=True, choices=provider_names())
-        parser.add_argument("--event", default="")
-        parser.add_argument("--message", default="")
         parser.add_argument("payload", nargs="?", default=None)  # codex's single JSON arg
         try:
             args = parser.parse_args(rest)

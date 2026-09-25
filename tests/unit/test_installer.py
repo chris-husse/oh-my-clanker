@@ -5,7 +5,7 @@ import pytest
 
 from omc.config import store
 from omc.config.schema import GlobalConfig, ProviderConfig
-from omc.errors import OmcError
+from omc.errors import ConfigError, OmcError
 from omc.installer import run_install, run_uninstall, run_update, validate_checkout
 from omc.toolctx import ToolContext
 
@@ -210,29 +210,20 @@ def test_update_registers_marketplace_before_updating(tmp_path):
     )
 
 
-def test_update_isolates_unknown_provider(tmp_path, capsys):
+def test_update_rejects_unsupported_provider_config(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     _stub(bindir, "uv")
     codex_calls = _stub(bindir, "codex")
-    # require_tools probes the DEFAULT provider (claude) + git/wt, not the
-    # configured (unknown) providers — stub those so the probe passes and the
-    # test still exercises unknown-provider isolation in the plugin loop.
-    _stub(bindir, "claude")
-    _stub(bindir, "wt")
-    _stub(bindir, "git")
     home = tmp_path / "omc-home"
     ctx = ToolContext.from_env(
         {"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}"}
     )
-    # Config with unknown provider FIRST, then codex
-    cfg = GlobalConfig()
-    cfg.llm.providers = {"nonexistent-provider": ProviderConfig(), "codex": ProviderConfig()}
-    store.save_global(ctx.home, cfg)
-    assert run_update(ctx) == 0  # Must succeed despite unknown provider
-    assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
-    err = capsys.readouterr().err
-    assert "✗" in err and "nonexistent-provider" in err  # failure narrated
+    home.mkdir()
+    (home / "config.yaml").write_text("llm:\n  providers:\n    retired: {}\n    codex: {}\n")
+    with pytest.raises(ConfigError, match="retired.*claude.*codex"):
+        run_update(ctx)
+    assert not codex_calls.exists()  # no plugin side effects from invalid config
 
 
 def test_update_installs_a_missing_plugin(tmp_path, capsys):

@@ -15,6 +15,9 @@ from pathlib import Path
 
 MODE = os.environ.get("STUB_JIRA_MODE", "ok")
 MUTATIONS_LOG = os.environ.get("STUB_JIRA_MUTATIONS_LOG", "")
+# Each E2E case has its own container, so a fixed path lets tests distinguish
+# reads made by the skill under test from earlier setup calls.
+READS_LOG = os.environ.get("STUB_JIRA_READS_LOG", "/tmp/stub-jira-reads.jsonl")
 TICKETS = json.loads((Path(__file__).parent / "tickets.json").read_text())
 
 TRANSITIONS = [
@@ -27,6 +30,7 @@ TRANSITIONS = [
 TOOLS = [
     {
         "name": "getIssue",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "description": "Fetch a Jira issue by key (e.g. PROJ-1).",
         "inputSchema": {
             "type": "object",
@@ -36,6 +40,7 @@ TOOLS = [
     },
     {
         "name": "getCurrentUser",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "description": "Get the currently authenticated Jira user.",
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -53,6 +58,7 @@ TOOLS = [
     },
     {
         "name": "listTransitions",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "description": "List available workflow transitions for a Jira issue.",
         "inputSchema": {
             "type": "object",
@@ -80,6 +86,15 @@ def log_mutation(tool: str, key: str, arguments: dict) -> None:
         return
     with open(MUTATIONS_LOG, "a") as f:
         f.write(json.dumps({"tool": tool, "key": key, "arguments": arguments}) + "\n")
+
+
+def log_read(tool: str, key: str | None, arguments: dict, result: dict) -> None:
+    if not READS_LOG:
+        return
+    with open(READS_LOG, "a") as f:
+        f.write(
+            json.dumps({"tool": tool, "key": key, "arguments": arguments, "result": result}) + "\n"
+        )
 
 
 def tool_result(text: str, *, is_error: bool = False) -> dict:
@@ -110,14 +125,18 @@ def handle(msg: dict) -> dict | None:
         arguments = params.get("arguments", {}) or {}
 
         if name == "getCurrentUser":
-            return tool_result(json.dumps({"accountId": "stub-user-1", "displayName": "Stub User"}))
+            user = {"accountId": "stub-user-1", "displayName": "Stub User"}
+            log_read(name, None, arguments, user)
+            return tool_result(json.dumps(user))
 
         if name == "getIssue":
             key = str(arguments.get("key", "")).upper()
             ticket = TICKETS.get(key)
             if ticket is None:
                 return tool_result(f"Issue {key} not found (404).", is_error=True)
-            return tool_result(json.dumps({"key": key, "fields": ticket}, indent=2))
+            issue = {"key": key, "fields": ticket}
+            log_read(name, key, arguments, issue)
+            return tool_result(json.dumps(issue, indent=2))
 
         if name == "listTransitions":
             key = str(arguments.get("key", "")).upper()

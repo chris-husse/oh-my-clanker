@@ -15,13 +15,11 @@ import pytest
 TOKEN_ENV = {
     "claude": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
     "codex": ("OPENAI_API_KEY",),
-    "opencode": ("ANTHROPIC_API_KEY",),
 }
 
 _TOKEN_GUIDANCE = {
     "claude": "put an ANTHROPIC_API_KEY or a `claude setup-token` token in .env",
-    "codex": "put an OPENAI_API_KEY (platform.openai.com) in .env (cp env.example .env)",
-    "opencode": "put an ANTHROPIC_API_KEY (console.anthropic.com) in .env (cp env.example .env)",
+    "codex": "run `just codex-login` for account auth, or put an OPENAI_API_KEY in .env",
 }
 
 PROVIDERS = list(TOKEN_ENV)
@@ -36,6 +34,11 @@ ALL_TOKEN_VARS = tuple(dict.fromkeys(v for vars_ in TOKEN_ENV.values() for v in 
 
 def require_token(provider: str) -> None:
     varnames = TOKEN_ENV[provider]
+    if provider == "codex" and os.environ.get("CODEX_AUTH_VOLUME"):
+        from .codex_auth import selected_volume
+
+        selected_volume()  # validates that this is a Docker volume, never a host path
+        return
     if not any(os.environ.get(v) for v in varnames):
         wanted = " or ".join(f"${v}" for v in varnames)
         pytest.fail(
@@ -49,8 +52,8 @@ def require_token(provider: str) -> None:
 # so a match identifies the provider on its own; no provider argument is needed.
 #
 # VERIFIED strings only, captured from live container runs (the first is also
-# recorded in docker/PLUGIN-NOTES.md). codex and opencode have no entries because
-# their auth-failure output has never been observed here — do not guess one, and
+# recorded in docker/PLUGIN-NOTES.md). Codex has no entries because
+# its auth-failure output has never been observed here — do not guess one, and
 # never broaden these to a fragment like "OAuth", "401", or "Authentication
 # failed": the stub Jira MCP's auth-error mode emits "Authentication failed (HTTP
 # 401): OAuth token expired or revoked" on purpose, and a loose matcher would fire
@@ -102,12 +105,69 @@ def run_in(container, argv, *, env=None, cwd=None, timeout=600):
     return result.exit_code, output
 
 
+def set_codex_container_policy(container, *, reasoning_effort=None, run=None) -> None:
+    """Allow Codex shell tools inside the disposable Docker E2E container.
+
+    Nested bubblewrap namespaces are unavailable there. Keep approval at
+    ``never`` and preserve the selected CODEX_HOME's plugin and MCP tables.
+    Lifecycle tests may also request high reasoning without duplicating keys.
+    """
+    settings = {"approval_policy": "never", "sandbox_mode": "danger-full-access"}
+    if reasoning_effort is not None:
+        settings["model_reasoning_effort"] = reasoning_effort
+    script = """\
+import json, os, sys, tomllib
+from pathlib import Path
+
+home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+path = home / "config.toml"
+source = path.read_text() if path.exists() else ""
+data = tomllib.loads(source)
+settings = json.loads(sys.argv[1])
+for key, value in settings.items():
+    if key in data and data[key] != value:
+        raise ValueError(f"conflicting Codex E2E setting {key}: {data[key]!r}")
+missing = {key: value for key, value in settings.items() if key not in data}
+if missing:
+    home.mkdir(parents=True, exist_ok=True)
+    prefix = "".join(f"{key} = {json.dumps(value)}\\n" for key, value in missing.items())
+    path.write_text(prefix + source)
+    parsed = tomllib.loads(path.read_text())
+    assert all(parsed[key] == value for key, value in settings.items())
+"""
+    runner = run or run_in
+    rc, out = runner(container, ["python3", "-c", script, json.dumps(settings)])
+    assert rc == 0, f"Codex E2E container policy failed: {out}"
+
+
 def configure_omc(container, provider: str) -> None:
+    setup = container.get_wrapped_container().exec_run(
+        ["bash", "/repo/docker/setup-plugins.sh", provider]
+    )
+    if setup.exit_code != 0:
+        detail = setup.output.decode(errors="replace")[-2000:].strip()
+        for var in ALL_TOKEN_VARS:
+            if token := os.environ.get(var):
+                detail = detail.replace(token, "[redacted]")
+        pytest.fail(f"plugin setup failed for {provider} (exit {setup.exit_code}): {detail}")
+    if (
+        provider == "codex"
+        and os.environ.get("OPENAI_API_KEY")
+        and not os.environ.get("CODEX_AUTH_VOLUME")
+    ):
+        # Codex >=0.144 needs an explicit stdin login; bare API env is not enough.
+        login = container.get_wrapped_container().exec_run(
+            ["bash", "-c", "printenv OPENAI_API_KEY | codex login --with-api-key"]
+        )
+        if login.exit_code != 0:
+            pytest.fail(f"Codex API login failed in E2E container (exit {login.exit_code}).")
     rc, out = run_in(
         container,
         ["omc", "configure", "--set", f"llm.default={provider}"],
     )
     assert rc == 0, f"omc configure failed in container:\n{out}"
+    if provider == "codex":
+        set_codex_container_policy(container)
 
 
 def make_work_repo(container, path="/work/repo") -> str:
@@ -126,7 +186,6 @@ def wire_mcp(container, provider: str, mode: str) -> None:
     """Wire the stub Jira MCP into the harness's config. mode: ok|auth-error|absent."""
     if mode == "absent":
         return
-    stub_env = f"STUB_JIRA_MODE={mode}"
     if provider == "claude":
         jira_spec = {
             "type": "stdio",
@@ -166,32 +225,9 @@ with open(path, "w") as f:
             [
                 "bash",
                 "-c",
-                f"mkdir -p ~/.codex && cat >> ~/.codex/config.toml <<'EOF'\n{toml}\nEOF",
-            ],
-        )
-    elif provider == "opencode":
-        spec = {
-            "mcp": {
-                "jira": {
-                    "type": "local",
-                    "command": [
-                        "env",
-                        stub_env,
-                        f"STUB_JIRA_MUTATIONS_LOG={MUTATIONS_LOG}",
-                        "python3",
-                        "/repo/docker/stub-jira-mcp/server.py",
-                    ],
-                    "enabled": True,
-                }
-            }
-        }
-        rc, out = run_in(
-            container,
-            [
-                "bash",
-                "-c",
-                "mkdir -p ~/.config/opencode && "
-                f"cat > ~/.config/opencode/opencode.json <<'EOF'\n{json.dumps(spec)}\nEOF",
+                'codex_home="${CODEX_HOME:-$HOME/.codex}" && '
+                'mkdir -p "$codex_home" && '
+                f"cat >> \"$codex_home/config.toml\" <<'EOF'\n{toml}\nEOF",
             ],
         )
     else:

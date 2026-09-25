@@ -90,12 +90,9 @@ Four pieces:
 |---|---|---|
 | Claude Code | write/merge `.claude/settings.local.json` in the worktree: `Notification` (unfiltered) + `Stop` hooks → `omc internal notify --provider claude` | permission prompts, idle-waiting, agent-needs-input, elicitation, turn end |
 | Codex | no file; `session_argv(notify_sink_argv=…)` places `-c notify=["omc","internal","notify","--provider","codex"]` before the trailing seed positional | `agent-turn-complete` only — all Codex's `notify` exposes today |
-| OpenCode | write generated `.opencode/plugin/omc-notify.js` (self-contained, no npm deps) | `session.idle`, `permission.asked`, `session.error` |
 
 Payload shapes differ and are normalized in `notify.py`: Claude sends JSON
-on stdin (`message`, `hook_event_name`); Codex passes one JSON argument;
-the OpenCode plugin passes `--message <text>` (and `--event <name>`)
-explicitly. Provider quirks get comments at the exact code site, per repo
+on stdin (`message`, `hook_event_name`); Codex passes one JSON argument. Provider quirks get comments at the exact code site, per repo
 convention (the Codex `-c` flag syntax is re-verified against the
 installed CLI during implementation).
 
@@ -107,7 +104,7 @@ the fresh worktree BEFORE omc wires anything.
 
 Accepted consequences:
 
-- The Claude/OpenCode wiring is a worktree file, so *manually* started
+- The Claude wiring is a worktree file, so *manually* started
   sessions in that worktree also notify (harmless; arguably a feature).
   Codex notifies only for omc-launched sessions — omc never edits
   `~/.codex/config.toml`.
@@ -149,9 +146,7 @@ Invariant: **notifications never break work**.
   `--dry-run` prints the planned wiring with the rest of the plan.
 - `.claude/settings.local.json` merge: parse existing JSON, append our
   hook entries; idempotent (already wired → skip); unparseable existing
-  file → leave it alone, warn on stderr, skip Claude wiring. Same
-  leave-alone rule if `.opencode/plugin/omc-notify.js` exists with foreign
-  content.
+  file → leave it alone, warn on stderr, skip Claude wiring.
 - Any wiring failure → one stderr warning, launch continues.
 - `omc internal notify`: malformed/absent payload degrades to the generic
   body "needs your attention"; always exit 0.
@@ -169,7 +164,7 @@ Unit (existing patterns — fake `ToolContext`, tmp dirs):
   flags before the seed positional; None → argv unchanged).
 - Merge matrix for `.claude/settings.local.json`: fresh file / existing
   other hooks / already wired / corrupt JSON.
-- Payload normalization ×3 (stdin JSON, argv JSON, flags), including
+- Payload normalization for both transports (Claude stdin JSON, Codex argv JSON), including
   malformed payloads.
 - Backends: macos → exact escaped osascript argv on Darwin, no-op
   elsewhere, exit 0 on failure; file → formatted line, escaping of control

@@ -42,6 +42,14 @@ def test_initialize_and_tools_list():
             "listTransitions",
             "transitionIssue",
         ]
+        by_name = {tool["name"]: tool for tool in tools["result"]["tools"]}
+        for name in ("getIssue", "getCurrentUser", "listTransitions"):
+            assert by_name[name]["annotations"] == {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+            }
+        for name in ("assignIssue", "transitionIssue"):
+            assert not by_name[name].get("annotations", {}).get("readOnlyHint", False)
     finally:
         proc.terminate()
 
@@ -78,6 +86,41 @@ def test_auth_error_mode():
         assert r["result"]["isError"] is True
         text = r["result"]["content"][0]["text"]
         assert "401" in text and "auth" in text.lower()
+    finally:
+        proc.terminate()
+
+
+def test_read_audit_records_only_successful_lookups(tmp_path):
+    reads = tmp_path / "reads.jsonl"
+    proc = _start(extra_env={"STUB_JIRA_READS_LOG": str(reads)})
+    try:
+        issue = _call(proc, "getIssue", {"key": "PROJ-3"})["result"]
+        user = _call(proc, "getCurrentUser", {}, id_=6)["result"]
+        missing = _call(proc, "getIssue", {"key": "PROJ-999"}, id_=7)["result"]
+        assert missing["isError"] is True
+        records = [json.loads(line) for line in reads.read_text().splitlines()]
+        assert records == [
+            {
+                "tool": "getIssue",
+                "key": "PROJ-3",
+                "arguments": {"key": "PROJ-3"},
+                "result": json.loads(issue["content"][0]["text"]),
+            },
+            {
+                "tool": "getCurrentUser",
+                "key": None,
+                "arguments": {},
+                "result": json.loads(user["content"][0]["text"]),
+            },
+        ]
+    finally:
+        proc.terminate()
+
+    auth_reads = tmp_path / "auth-reads.jsonl"
+    proc = _start(mode="auth-error", extra_env={"STUB_JIRA_READS_LOG": str(auth_reads)})
+    try:
+        assert _call(proc, "getIssue", {"key": "PROJ-3"})["result"]["isError"] is True
+        assert not auth_reads.exists()
     finally:
         proc.terminate()
 

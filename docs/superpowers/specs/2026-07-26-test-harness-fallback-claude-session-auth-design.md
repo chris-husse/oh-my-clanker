@@ -129,7 +129,7 @@ is unchanged, so no caller is affected.
 Both strings were captured from live container runs, not guessed. The first is
 independently corroborated by `docker/PLUGIN-NOTES.md:83`, which recorded the
 same `Not logged in · Please run /login` output during earlier container work.
-No `codex` or `opencode` signatures are included: their auth-failure text has
+No `codex` signatures are included: their auth-failure text has
 not been observed, and shipping unverified matchers is how false positives get
 into a test gate. The map is structured so entries can be added when their
 output is actually seen, with a comment saying exactly that — matching the
@@ -179,9 +179,8 @@ ANTHROPIC_API_KEY (below) is set", which is backwards for the common case and
 actively unhelpful to someone without an API key — the exact situation that
 opened this branch. Restate it as verified fact: a `claude setup-token` token
 alone runs the entire `claude` tier, no API key required. The boundary stays
-explicit — `opencode` requires `ANTHROPIC_API_KEY` and `codex` requires
-`OPENAI_API_KEY`; a Claude OAuth token cannot serve either, since neither is
-the Claude Code CLI.
+explicit — Codex uses its own account login or `OPENAI_API_KEY`; a Claude
+OAuth token cannot authenticate the Codex CLI.
 
 ## Testing
 

@@ -1,6 +1,6 @@
 # Oh My Clanker!
 
-> Turn "I have a ticket" into "I'm in a prepared worktree with an LLM session that already knows the ticket" — for Claude Code, Codex, and OpenCode.
+> Turn "I have a ticket" into "I'm in a prepared worktree with an LLM session that already knows the ticket" — for Claude Code and Codex.
 
 `omc` is one repo, two things. A small, deterministic CLI does what a computer's good at: probing your tools, naming a branch, creating a worktree, launching and naming a session. A skills plugin — installed straight from this repo into your harness — does what only an LLM can: read the ticket, decide if there's enough to go on, kick off a brainstorm. There's no skill-sync step and no copying files into provider config directories; each harness's own plugin manager pulls skills from here directly. ("Clanker": what you call a robot after it's done all of that for you.)
 
@@ -26,16 +26,15 @@
    |---|---|
    | Claude Code | `/plugin marketplace add chris-husse/oh-my-clanker` then `/plugin install omc@oh-my-clanker` |
    | Codex | `codex plugin marketplace add chris-husse/oh-my-clanker`, then install `omc` from `/plugins` |
-   | OpenCode | add `"plugin": ["omc@git+https://github.com/chris-husse/oh-my-clanker.git"]` to `opencode.json` |
 
    For Claude Code you can skip this table: `omc configure`, `omc update` and `omc start` all install (and repair) the plugin for you.
 
-   `omc`'s session skill hands off to [superpowers](https://github.com/obra/superpowers)'s brainstorming skill. The plugin manifest deliberately declares **no** dependency on it — Claude Code matches a dependency by its exact `name@marketplace` id and refuses to load omc when superpowers came from a different marketplace, and it never installs the dependency for you anyway. Instead omc installs superpowers itself for Claude Code (from the official marketplace); for the other harnesses install it yourself:
+   `omc`'s session skill hands off to [superpowers](https://github.com/obra/superpowers)'s brainstorming skill. The plugin manifest deliberately declares **no** dependency on it — Claude Code matches a dependency by its exact `name@marketplace` id and refuses to load omc when superpowers came from a different marketplace, and it never installs the dependency for you anyway. Instead omc installs superpowers itself for Claude Code (from the official marketplace); for Codex install it yourself:
 
    | Harness | Install superpowers |
    |---|---|
    | Claude Code | automatic; by hand: `/plugin install superpowers@claude-plugins-official` |
-   | Codex / OpenCode | Install from [obra/superpowers](https://github.com/obra/superpowers) |
+   | Codex | Install from [obra/superpowers](https://github.com/obra/superpowers) |
 
    Full write-up of the cross-marketplace dependency pitfall: [`docker/PLUGIN-NOTES.md`](docker/PLUGIN-NOTES.md).
 
@@ -55,9 +54,9 @@ A ticket key or URL is resolved through whatever tracker tool your session alrea
 2. **Probe** — real `--version` calls (never file-exists checks) against `git`, `wt`, and your configured provider CLI. Anything missing fails loud with an install hint, before anything else happens.
 3. **Slug** — one headless call to your provider turns the context into a short branch slug (`proj-123-fix-login-timeout`) — or a precise, actionable refusal if it can't (no tracker tool configured, tracker tool not authenticated, ticket not found, or free text too thin to name work after).
 4. **Worktree** — fetches the base branch and hands the slug to `wt` to create a fresh worktree on `{branch_prefix}{slug}` (`feature/proj-123-fix-login-timeout` by default). Re-running `omc start` for the same ticket re-enters that same worktree instead of erroring.
-5. **Handoff** — sets your terminal tab's title to the slug and launches your provider's interactive session *inside* the worktree, seeded with `/omc:start <context>`. On Claude Code the session is also *named* after the slug (`-n <slug>`), so you can walk away and pick it back up later with `claude --resume <slug>` — Codex and OpenCode have no session-naming flag, so for those the tab title is the only breadcrumb.
+5. **Handoff** — sets your terminal tab's title to the slug and launches your provider's interactive session *inside* the worktree, seeded with native `/omc:start` and the context encoded as one JSON data value. Commands or urgent requests inside the context remain investigation data. On Claude Code the session is also *named* after the slug (`-n <slug>`), so you can walk away and pick it back up later with `claude --resume <slug>` — Codex has no session-naming flag, so its tab title is the breadcrumb.
 
-From there, `/omc:start` takes over inside the session itself: it gathers the ticket's context (parent/epic, linked docs — each summarized, or reported as "couldn't fetch" rather than failing outright), verifies the base branch is still fresh (rebasing, or stopping cleanly on conflicts — it never brainstorms on a stale base), and then hands off to `/omc:plan`, which runs one `/omc:explain` pass over the ticket ("which parts of this codebase are relevant to this?"), bundles the answer with pointers to prior design records into a project primer, asks for your own seed thinking, and starts a `superpowers:brainstorming` session that already knows the codebase. When the brainstorm converges, type `/omc:implement`: it writes the spec and hardens it section-by-section through `/omc:explain`, walks the implementation plan through the same scrutiny, builds via subagents, and ends by invoking `/omc:finish`.
+From there, `/omc:start` takes over inside the session itself: it gathers the ticket's context (parent/epic, linked docs — each summarized, or reported as "couldn't fetch" rather than failing outright), verifies the base branch is still fresh (rebasing, or stopping cleanly on conflicts — it never brainstorms on a stale base), and then hands off to `/omc:plan`, which runs one `/omc:explain` pass over the ticket ("which parts of this codebase are relevant to this?"), bundles the answer with pointers to prior design records into a project primer, and asks for your own seed thinking. It waits for your answer and resolves material scope questions before brainstorming presents a complete design for discussion. Agreement, including a brief `ok`, leaves the session at the handoff. When you want implementation, invoke `$omc:implement` in Codex or `/omc:implement` in Claude directly: that one instruction authorizes spec hardening, implementation planning, subagent work, and `/omc:finish` through a described push. Codex 0.156.1 treats `/omc:implement` entered at the TUI prompt as an unrecognized slash command; its supported direct skill syntax is `$omc:implement`. Only critical unanswered questions or genuine blockers interrupt that flow; answering one resumes the same authorization.
 
 When the work is done, run `/omc:finish` inside the session: it rebases onto a fresh base, squashes the branch to a single commit whose message *is* the MR/PR description (generated from the real diff), pushes with `--force-with-lease`, and prints where to open the MR — it never creates one for you. Worktrees are snapshots of main — code AND knowledge: `wt` copies every gitignored file (`.env`, caches, the `.gitnexus`/`.omc/docs` graph+docs) into new worktrees, and `/omc:rebase-main` refreshes both later (rebase onto the fresh base + a deterministic Python re-mirror of the knowledge dirs; it is also `/omc:finish`'s first step). omc seeds a starter `.config/wt.toml` when a project has none, and `/omc:check-wt-config` reviews an existing one against the faithful-worktree expectations.
 
@@ -75,7 +74,7 @@ Opt in during `omc configure` (or `omc configure --set notifications.enabled=tru
 and every omc-launched session pings you the moment it needs attention — a
 question, a permission prompt, a finished turn — instead of idling unseen in
 its tab. Delivery is per-harness under the hood (Claude Code hooks, codex's
-`notify` program, an OpenCode plugin), all funneling into
+`notify` program), all funneling into
 `omc internal notify`.
 
 Two backends (`notifications.backend`):
@@ -94,7 +93,7 @@ already-wired worktrees included.
 - `git`
 - [`wt`](https://github.com/worktrunk) (Worktrunk) — creates the worktree
 - [`uv`](https://astral.sh/uv) — installs and updates `omc` itself
-- At least one provider CLI: `claude`, `codex`, or `opencode`
+- At least one provider CLI: `claude` or `codex`
 - The [superpowers](https://github.com/obra/superpowers) plugin, for whichever harness(es) you use — `/omc:start` reaches it through `/omc:plan`
 
 `omc start` probes for `git`, `wt`, and your configured provider before doing anything else, and refuses with an install hint for whatever's missing rather than guessing.
@@ -127,31 +126,44 @@ World build — format check, lint, package build; no tests:
 just build
 ```
 
-E2E tier — Dockerized, real provider CLIs, a fresh container per test:
+E2E tier — Dockerized, real provider CLIs, a fresh container per test. For
+workflow or provider changes, run the serial Codex and Claude lifecycle matrix
+locally or on a trusted private runner, then the token-free smoke suite:
 
 ```bash
-just e2e-tests                                # everything
-just e2e-tests tests/e2e/test_e2e_smoke.py    # container-harness smoke test only, no tokens needed
-just e2e-tests -k claude                      # just the claude column of the matrix
-just expensive-e2e-tests                      # LLM-heavy docs-generation tests - real money, run deliberately
+just codex-login
+CODEX_AUTH_VOLUME=omc-e2e-codex-auth just lifecycle-tests
+just check
+just build
+just e2e-tests tests/e2e/test_e2e_smoke.py
 ```
 
-Live scenarios need a token per provider. Put them in a `.env` file at the repo
-root — `cp env.example .env` and fill in what you have. `.env` is gitignored and
-dockerignored (tokens never land in a commit or an image layer), and `just` loads
-it automatically for every recipe, so no shell exports are needed:
+`just lifecycle-tests` selects the ten conversational cases in
+`tests/e2e/test_e2e_lifecycle.py`: capability and launch checks, then three
+start-to-implementation scenarios for each provider. It uses pytest's serial
+default because the Codex auth volume is shared. Rerun one provider with
+`CODEX_AUTH_VOLUME=omc-e2e-codex-auth just lifecycle-tests -k codex` or
+`just lifecycle-tests -k claude`; an unavailable selected provider fails loud
+rather than being skipped. The matrix makes real model calls and can take over
+an hour. `just e2e-tests tests/e2e/test_e2e_smoke.py` needs Docker but no
+provider credential; `just e2e-tests` runs the wider non-expensive E2E tier,
+and `just expensive-e2e-tests` deliberately selects the costly docs tests.
+
+Live scenarios need authentication for both providers. Put the Claude token in
+`.env` at the repo root (`cp env.example .env`), which is gitignored and
+dockerignored; `just` loads it automatically. Codex may use the dedicated
+account volume or an API key. Do not run account-backed tests in public CI:
 
 | Provider | Env var | Where to get it |
 |---|---|---|
 | `claude` | `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` | `claude setup-token` / console.anthropic.com |
-| `codex` | `OPENAI_API_KEY` | platform.openai.com |
-| `opencode` | `ANTHROPIC_API_KEY` | console.anthropic.com |
+| `codex` | `CODEX_AUTH_VOLUME` or `OPENAI_API_KEY` | `just codex-login` for a dedicated account volume, or platform.openai.com for an API key |
 
-This is by design, not an oversight: a selected test **runs or fails loud — it never skips**. If a provider's token is missing, that provider's live E2E tests fail with the exact command needed to fix it (e.g. `claude setup-token`) instead of silently passing.
+The Codex account volume is used only by the selected local tests; its authentication is copied into each disposable test home and refreshed after the run. If device login is unavailable, use the separate-home browser fallback in [PLUGIN-NOTES.md](docker/PLUGIN-NOTES.md#plugin-registration-in-the-e2e-image), which keeps the normal host account untouched. An explicit volume takes precedence over `.env` API-key auth. The lifecycle tests build their Docker image from the current checkout by default; unset `OMC_E2E_PREBUILT_IMAGE` and `OMC_E2E_PREBUILT_SOURCE` when validating a change. Missing or expired auth fails with the login command. The documented 2026-09-24 baseline and split-run acceptance evidence is in [PLUGIN-NOTES.md](docker/PLUGIN-NOTES.md#conversational-lifecycle-regression-evidence-2026-09-24).
 
 ## Security note
 
-The Slug step runs your configured provider headlessly while it reads the ticket's title and description. On Claude Code the call is granted only conventional tracker MCP servers (`jira`, `atlassian`, `linear`, `github`, `gitlab`) — never your other MCP tools; on Codex and OpenCode no per-call tool scoping exists, so the session's own tool config applies. Either way the ticket text is — text written by whoever filed the ticket, not by you. Treat tickets from untrusted or external reporters accordingly; a crafted ticket title is untrusted input to that headless call, the same as any other prompt-injection surface. A per-MCP-server allowlist for the headless call is a tracked hardening item, not yet implemented.
+The Slug step runs your configured provider headlessly while it reads the ticket's title and description. On Claude Code the call is granted only conventional tracker MCP servers (`jira`, `atlassian`, `linear`, `github`, `gitlab`) — never your other MCP tools; on Codex no per-call tool scoping exists, so the session's own tool config applies. Either way the ticket text is — text written by whoever filed the ticket, not by you. Treat tickets from untrusted or external reporters accordingly; a crafted ticket title is untrusted input to that headless call, the same as any other prompt-injection surface. A per-MCP-server allowlist for the headless call is a tracked hardening item, not yet implemented.
 
 ## License
 

@@ -1,7 +1,7 @@
 # The AGENTS.md control chain
 
 Approved 2026-07-17 (evening). omc needs deterministic control over how agents
-behave in omc-managed repos, across all three harnesses, without owning the
+behave in omc-managed repos, across both harnesses, without owning the
 project's voice:
 
 ```
@@ -13,7 +13,7 @@ CLAUDE.md   ──symlink──▶        │  omc's behavior layer: snapshot mo
                                                      touched after seeding)
 ```
 
-Codex and OpenCode read `AGENTS.md`, Claude Code reads `CLAUDE.md` — both
+Codex reads `AGENTS.md`, Claude Code reads `CLAUDE.md` — both
 resolve through the symlink to omc's layer, which ends by directing agents to
 read the project's own instructions.
 
@@ -34,7 +34,7 @@ skips this silently). Idempotent:
      the file, re-run `omc configure`").
 
 All three artifacts are meant to be committed (symlinks + the internal file
-must exist in every checkout for Codex/OpenCode to read).
+must exist in every checkout for Codex to read).
 
 ## The internal file's content
 

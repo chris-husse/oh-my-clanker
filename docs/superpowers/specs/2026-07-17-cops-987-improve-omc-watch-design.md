@@ -108,9 +108,6 @@ symlinks to the installed `distribution/AGENTS.md`:
    - codex: `codex plugin marketplace upgrade` (command exists; must be
      Docker-verified before trusting, findings recorded in
      `docker/PLUGIN-NOTES.md` per repo convention).
-   - opencode: mechanism unknown (git-ref plugin entry in `opencode.json`,
-     cache managed by opencode itself) — investigate empirically, implement
-     best-effort, record findings in PLUGIN-NOTES.md.
 3. **Failure isolation**: each provider's update failure warns and continues
    — one broken harness never aborts the CLI upgrade or the other providers.
 
@@ -186,8 +183,7 @@ Unit (`tests/unit/`):
 Docker E2E (`tests/e2e/`, credential-free):
 - Chain create + v1→v2 migrate in a real repo inside the container.
 - codex plugin update mechanics (`codex plugin marketplace upgrade` actually
-  refreshes a snapshot); opencode investigation results as executable checks
-  where possible.
+  refreshes a snapshot).
 - Live-session E2E (updated plugin's skills actually load in a driven
   session) stays token-gated and deferred, per the standing follow-up.
 

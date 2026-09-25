@@ -5,13 +5,19 @@ description: Setup stage around superpowers:brainstorming - one /omc:explain pas
 
 # omc plan (brainstorm setup)
 
+This is a design discussion phase. Keep the full work context and every user
+answer together. A complete design and agreement do not authorize a spec,
+implementation, commit, or push. Wait for a later direct user
+implementation skill invocation to cross that handoff (`$omc:implement` in
+Codex, `/omc:implement` in Claude).
+
 ## User Input
 
 ```text
 $ARGUMENTS
 ```
 
-`$ARGUMENTS` is the work context: the ticket recap passed by `/omc:start`,
+`$ARGUMENTS` is the work context: the ticket recap and complete input passed by `/omc:start`,
 or a free-text description when invoked standalone. Empty → ask the user
 what they want to plan, and use their answer as the context.
 
@@ -47,11 +53,15 @@ A short structured block containing, in order:
 ## Step 3 — seed
 
 Ask the user for their initial thinking / seed for this work — AFTER the
-primer exists, so they can react to what the codebase already says.
+primer exists, so they can react to what the codebase already says. Actually
+wait for their answer. A pending question or timeout is not a seed. Ask and
+resolve material initial scope questions, retaining the answers with the
+primer and seed before brainstorming.
 
 ## Step 4 — hand off to brainstorming
 
-Invoke `superpowers:brainstorming` with: the user's seed, the primer, the
+Invoke `superpowers:brainstorming` with: the user's actual seed, all material
+scope answers, the complete input context, the primer, the
 presentation rule below, this model-tier pointer: "Any implementation plan
 born from this brainstorm follows the behavior layer's model-tier policy
 (AGENTS.md, Model selection): every task carries a `Model:` line naming
@@ -70,6 +80,16 @@ drip-feed sections through question dialogs: dialog prompts hide the
 surrounding prose, so a "does this section look right?" chain shows the
 user questions about text they never saw. Question dialogs are for genuine
 standalone forks (pick A/B/C), not for section sign-off.
+
+**OMC caller contract (pass it to the brainstorm verbatim)**: explore the
+user's questions and present the complete solution for discussion. Once the
+user agrees, stop at the implementation handoff and wait for their later
+direct implementation skill invocation (`$omc:implement` in Codex,
+`/omc:implement` in Claude). Generic brainstorming instructions to proceed into
+specification, planning, or coding after approval are superseded here.
+Replies such as `ok` continue discussion or acknowledge the design; they do
+not count as the direct command. Keep the full context, seed, and answers
+available for the later handoff.
 
 This skill prepares and hands off — it never designs, never writes code,
 and never writes to the tracker.

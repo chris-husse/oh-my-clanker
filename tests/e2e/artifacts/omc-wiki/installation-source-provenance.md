@@ -2,143 +2,100 @@
 
 # Installation & Source Provenance
 
-This module manages omc's own lifecycle: installing it from a checkout, upgrading it, removing it cleanly, and answering the question "where did this omc come from?" It spans three small files, all of which delegate the actual work to `uv` (Astral's Python tool manager) and to omc's own resources.
+Everything covering how `omc` gets onto a machine, how it self-heals its editor plugin, how it knows what it's supposed to be probing for, and how it reports where it actually came from. Four modules do the work:
 
-| File | Responsibility |
-|------|---------------|
-| `installer.py` | Install / update / uninstall commands — thin `uv tool` wrappers |
-| `installsrc.py` | Read `uv`'s install receipt to report provenance and version |
-| `skills_source.py` | Locate bundled skill text (wheel asset or dev checkout) |
+- **`src/omc/installer.py`** — `install` / `update` / `uninstall`, thin wrappers around `uv`.
+- **`src/omc/installsrc.py`** — reads `uv`'s install receipt to answer "where did this binary come from?"
+- **`src/omc/plugin.py`** — self-heals the Claude Code plugin so `/omc:*` slash commands resolve.
+- **`src/omc/probe.py`** — parallel `--version` checks that gate `omc update` and `omc start`.
 
-All three are reached from `_dispatch` in `src/omc/cli.py`, which wires the `omc install`, `omc update`, `omc uninstall`, and `omc --version` commands. `skill_text` is reached from a different path — `build_prompt` in `src/omc/slug.py` — but shares the "find omc's own files on disk" concern, so it lives alongside the provenance code.
+`src/omc/errors.py` (`OmcError`, `Refusal`) and `hatch_build.py` / `src/omc/_buildinfo.py` (build-time provenance stamping) support all four.
 
-## Design stance: gate-exempt, uv-authoritative
+## Install: `run_install`
 
-Two principles run through the module:
+`run_install(ctx, path)` re-roots `omc` at a local checkout: it resolves `path` to an absolute path, runs it through `validate_checkout` (must contain `.git` and `src/omc/__init__.py`), and — if valid — shells out to `uv tool install --reinstall <abspath>`. A bad path never touches `uv` at all; `validate_checkout` is checked and printed to stderr before any subprocess runs. This is how `chris-husse/oh-my-clanker` gets treated identically to any other dev checkout: `uv`'s own receipt (see below) becomes the new source of truth for every subsequent `omc update`.
 
-- **These commands are gate-exempt by design.** Unlike most omc behavior, install/update/uninstall don't route through the project's build/verify/review stages. They are bootstrap operations — you may be running them precisely because omc isn't installed yet.
-- **`uv` is the source of truth.** omc never maintains its own record of where it was installed from or what version is live. `run_install` hands a path to `uv tool install`; `install_source` reads back the receipt `uv` wrote. There is no second bookkeeping system to drift out of sync.
+## Update: `run_update`
 
-## Installation lifecycle (`installer.py`)
+`run_update(ctx)` is a strict two-stage pipeline, and the ordering is load-bearing:
 
-Every command funnels its subprocess work through `_uv`, which is the module's single point of contact with `uv`:
-
-```python
-def _uv(ctx: ToolContext, *args: str) -> int:
-    try:
-        cp = ctx.run(ctx.uv_argv(*args), capture=False)
-    except FileNotFoundError:
-        print(_UV_MISSING, file=sys.stderr)
-        return 1
-    return cp.returncode
+```mermaid
+flowchart LR
+    A[uv tool upgrade omc] --> B[require_tools<br/>git/wt/provider]
+    B -->|miss| X[raise OmcError<br/>abort, nothing cloned]
+    B -->|ok| C[gitnexus.update_gitnexus]
+    C --> D[per-provider plugin update]
+    D -->|failure| D
 ```
 
-`_uv` builds the argv via `ctx.uv_argv(...)` and runs it through `ctx.run(...)` — both methods of `ToolContext`, the module's only subprocess/env boundary (see `src/omc/toolctx.py`). `capture=False` lets `uv`'s own progress stream straight to the terminal. The one error `_uv` handles itself is a missing `uv` binary: rather than leak a `FileNotFoundError`, it prints the canonical install-uv instructions (`_UV_MISSING`) and returns exit code 1.
+1. `_uv(ctx, "tool", "upgrade", "omc")` — if this fails, return immediately.
+2. If a global config exists, `require_tools(ctx, cfg)` runs as a **fatal gate** before anything else — a machine missing `wt` aborts before GitNexus is touched. `test_update_aborts_when_required_tool_missing` pins this ordering explicitly (it fails the test if `update_gitnexus` runs at all).
+3. `gitnexus.update_gitnexus(ctx)` refreshes the managed GitNexus dependency. Imported as a module attribute (`from . import gitnexus`) specifically so tests can monkeypatch `omc.gitnexus.update_gitnexus`. Its return code becomes `run_update`'s return code — a GitNexus failure fails the whole update.
+4. For each configured provider, `get_provider(name).plugin_update_argvs(marketplace_source(ctx.env))` yields a sequence of argvs to run. Only the **last** argv's exit code decides pass/fail for that provider — earlier steps (typically `marketplace add`/`marketplace update`, which self-heal a missing registration) are allowed to fail silently. Any provider's failure is caught, printed with a `✗` prefix, and the loop continues to the next provider; it never aborts the whole update. Missing/unknown providers raise `OmcError` from `get_provider`, which is caught the same way.
 
-### `run_install(ctx, path)`
+No config at all short-circuits straight past the plugin loop with a `no config — skipping plugin updates` message — `run_update` still returns whatever GitNexus reported.
 
-Installs omc from a local checkout. It resolves `path` to an absolute path, validates it, then runs `uv tool install --reinstall <abspath>`:
+## Uninstall: `run_uninstall`
 
-- **`validate_checkout(path)`** is the gate. It returns an error string (or `None` if valid). A valid checkout must be a directory containing both `.git` and `src/omc/__init__.py` — the minimal signature of an omc source tree. This is also exported for callers that want to check a path without triggering an install.
-- The **absolute path matters**: on success, the printed message notes that future `omc update`s are now "re-rooted" at that path. `uv` records the directory in its receipt, so `uv tool upgrade` later knows to pull from that same checkout.
-- `--reinstall` forces a clean rebuild even if the version number hasn't changed — important during development when the code changes but `__version__` doesn't.
+Two independent halves, both best-effort:
 
-### `run_update(ctx)`
+- **Data removal**: `_is_unsafe_home(home, env)` refuses to `shutil.rmtree` if `ctx.home` resolves to either the filesystem root or the user's actual `$HOME` (read from `ctx.env`, not the process env, so it's testable and honors sandboxed contexts). Otherwise `ctx.home` is removed with `ignore_errors=True`.
+- **Tool removal**: `uv tool uninstall omc` via `_uv`.
 
-The simplest command: `uv tool upgrade omc`. Because `uv` remembers the install source from the receipt, this re-pulls from wherever the original `run_install` pointed — a local directory, a git URL, or PyPI.
+It always prints `_PLUGIN_REMOVAL` (per-harness manual plugin-removal instructions) and returns `0` unless the `uv` step failed — a refused home deletion does **not** fail the command, since the intent (get `omc` off the machine) still succeeded.
 
-### `run_uninstall(ctx)`
+## Provenance: `installsrc.py`
 
-Removal happens in three steps, ordered so a refusal on the first step still leaves the tool itself removable:
+Two distinct notions of "where omc is from," both feeding `version_string`:
+
+- **Build provenance** (`provenance()`) — `branch`/`commit`/`source` baked into the artifact at build time by `hatch_build.py`. It reads from `_buildinfo.py`, whose checked-in copy is all `"unknown"`; a wheel/sdist build overwrites that file via `force_include` (see below). `provenance()` returns a fresh dict every call so callers can't accidentally mutate shared state.
+- **Install provenance** (`install_source(env)`) — where `uv` actually installed *this* binary from, read live from `uv`'s own receipt (`<uv-tool-dir>/omc/uv-receipt.toml`). `_uv_tool_dir` resolves the receipt location via `UV_TOOL_DIR` → `XDG_DATA_HOME` → `~/.local/share/uv/tools`. The receipt's `requirements[0]` (or the entry named `"omc"`) is inspected for `directory`, `editable`, `git`, or `url` keys, in that order; anything unparseable — missing file, non-UTF-8 bytes, malformed TOML, wrong shape — collapses to `("unknown", False)` rather than raising.
+
+`version_string(env)` composes both into one line: `omc <version> [(branch@commit)] from <source> [(origin <remote>)]`. The `(origin …)` suffix only appears for a **directory** install whose build provenance points at a remote git origin — a remote-git install's own `from <source>` already *is* that remote, so repeating it would be noise.
+
+Every URL that reaches display goes through `_redact`, which strips `userinfo@` credentials (`git+https://oauth2:TOKEN@host` → `git+https://[REDACTED]@host`) before it's ever printed — this is the same protection `hatch_build._redact` applies at build time (see below), just applied again at read time as belt-and-braces.
+
+`package_root()` returns the installed package's directory via `importlib.resources`, which resolves identically for a wheel-installed `uv` tool venv and an editable dev checkout; `agentsmd.py`'s `distribution_agents_md` uses it to locate the shipped `AGENTS.md`.
+
+## Build-time stamping: `hatch_build.py`
+
+`BuildInfoHook` is a Hatchling build hook (`initialize`) that runs during `uv tool install`/`uv build`. It resolves `(branch, commit, source)` via `_resolve`, preferring `OMC_BUILD_BRANCH`/`OMC_BUILD_COMMIT`/`OMC_BUILD_SOURCE` env vars, falling back to `git rev-parse`/`git remote get-url origin` against the source tree, and finally `"unknown"` if there's no `.git` at all. Deliberately, it never writes into the source tree — `_render`'s output is written to a temp file and injected via `build_data["force_include"]`, replacing `src/omc/_buildinfo.py` **only inside the built artifact**. This keeps `uv sync`/`uv run` in an editable checkout from ever dirtying the working tree.
+
+`_redact` here mirrors `installsrc._redact` but is stricter: it strips any `userinfo@` unless it's exactly the identity-free `git@` SSH login, and — unlike a naive colon-based check — also treats colonless tokens (`https://ghp_xxx@host`) as credentials.
+
+## Plugin self-heal: `plugin.py`
+
+`omc start` seeds a session with `/omc:start`; if the Claude Code plugin was never installed, that's an "Unknown command" on the very first interaction. `ensure_plugin(ctx, cfg, check_only=False)` prevents that:
+
+1. Only `claude` has a scriptable check today — any other configured provider returns `"unverified (no scriptable check for this provider yet)"` and is left alone.
+2. Runs `claude plugin list`; if `"omc@"` appears in stdout, returns `"ok"`.
+3. If missing and `check_only` is set (the dry-run path used by `omc configure`'s planning output), returns `"missing (omc start will install it)"` without installing anything.
+4. Otherwise it resolves `marketplace_source(ctx.env)` and runs `claude plugin marketplace add <source>` (failure here is a benign self-heal — the marketplace may already be registered) followed by `claude plugin install omc@oh-my-clanker --scope user`. A failing install raises `OmcError` with the exact manual fix-it commands. A successful-looking install is re-verified with another `plugin list` call, since it "could still be missing after an apparently successful install."
+
+`marketplace_source(env)` picks where the marketplace should pull from, using the same install receipt as `installsrc`: a remote GitHub install (`git+https://github.com/x/y` or scp-form) maps to `owner/repo`; a directory/editable install reuses that path directly (local dev loop); anything else — including a bare PyPI install — falls back to the canonical `chris-husse/oh-my-clanker`. This is the same pinned-source trust model as the CLI install itself: no consent prompt, because the plugin is omc's own repo.
+
+## Tool probing: `probe.py`
+
+`run_probes(ctx, specs)` runs a list of `(name, argv, hint)` specs through `ThreadPoolExecutor` concurrently, each calling `tool_version` (a *real* subprocess invocation — never a file-existence check) and returning a `ProbeResult(name, present, detail, hint)`.
+
+`require_tools(ctx, cfg)` is the fatal variant used by both `run_update` and `run_start`/`run_watch`: it probes `git`, `wt`, and whichever provider is configured (`get_provider(cfg.llm.default)`), collects every miss (not just the first), and raises a single `OmcError` listing all of them with their install hints. This "list every miss, not just the first" behavior is deliberate — `test_require_tools_lists_all_misses` pins it — so a developer missing two tools doesn't have to run the probe twice to find out about the second.
+
+## How it fits together
 
 ```mermaid
 flowchart TD
-    A[run_uninstall] --> B{_is_unsafe_home?}
-    B -- yes --> C[refuse: skip data removal]
-    B -- no --> D{ctx.home exists?}
-    D -- yes --> E[shutil.rmtree ctx.home]
-    C --> F[uv tool uninstall omc]
-    D -- no --> F
-    E --> F
-    F --> G[print plugin-removal instructions]
+    CLI["_dispatch (omc/cli)"] --> run_install
+    CLI --> run_update
+    CLI --> run_uninstall
+    CLI -->|omc version| version_string
+    run_update --> require_tools
+    run_update --> marketplace_source
+    run_start --> require_tools
+    run_start --> ensure_plugin
+    ensure_plugin --> marketplace_source
+    marketplace_source --> install_source
+    version_string --> install_source
+    version_string --> provenance
 ```
 
-1. **Data directory.** `ctx.home` (omc's data dir, typically `~/.omc`) is recursively deleted — but only after `_is_unsafe_home` clears it.
-2. **The tool itself** via `uv tool uninstall omc`.
-3. **Plugin instructions.** omc can't uninstall its plugin from Claude Code / Codex / OpenCode on the user's behalf, so it prints per-harness removal steps (`_PLUGIN_REMOVAL`).
-
-The safety guard is worth reading closely:
-
-```python
-def _is_unsafe_home(home: Path, env) -> bool:
-    resolved = home.resolve()
-    user_home = Path(env.get("HOME", "~")).expanduser().resolve()
-    return str(resolved) == resolved.anchor or resolved == user_home
-```
-
-It refuses to `rmtree` two things: a filesystem anchor (`/`, or a drive root — `resolved.anchor`) and the user's literal `$HOME`. Critically, it reads `HOME` from `ctx.env` rather than the process environment. That indirection is what makes the guard testable and makes it honor sandboxed contexts where `HOME` has been redirected. The final exit code reflects only the `uv tool uninstall` result; a refused data removal prints a warning but does not, by itself, fail the command.
-
-## Source provenance (`installsrc.py`)
-
-This file answers `omc --version` with something more useful than a bare version number — it reports *where* the running omc was installed from. The public entry points are `install_source` and `version_string`.
-
-### Reading the receipt
-
-`uv` writes an install receipt when it installs a tool. `install_source` locates and parses it:
-
-```python
-receipt = _uv_tool_dir(env) / "omc" / "uv-receipt.toml"
-```
-
-**`_uv_tool_dir(env)`** reproduces `uv`'s own directory-resolution precedence, reading from the passed-in env mapping:
-
-1. `UV_TOOL_DIR` if set (explicit override)
-2. `$XDG_DATA_HOME/uv/tools`
-3. `$HOME/.local/share/uv/tools` (the default)
-
-`install_source` then parses `uv-receipt.toml`, pulls `tool.requirements`, and finds the requirement named `omc` (falling back to the first requirement if none is named). The requirement dict's *key* tells you the install kind, and each is handled in priority order:
-
-| Key present | Meaning | Returned `is_remote` |
-|-------------|---------|----------------------|
-| `directory` | Installed from a local directory | `False` |
-| `editable`  | Editable/dev install | `False` |
-| `git`       | Installed from a git ref | `True` |
-| `url`       | Installed from a URL | `_is_remote_git(url)` |
-| *(none)*    | PyPI package | `False` |
-
-The whole parse is wrapped in a broad `except` catching `OSError`, `KeyError`, `IndexError`, `TypeError`, `ValueError`, `AttributeError`. **Any** problem — no receipt, malformed TOML, unexpected shape — collapses to the sentinel `("unknown", False)`. Provenance reporting must never crash `omc --version`.
-
-### Two classification helpers
-
-- **`_is_remote_git(source)`** decides whether a bare `url` is actually a remote git source. It matches known schemes (`ssh://`, `https://`, `http://`, `git+`, `git://`) or the SCP short form (`user@host:path`, via the `_SCP_FORM` regex). Empty or `"unknown"` sources are never remote.
-- **`_redact(source)`** strips embedded credentials before anything is displayed — a URL like `git+https://oauth2:TOKEN@host` becomes `git+https://[REDACTED]@host`. This runs on **every** returned source string, so tokens baked into an install URL never surface in `--version` output or logs.
-
-### `version_string(env)`
-
-The thin display wrapper `_dispatch` actually calls:
-
-```python
-def version_string(env):
-    source, _ = install_source(env)
-    return f"omc {__version__} from {source}"
-```
-
-It pairs `__version__` (from `omc/__init__.py`) with the redacted source — e.g. `omc 1.2.3 from /home/dev/oh-my-clanker` or `omc 1.2.3 from unknown`.
-
-## Bundled skill resolution (`skills_source.py`)
-
-`skill_text(name)` returns the raw text of a bundled `SKILL.md`, trying two locations in order:
-
-1. **Wheel asset** — `importlib.resources.files("omc") / "assets" / "skills" / <name> / "SKILL.md"`. This is where skills live in an installed wheel.
-2. **Dev-checkout fallback** — `<repo-root>/skills/<name>/SKILL.md`, computed as `parents[2]` of this file. This is where skills live when running from source.
-
-If neither exists, it raises `OmcError(f"bundled skill {name!r} not found (broken install?)")`. The resource lookup tolerates `ModuleNotFoundError`, `FileNotFoundError`, and `NotADirectoryError` so a missing wheel asset falls through to the dev path rather than raising. This two-location strategy mirrors the module's broader theme: the same code must behave whether omc is a packaged install or a live checkout.
-
-## How it connects
-
-- **`cli.py` `_dispatch`** is the primary caller — it maps CLI verbs to `run_install`, `run_update`, `run_uninstall`, and `version_string`.
-- **`toolctx.py` `ToolContext`** is the sole subprocess and environment gateway. `_uv` never touches `subprocess` directly; it uses `ctx.uv_argv` and `ctx.run`, whose `child_env` shapes the environment passed to `uv`. `run_uninstall` and `_is_unsafe_home` similarly read `ctx.home` and `ctx.env` rather than the process globals.
-- **`slug.py` `build_prompt`** consumes `skill_text` to embed bundled skill instructions into generated prompts.
-- **`errors.py`** supplies `OmcError`, the exit-code-1 error type raised on a broken skill install.
-
-The design keeps this whole surface stateless with respect to omc: `uv` owns the install records, the resource loader finds files by convention, and every function that touches the environment or filesystem does so through `ToolContext` so the behavior stays testable and sandbox-aware.
+`install_source`/`marketplace_source` are the connective tissue: `omc version`, `omc update`'s plugin loop, and `ensure_plugin`'s self-heal all resolve "where did this install come from" through the exact same `uv` receipt, so a directory-checkout install, a GitHub install, and a PyPI install are each handled consistently everywhere that question comes up. `errors.py`'s `OmcError`/`Refusal` are the uniform failure vocabulary across all four modules — `OmcError` prints without a traceback and exits 1 (`Refusal` exits 2 for deliberate precondition refusals), so callers in `omc/cli/__init__.py` can treat every module's failures the same way.

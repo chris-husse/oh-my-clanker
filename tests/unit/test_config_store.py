@@ -17,6 +17,36 @@ def test_set_key_provider_model():
     assert cfg.llm.providers["claude"].model == "claude-fable-5"
 
 
+@pytest.mark.parametrize("key", ["llm.default", "llm.providers.retired.model"])
+def test_set_key_rejects_unsupported_provider_without_mutating_config(key):
+    cfg = GlobalConfig()
+    with pytest.raises(ConfigError, match="retired.*claude.*codex"):
+        store.set_key(cfg, key, "retired" if key == "llm.default" else "model-x")
+    assert cfg.llm.default == "claude"
+    assert "retired" not in cfg.llm.providers
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "llm:\n  default: retired\n",
+        "llm:\n  providers:\n    retired:\n      model: model-x\n",
+    ],
+)
+def test_load_global_rejects_existing_unsupported_provider_with_supported_choices(tmp_path, body):
+    (tmp_path / "config.yaml").write_text(body)
+    with pytest.raises(ConfigError, match="retired.*claude.*codex"):
+        store.load_global(tmp_path)
+
+
+def test_save_global_rejects_unsupported_provider_before_writing(tmp_path):
+    cfg = GlobalConfig()
+    cfg.llm.providers["retired"] = ProviderConfig()
+    with pytest.raises(ConfigError, match="retired.*claude.*codex"):
+        store.save_global(tmp_path, cfg)
+    assert not (tmp_path / "config.yaml").exists()
+
+
 def test_set_key_rejects_unknown_and_sections():
     cfg = GlobalConfig()
     with pytest.raises(ConfigError):
@@ -173,8 +203,8 @@ def test_yaml_non_mapping_rejected(tmp_path):
 
 def test_set_key_on_split_schemas():
     gcfg = GlobalConfig()
-    store.set_key(gcfg, "llm.default", "opencode")
-    assert gcfg.llm.default == "opencode"
+    store.set_key(gcfg, "llm.default", "codex")
+    assert gcfg.llm.default == "codex"
     pcfg = ProjectConfig()
     store.set_key(pcfg, "worktree.base_branch", "master")
     assert pcfg.worktree.base_branch == "master"

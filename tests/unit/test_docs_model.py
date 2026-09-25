@@ -17,9 +17,8 @@ def _cfg(**provider_kwargs):
 
 def test_provider_docs_defaults():
     assert get_provider("claude").docs_model_default() == "sonnet"
-    # codex/opencode ids are deliberately free-text -> CLI default coding model
+    # Codex ids are deliberately free-text -> CLI default coding model.
     assert get_provider("codex").docs_model_default() == ""
-    assert get_provider("opencode").docs_model_default() == ""
 
 
 def test_docs_model_for_falls_back_to_provider_default():

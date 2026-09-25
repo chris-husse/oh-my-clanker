@@ -147,7 +147,7 @@ def test_unparseable_plugin_list_is_an_error(tmp_path):
 
 def test_non_claude_provider_unverified(tmp_path):
     ctx = ToolContext.from_env(stub_env(tmp_path / "bin"))
-    assert "unverified" in ensure_plugin(ctx, "opencode")
+    assert "unverified" in ensure_plugin(ctx, "codex")
 
 
 def test_marketplace_source_forms(tmp_path):

@@ -4,7 +4,7 @@
 
 **Goal:** Make `omc watch --auto-build` observable: a live tail-able log announced up front, an in-place progress bar with elapsed time, no self-imposed timeout, and a standalone `omc internal build-progress <logfile>` viewer.
 
-**Architecture:** A new streaming subprocess primitive on `ToolContext` (two line-reader threads, serialized callback); provider-level stream variants (claude switches to `--output-format stream-json --verbose` and decodes events back to human-readable text; codex/opencode already stream text); `_auto_build` tees decoded lines to a live log and feeds a pure `ProgressTracker` engine whose bar a once-per-second TTY thread redraws; the same engine powers the standalone follow-mode viewer.
+**Architecture:** A new streaming subprocess primitive on `ToolContext` (two line-reader threads, serialized callback); provider-level stream variants (claude switches to `--output-format stream-json --verbose` and decodes events back to human-readable text; codex already streams text); `_auto_build` tees decoded lines to a live log and feeds a pure `ProgressTracker` engine whose bar a once-per-second TTY thread redraws; the same engine powers the standalone follow-mode viewer.
 
 **Tech Stack:** Python 3 stdlib only (subprocess, threading, re, tempfile), pytest.
 
@@ -437,7 +437,7 @@ git commit -m "feat: ToolContext.stream — line-streaming subprocess primitive"
 - Test: `tests/unit/test_providers.py`
 
 **Interfaces:**
-- Consumes: existing `headless_argv` signatures (all three providers).
+- Consumes: existing `headless_argv` signatures (both providers).
 - Produces:
   - `Provider.headless_stream_argv(prompt: str, *, model: str, allowed_tools: list[str] | None = None) -> list[str]` — base default returns `self.headless_argv(prompt, model=model, allowed_tools=allowed_tools)`.
   - `Provider.decode_stream_line(line: str) -> list[str]` — base default `[line]`.
@@ -517,8 +517,8 @@ def test_claude_decode_passes_non_json_through():
     assert p.decode_stream_line("   ") == []  # blank noise dropped
 
 
-def test_codex_and_opencode_stream_defaults_are_identity():
-    for name in ("codex", "opencode"):
+def test_codex_stream_defaults_are_identity():
+    for name in ("codex",):
         p = get_provider(name)
         assert p.headless_stream_argv("x", model="") == p.headless_argv("x", model="")
         assert p.decode_stream_line("anything") == ["anything"]
@@ -542,7 +542,7 @@ Expected: FAIL with `AttributeError: ... has no attribute 'headless_stream_argv'
         allowed_tools: list[str] | None = None,
     ) -> list[str]:
         """Like headless_argv, but for LIVE streaming consumption. Default:
-        same argv — codex/opencode already emit incremental text. Providers
+        same argv — codex already emits incremental text. Providers
         that buffer their print mode (claude) override with a streaming
         output format."""
         return self.headless_argv(prompt, model=model, allowed_tools=allowed_tools)

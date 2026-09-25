@@ -17,7 +17,7 @@ never project config). Blank = the provider's docs default:
 
 - **claude** → `claude-sonnet-5` (the standard-coding-tier floor, pinnable
   because the claude provider already enumerates model ids).
-- **codex / opencode** → `""` = pass no `--model`, letting the CLI use its
+- **codex** → `""` = pass no `--model`, letting the CLI use its
   own default coding model (this repo deliberately keeps their model ids
   free-text — "ids move fast" — so pinning one would rot).
 
@@ -42,7 +42,7 @@ claude overrides it.
 ## Testing
 
 - Registry: claude `docs_model_default() == "claude-sonnet-5"`;
-  codex/opencode `== ""`; `docs_model_for` override + fallback.
+  codex `== ""`; `docs_model_for` override + fallback.
 - `run_document`: session model set (e.g. `opus-x`) + docs_model unset →
   wiki argv contains `--model claude-sonnet-5` and NOT `opus-x`;
   docs_model set → it wins.

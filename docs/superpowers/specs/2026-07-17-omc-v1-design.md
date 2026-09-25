@@ -2,7 +2,7 @@
 
 The open-source successor to an internal tool ("the chicken"). omc turns "I have a
 ticket" into "I'm in a prepared worktree with an LLM session that already knows the
-ticket" — for **Claude Code, Codex, and OpenCode** from day one. This spec is the
+ticket" — for **Claude Code and Codex** from day one. This spec is the
 validated v1 design; the code, once it exists, is the source of truth.
 
 ## 1. Product shape — one repo, two artifacts
@@ -11,7 +11,7 @@ validated v1 design; the code, once it exists, is the source of truth.
   (`uv tool install git+https://github.com/chris-husse/oh-my-clanker`). Owns
   everything that must happen at launch time: prerequisite probes, slug
   resolution, worktree creation, terminal title, session naming, provider launch.
-- **The skills plugin**: the same repo is installable as a plugin in all three
+- **The skills plugin**: the same repo is installable as a plugin in both
   harnesses, delivering the in-session skills as `/omc:slug` and `/omc:start`:
   - Claude Code: `.claude-plugin/plugin.json` (name `omc`,
     `dependencies: ["superpowers"]`) + `.claude-plugin/marketplace.json` so the
@@ -22,16 +22,13 @@ validated v1 design; the code, once it exists, is the source of truth.
   - Codex: `.codex-plugin/plugin.json` (only the manifest lives in
     `.codex-plugin/`; `skills/` stays at repo root per the Codex plugin spec).
     Install: `codex plugin marketplace add chris-husse/oh-my-clanker` → install.
-  - OpenCode: no marketplace exists; a JS plugin entry (`.opencode/`, modeled on
-    superpowers') registers the skills. Install: add
-    `"plugin": ["omc@git+https://github.com/chris-husse/oh-my-clanker.git"]` to
-    `opencode.json`.
+
 
 There is **no skill-sync machinery**: each harness's plugin manager pulls skills
 from the repo. The CLI never copies skill files into provider config dirs.
 
 **Superpowers dependency**: native on Claude Code (`dependencies`, auto-installs).
-Codex and OpenCode have no plugin-dependency mechanism → documented prerequisite
+Codex has no plugin-dependency mechanism → documented prerequisite
 plus a runtime presence check in the start skill with an install pointer.
 
 ## 2. CLI surface
@@ -41,7 +38,7 @@ Entry point `omc = "omc.cli:main"`. Exit codes: 0 success, 1 expected error
 
 | Command | Does |
 |---|---|
-| `omc configure` | Interactive picker (questionary): default provider (claude/codex/opencode) + optional per-provider model. Writes `~/.omc/config.json`. `--defaults` writes defaults, `--set KEY=VALUE` (repeatable, dotted keys) is non-interactive. Ends by printing the three per-harness plugin install one-liners. Needs a TTY in interactive mode (rc 2 otherwise). |
+| `omc configure` | Interactive picker (questionary): default provider (claude/codex) + optional per-provider model. Writes `~/.omc/config.json`. `--defaults` writes defaults, `--set KEY=VALUE` (repeatable, dotted keys) is non-interactive. Ends by printing the two per-harness plugin install one-liners. Needs a TTY in interactive mode (rc 2 otherwise). |
 | `omc start <context> [--dry-run] [--headless]` | The centerpiece — §3. |
 | `omc version` | Version (importlib.metadata) + install source from uv's receipt (`<UV_TOOL_DIR>/omc/uv-receipt.toml`): git URL (credentials redacted) or local dir. |
 | `omc install [path]` | Validates `path` (default `.`) is an omc checkout (`.git` + `src/omc/__init__.py`), then `uv tool install --reinstall <path>` — re-roots future `omc update`s at that checkout. |
@@ -84,7 +81,7 @@ parsing — classification is the slug skill's job.
    title-suppression env plus `OMC_SLUG=<slug>` (the marker the session skill
    uses to detect the prepared path); `os.execvp` an interactive shell in the
    worktree that starts the provider session **named `<slug>` where supported**
-   (Claude: `-n <slug>`; Codex/OpenCode: no naming — title only) and **seeded
+   (Claude: `-n <slug>`; Codex: no naming — title only) and **seeded
    with `/omc:start <context>`**.
 6. `--dry-run`: print the full plan (branch, wt argv, title sequence, session
    argv, shell argv) after the slug step, then stop — no worktree, no exec.
@@ -172,7 +169,7 @@ seam). Unknown keys are rejected on load with the file path in the error.
 
 ## 7. Providers
 
-Three adapters (claude, codex, opencode — cursor dropped) behind one interface:
+Two adapters (claude, codex — cursor dropped) behind one interface:
 `models()`, `headless_argv(prompt, model)`, `session_argv(session_name, model,
 seed)`, `title_env()`. The chicken's doctor surface (auth status, MCP presence,
 guides) is deleted — auth/MCP problems surface through the slug skill's
@@ -181,13 +178,13 @@ structured diagnostics instead.
 Verified launch facts carried from the chicken (re-verify versions at
 implementation, §10):
 
-| | claude | codex | opencode |
-|---|---|---|---|
-| headless | `claude -p <prompt> --output-format text` (`--allowed-tools` variadic — keep LAST, omit when empty) | `codex exec [-m model] <prompt>` | `opencode run [-m provider/model] <prompt>` |
-| interactive seed | trailing positional | trailing positional | `--prompt <seed>` (positional is a DIRECTORY) |
-| session name | `-n <name>` (resumable via `--resume <name>`) | none | none |
-| title suppression | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | none exists | `OPENCODE_DISABLE_TERMINAL_TITLE=1` |
-| config isolation (tests) | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | `XDG_DATA_HOME` (auth) |
+| | claude | codex |
+|---|---|---|
+| headless | `claude -p <prompt> --output-format text` (`--allowed-tools` variadic — keep LAST, omit when empty) | `codex exec [-m model] <prompt>` |
+| interactive seed | trailing positional | trailing positional |
+| session name | `-n <name>` (resumable via `--resume <name>`) | none |
+| title suppression | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | none exists |
+| config isolation (tests) | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` |
 
 `ToolContext` (trimmed from the chicken) remains the **only external-tool
 boundary**: argv-list-only `run()` (never a shell string), explicit env merge,
@@ -220,12 +217,12 @@ Keychain model, env relocation, and fake-origin machinery are all deleted).
 
 **Image** (one `docker/Dockerfile.e2e`, built once per run, layer-cached):
 `debian-slim` + python3 + uv + node + git + `wt` (worktrunk release binary) +
-the three provider CLIs + superpowers + this repo baked in with `omc` installed
+the two provider CLIs + superpowers + this repo baked in with `omc` installed
 via `uv tool install /repo`, the omc plugin registered in each harness, and the
 **stub Jira MCP server** available.
 
 **Auth**: tokens enter as container env — `CLAUDE_CODE_OAUTH_TOKEN`,
-`OPENAI_API_KEY`, and the opencode provider key. Live scenarios for a provider
+`OPENAI_API_KEY`. Live scenarios for a provider
 whose token is absent **FAIL with setup guidance** (`claude setup-token`, …) —
 never skip.
 
@@ -265,7 +262,6 @@ secrets (providers whose secret is configured), manually triggerable.
 oh-my-clanker/
 ├── .claude-plugin/{plugin.json, marketplace.json}
 ├── .codex-plugin/plugin.json
-├── .opencode/                  # JS entry + INSTALL.md (superpowers' shape)
 ├── src/omc/                    # cli, errors, config/, start, probe, slugcall,
 │                               # providers/, shells/, terminals/, toolctx,
 │                               # worktree, install/update/uninstall, assets/
@@ -289,17 +285,17 @@ testcontainers, ruff.
 Ordered by how much of the design leans on them:
 
 1. **Headless plugin/skill invocation**: `claude -p "/omc:start …"` must execute
-   plugin skills; equivalents for `codex exec` / `opencode run`. The E2E harness
+   plugin skills; equivalents for `codex exec`. The E2E harness
    and the seeded handoff both lean on this. (The slug call does NOT — it
    inlines the skill text.)
 2. **Headless MCP tool access**: the slug call must be able to use the session's
    MCP read tools non-interactively per provider (Claude `--allowed-tools`
-   pattern support vs permission modes; codex/opencode equivalents).
+   pattern support vs permission modes; codex equivalents).
 3. **Provider flag drift**: the §7 table was verified against June-2026 CLI
    versions; re-verify `-n`, `--prompt`, `codex exec`, title envs.
-4. **Codex/OpenCode plugin install from a bare repo**: superpowers' layout is
+4. **Codex plugin install from a bare repo**: superpowers' layout is
    the template; confirm `codex plugin marketplace add <owner>/<repo>` accepts
-   the repo shape, and the OpenCode JS entry registers skills from `skills/`.
+   the repo shape and exposes `skills/`.
 5. **wt in Docker**: worktrunk Linux release binary (fallback: cargo install).
 
 ## 11. Explicitly stripped (vs the chicken)

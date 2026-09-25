@@ -1,5 +1,6 @@
 # E2E image: every test gets a fresh container of this. The container IS the
-# sandbox — no host state, auth enters as env tokens at `docker run` time.
+# sandbox — no host state. API keys enter as runtime env; account auth comes
+# from a dedicated named volume and is copied into an ephemeral CODEX_HOME.
 #
 # --- Task 14 / Step 1: worktrunk distribution (recorded findings) ---
 # `cargo search worktrunk` hits crates.io directly:
@@ -33,8 +34,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
-# the three provider CLIs
-RUN npm install -g @anthropic-ai/claude-code @openai/codex opencode-ai
+# The supported provider CLIs. Pin Codex to the plugin commands verified in this
+# harness; 0.144.5 only registered marketplaces and did not install plugins.
+ARG CODEX_VERSION=0.156.1
+RUN npm install -g @anthropic-ai/claude-code @openai/codex@${CODEX_VERSION}
 
 # wt (worktrunk) — prebuilt static musl release binary (see note above)
 ARG WORKTRUNK_VERSION=0.68.0

@@ -14,7 +14,6 @@ def test_container_toolchain(container):
         ["omc", "version"],
         ["claude", "--version"],
         ["codex", "--version"],
-        ["opencode", "--version"],
     ):
         rc, out = run_in(container, argv)
         assert rc == 0, f"{argv} failed:\n{out}"

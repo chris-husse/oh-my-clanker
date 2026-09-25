@@ -16,6 +16,15 @@ build:
 e2e-tests *args:
     uv run pytest -m "e2e and not expensive" -q {{args}}
 
+# Serial local/trusted-runner verification of both conversational providers.
+# Provider-specific reruns use `just lifecycle-tests -k codex|claude`.
+lifecycle-tests *args:
+    uv run pytest -m "e2e and not expensive" -q tests/e2e/test_e2e_lifecycle.py {{args}}
+
+# Interactive device login into the dedicated Codex E2E Docker volume.
+codex-login:
+    bash docker/codex-login.sh
+
 # LLM-heavy E2E (documentation generation). Costs real money - run only with
 # explicit user agreement.
 expensive-e2e-tests *args:
