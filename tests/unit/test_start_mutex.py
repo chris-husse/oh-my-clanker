@@ -20,7 +20,10 @@ from ._stubs import HEALTHY_PLUGINS, make_claude_stub
 from .test_watch import _ctx_with_node_stub, _push_remote_commit, _repo_with_origin
 
 OK_VERDICT = 'OMC_SLUG {"ok": true, "slug": "proj-1-fix-login"}'
-WAIT_LINE = "→ waiting for omc watch to finish. Pass `omc start --no-mutex` to bypass"
+WAIT_LINE = (
+    "→ waiting for omc watch or a knowledge refresh to finish. "
+    "Pass `omc start --no-mutex` to bypass"
+)
 
 _HOLDER = (
     "import sys, time\n"

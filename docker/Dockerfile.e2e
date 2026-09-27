@@ -42,6 +42,9 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex@${CODEX_VERSION}
 # wt (worktrunk) — prebuilt static musl release binary (see note above)
 ARG WORKTRUNK_VERSION=0.68.0
 ARG TARGETARCH
+# The fork commit the E2E image indexes with — must carry the wiki-regroup and
+# copied-index fixes (chris-husse/GitNexus PR #4) this suite relies on.
+ARG GITNEXUS_REF=8de99dc966f22eef3de74eeeb446b0bed695f3c7
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) WT_TARGET=x86_64-unknown-linux-musl; \
@@ -68,6 +71,8 @@ RUN set -eux; \
 RUN set -eux; \
     export GITNEXUS_SKIP_OPTIONAL_GRAMMARS=1; \
     git clone --depth 1 https://github.com/chris-husse/GitNexus.git /root/.omc/dependencies/gitnexus; \
+    git -C /root/.omc/dependencies/gitnexus fetch --depth 1 origin "${GITNEXUS_REF}"; \
+    git -C /root/.omc/dependencies/gitnexus checkout -q FETCH_HEAD; \
     cd /root/.omc/dependencies/gitnexus/gitnexus-shared && npm install --no-audit --no-fund; \
     cd /root/.omc/dependencies/gitnexus/gitnexus && npm ci --no-audit --no-fund && npm run build; \
     node /root/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js --version

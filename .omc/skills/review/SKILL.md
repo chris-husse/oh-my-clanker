@@ -19,7 +19,8 @@ Judge it as a careful reviewer, focused on this repo's load-bearing rules:
 - Argv lists only, never `shell=True`; user-controlled strings go through
   `shlex.quote`.
 - Skills keep their machine contracts intact (OMC_SLUG / OMC_STAGE /
-  OMC_SQUASH lines; internal skills marked "not meant for direct invocation").
+  OMC_SQUASH / OMC_REBASE_MAIN / OMC_KNOWLEDGE lines; internal skills marked
+  "not meant for direct invocation").
 - No secrets in code, commits, or displayed URLs (redact userinfo).
 
 Report findings as Critical / Important / Minor with `file:line` citations.

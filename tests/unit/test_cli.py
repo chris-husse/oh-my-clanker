@@ -44,6 +44,28 @@ def test_internal_is_hidden_and_intercepted(capsys, tmp_path, monkeypatch):
     assert "Oh My Clanker" not in captured.err  # no banner on internal
 
 
+def test_internal_omcerror_is_reported_not_traced(tmp_path, capsys, monkeypatch):
+    """`internal` is intercepted before argparse, but it must still sit INSIDE
+    main()'s OmcError handler: an expected failure is `error: …` + the error's rc,
+    never a traceback (a skill parsing stdout would see a stack dump instead)."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    (repo / ".omc").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".omc" / "config.yaml").write_text("worktree: [unclosed\n")  # ConfigError on read
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(repo)
+
+    rc = main(["internal", "rebase-main"])
+    err = capsys.readouterr().err
+    assert rc == 1  # OmcError.rc, the same code every other command gets
+    assert err.startswith("error: ") and "invalid YAML" in err
+    assert "Traceback" not in err
+    assert "Oh My Clanker" not in err  # still bannerless
+
+
 def test_watch_without_config_bails(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("OMC_HOME", str(tmp_path / "empty"))
     monkeypatch.setenv("HOME", str(tmp_path))

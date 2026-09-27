@@ -53,3 +53,7 @@ Combine all sources into a single, direct answer to the question:
 - Where the project context (Step 1) and the graph (Step 2) disagree, say so
   — don't silently pick one.
 - State what could not be established rather than guessing.
+- If `gitnexus-explain` relayed an `OMC_KNOWLEDGE` line with `fresh: false`,
+  the FIRST line of your answer says the knowledge snapshot is stale
+  (reasons + fix, for the user to run in the primary) and nothing from the
+  graph is presented as current fact.

@@ -170,5 +170,31 @@ def test_message_constants_are_exact():
         "Another `omc watch` instance may be running. Pass `--clear-mutex` to bypass"
     )
     assert START_WAIT_MSG == (
-        "→ waiting for omc watch to finish. Pass `omc start --no-mutex` to bypass"
+        "→ waiting for omc watch or a knowledge refresh to finish. "
+        "Pass `omc start --no-mutex` to bypass"
     )
+
+
+def test_acquire_busy_narrated_free_is_silent_and_releases(tmp_path):
+    from omc.watchlock import acquire_busy_narrated
+
+    repo = _make_repo(tmp_path)
+    lock = busy_lock(_ctx(), cwd=str(repo))
+    said = []
+    with acquire_busy_narrated(lock, said.append):
+        assert lock.is_locked
+    assert said == [] and lock.is_locked is False
+
+
+def test_acquire_busy_narrated_waits_and_narrates_once(tmp_path):
+    from omc.watchlock import BUSY_WAIT_MSG, acquire_busy_narrated
+
+    repo = _make_repo(tmp_path)
+    lock = busy_lock(_ctx(), cwd=str(repo))
+    p = _hold_in_subprocess(lock.lock_file, 1.5)
+    said = []
+    with acquire_busy_narrated(lock, said.append):
+        pass
+    p.wait()
+    assert said == [BUSY_WAIT_MSG] == ["· waiting for another omc knowledge refresh to finish"]
+    assert lock.is_locked is False

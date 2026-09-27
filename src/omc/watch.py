@@ -7,6 +7,10 @@ LLM-generated wiki. Never destructive by default: off-branch, dirty, or
 diverged checkouts are warned about and left alone — --rebase is the explicit
 opt-in past the dirty/diverged skips (autostash rebase; conflicts abort and
 restore); off-branch checkouts are never touched in any mode.
+
+`--reset-gitnexus` force-clears index, wiki and docs mirror and rebuilds (base
+branch only); up-to-date ticks heal a stale verdict (`healed`, no hooks) and
+never retry the same failure every tick (`knowledge-stale:<codes>`).
 """
 
 from __future__ import annotations
@@ -26,19 +30,12 @@ from .buildprogress import ProgressTracker, sentinel_line
 from .cli.progress_bar import BarThread
 from .config.schema import Config
 from .errors import OmcError
-from .gitnexus import (
-    ANALYZE_ARGS,
-    ensure_gitnexus,
-    flat_store_branch,
-    gitnexus_argv,
-    store_inverted,
-)
-from .mirror import DOCS_MIRROR_REL, clear_docs_mirror, mirror_dir
+from .gitnexus import Freshness, ensure_gitnexus, refresh_knowledge, snapshot_freshness
 from .probe import require_tools
-from .providers.registry import docs_model_for, get_provider
+from .providers.registry import get_provider
 from .skills_source import skill_prompt
 from .toolctx import ToolContext
-from .watchlock import WATCH_BAIL_MSG, acquire_instance, watch_locks
+from .watchlock import WATCH_BAIL_MSG, acquire_busy_narrated, acquire_instance, watch_locks
 from .wtconfig import ensure_wt_config, primary_root, repo_root
 
 
@@ -215,88 +212,19 @@ def _auto_build(ctx: ToolContext, cfg: Config, root: str) -> None:
         _say(f"✗ auto-build failed ({status}) — log: {log_path}")
 
 
-def _heal_store(ctx: ToolContext, root: str, base: str) -> tuple[bool, bool]:
-    """Destroy and rebuild the GitNexus index when the flat (default) store
-    belongs to a branch other than `base` — the flat-store inversion: GitNexus
-    keys the default store to the FIRST-indexed branch, so incremental analyze
-    lands in a side store the MCP server, staleness hints, and `wiki` never
-    read. `gitnexus clean` exits 0 even when deletion fails, so every step is
-    judged by its POST-CONDITION on the flat meta, never by exit code. The
-    stale docs mirror is deleted unconditionally: docs generated from the
-    frozen graph cite deleted files as current.
-
-    Returns (healed, mirror_cleared). The second flag is what the caller's
-    "docs mirror cleared" hint is allowed to claim — it stays False when there
-    was no mirror and when deleting it failed."""
-    rootp = Path(root)
-    owner = flat_store_branch(rootp)
-    _say(f"✗ GitNexus index is owned by {owner!r}, not {base!r} — destroying and rebuilding")
-    mirror_cleared = False
-    try:
-        mirror_cleared = clear_docs_mirror(rootp)
-        if mirror_cleared:
-            _say("· stale docs mirror deleted")
-    except OSError as exc:
-        # rmtree can fail (permissions, a racing reader) and run_watch's loop
-        # catches only KeyboardInterrupt — an escaping OSError would kill the
-        # watcher. Warn and CONTINUE: the index is what watch exists to keep
-        # fresh, and the next documentation-enabled run re-mirrors over the
-        # leftovers via mirror_dir.
-        _say(f"✗ could not delete the stale docs mirror: {exc}")
-    cp = ctx.run(gitnexus_argv(ctx, "clean", "--force"), cwd=root)
-    if flat_store_branch(rootp) is not None:
-        _say(f"✗ clean did not remove the index: {(cp.stderr or cp.stdout or '').strip()[:400]}")
-        return False, mirror_cleared
-    cp = ctx.run(gitnexus_argv(ctx, *ANALYZE_ARGS), cwd=root)
-    if cp.returncode != 0:
-        _say(f"✗ full analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
-        return False, mirror_cleared
-    if flat_store_branch(rootp) != base:
-        _say(f"✗ rebuilt index is not owned by {base!r} — not claiming success")
-        return False, mirror_cleared
-    _say(f"✓ index rebuilt for {base}")
-    return True, mirror_cleared
-
-
-def _refresh_index(ctx: ToolContext, cfg: Config, root: str, enable_documentation: bool) -> None:
-    base = cfg.worktree.base_branch
-    mirror_cleared = False
-    if store_inverted(Path(root), base):
-        healed, mirror_cleared = _heal_store(ctx, root, base)
-        if not healed:
-            return  # warned inside; warn-and-skip, next tick retries
-    else:
-        _say("→ refreshing GitNexus index (incremental)")
-        cp = ctx.run(gitnexus_argv(ctx, *ANALYZE_ARGS), cwd=root)
-        if cp.returncode != 0:
-            _say(f"✗ analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
-            return
-        _say("✓ index refreshed")
-    if not enable_documentation:
-        # Only when the mirror ACTUALLY went away: a heal with no mirror has
-        # nothing to regenerate, and a failed deletion would have this line
-        # contradict its own warning.
-        if mirror_cleared:
-            _say(
-                "· docs mirror cleared — run omc watch --once --enable-documentation to regenerate"
-            )
-        return
-    name = cfg.llm.default
-    wiki_args = ["wiki", "--provider", name]
-    # Docs model, never the session model: wiki is bulk grounded summarization
-    # and a thinking-heavy session model turns it into an hours-long silent run.
-    docs_model = docs_model_for(cfg, name)
-    if docs_model:
-        wiki_args += ["--model", docs_model]
-    _say(f"→ regenerating documentation via {name} (LLM-heavy)")
-    cp = ctx.run(gitnexus_argv(ctx, *wiki_args), cwd=root)
-    if cp.returncode != 0:
-        _say(f"✗ wiki failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
-        return
-    wiki = Path(root) / ".gitnexus" / "wiki"
-    if wiki.is_dir():
-        mirror_dir(wiki, Path(root) / DOCS_MIRROR_REL)
-        _say("✓ documentation refreshed → .omc/docs/gitnexus/docs")
+def _refresh_index(
+    ctx: ToolContext, cfg: Config, root: str, enable_documentation: bool, *, reset: bool = False
+) -> Freshness:
+    """Repair the knowledge snapshot — the ONE code path (gitnexus.refresh_knowledge)."""
+    return refresh_knowledge(
+        ctx,
+        cfg,
+        root,
+        cfg.worktree.base_branch,
+        documentation=enable_documentation,
+        reset=reset,
+        say=_say,
+    )
 
 
 def _chain_tick(ctx: ToolContext, root: str, last: str | None) -> str:
@@ -343,13 +271,21 @@ def _tick(
     force_refresh: bool,
     last: str | None = None,
     rebase: bool = False,
+    reset: bool = False,
 ) -> str:
     """One tick; returns an outcome token. Repeatable QUIET outcomes (up to
     date, off-branch, dirty, diverged, fetch-fail, conflicted, rebase-failed,
     autostash-conflict) narrate only when the outcome CHANGED since the last
     tick — a 30s loop must not spam identical lines. Action outcomes (sync,
     refresh) always narrate. With rebase=True the dirty/diverged skips are
-    replaced by `git rebase --autostash` (the user's explicit opt-in)."""
+    replaced by `git rebase --autostash` (the user's explicit opt-in).
+
+    An up-to-date tick whose freshness verdict is stale repairs it and returns
+    the action token `healed` (narrates; fires no hooks — only knowledge
+    changed); a repair that leaves the verdict stale returns the QUIET token
+    `knowledge-stale:<codes>`, so the same failure is not retried every tick.
+    reset=True makes every up-to-date/synced tick a full rebuild point,
+    verdict or not."""
     base = cfg.worktree.base_branch
 
     def quiet(token: str, msg: str) -> str:
@@ -371,14 +307,23 @@ def _tick(
     if behind in ("", "0"):
         if force_refresh:
             _say("· up to date")
-            # --once is the "refresh now" button: index (and docs, when enabled)
-            # run unconditionally, not only when new commits arrived.
-            _refresh_index(ctx, cfg, root, enable_documentation)
+            # --once is the "check now" button: repair whatever is stale (and a
+            # pending reset), narrate "current" when nothing is.
+            _refresh_index(ctx, cfg, root, enable_documentation, reset=reset)
             return "refreshed"
-        return quiet(
-            "up-to-date",
-            f"· up to date — waiting for changes on origin/{base}",
+        verdict = snapshot_freshness(
+            ctx, Path(root), base, ref="HEAD", documentation=enable_documentation
         )
+        if verdict.fresh and not reset:
+            return quiet("up-to-date", f"· up to date — waiting for changes on origin/{base}")
+        codes = ",".join(sorted(verdict.codes()))
+        if not reset and last == f"knowledge-stale:{codes}":
+            return last  # same failure as last tick: no retry hammer, no extra line
+        _say("· up to date")
+        after = _refresh_index(ctx, cfg, root, enable_documentation, reset=reset)
+        if after.fresh:
+            return "healed"
+        return "knowledge-stale:" + ",".join(sorted(after.codes()))
     if rebase:
         if _out(ctx, [ctx.git_bin, "ls-files", "-u"], root):
             return quiet("conflicted", "· unmerged paths in the tree — resolve them, skipping sync")
@@ -415,7 +360,7 @@ def _tick(
             )
         new = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
         _say(f"✓ rebased {base}: {old}..{new} ({behind} commits)")
-        _refresh_index(ctx, cfg, root, enable_documentation)
+        _refresh_index(ctx, cfg, root, enable_documentation, reset=reset)
         return "synced"
     if ahead not in ("", "0"):
         return quiet(
@@ -433,7 +378,7 @@ def _tick(
         return quiet("merge-failed", f"✗ ff-merge failed: {(cp.stderr or '').strip()[:200]}")
     new = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
     _say(f"✓ synced {base}: {old}..{new} ({behind} commits)")
-    _refresh_index(ctx, cfg, root, enable_documentation)
+    _refresh_index(ctx, cfg, root, enable_documentation, reset=reset)
     return "synced"
 
 
@@ -447,6 +392,7 @@ def run_watch(
     auto_build: bool = False,
     rebase: bool = False,
     clear_mutex: bool = False,
+    reset_gitnexus: bool = False,
 ) -> int:
     root = repo_root(ctx)
     if root is None:
@@ -463,6 +409,18 @@ def run_watch(
     # Prerequisites fail fast BEFORE the mutex (a miss must leave no lock);
     # the warn-and-skip doctrine applies only to ticks, never to boot checks.
     require_tools(ctx, cfg)  # git/wt/provider — raises OmcError on a miss
+    base = cfg.worktree.base_branch
+    if reset_gitnexus:
+        # A rebuild anywhere else would stamp the store with THAT branch and
+        # recreate the inversion — refuse before any node call and any lock.
+        branch = _out(ctx, [ctx.git_bin, "rev-parse", "--abbrev-ref", "HEAD"], root)
+        if branch != base:
+            print(
+                f"error: --reset-gitnexus requires the primary checkout to be on {base} "
+                f"(currently {branch})",
+                file=sys.stderr,
+            )
+            return 1
     rc = ensure_gitnexus(ctx)
     if rc:
         return rc
@@ -478,15 +436,17 @@ def run_watch(
             print(WATCH_BAIL_MSG, file=sys.stderr)
             return 1
     _say(
-        f"→ watching {root} (base {cfg.worktree.base_branch}, every {interval}s"
+        f"→ watching {root} (base {base}, every {interval}s"
         f"{', documentation enabled' if enable_documentation else ''}) — Ctrl-C stops"
     )
     last: str | None = None
     chain_last: str | None = None
+    reset_pending = reset_gitnexus
+    reset_note: str | None = None
     try:
         while True:
             # Busy lock held for the WHOLE busy portion (tick + hooks): free ⇔ idle.
-            with busy if busy is not None else nullcontext():
+            with acquire_busy_narrated(busy, _say) if busy is not None else nullcontext():
                 chain_last = _chain_tick(ctx, root, chain_last)
                 last = _tick(
                     ctx,
@@ -496,7 +456,20 @@ def run_watch(
                     force_refresh=once,
                     last=last,
                     rebase=rebase,
+                    reset=reset_pending,
                 )
+                if reset_pending and (
+                    last in ("healed", "refreshed", "synced") or last.startswith("knowledge-stale:")
+                ):
+                    reset_pending = False  # applied — or failed honestly; never re-run blindly
+                elif reset_pending and once:
+                    _say(
+                        "· reset not applied — this tick could not refresh; "
+                        "rerun on a clean base checkout"
+                    )
+                elif reset_pending and last != reset_note:
+                    _say("· reset pending — waiting for a tick that can refresh")
+                    reset_note = last
                 if last in ("synced", "refreshed"):
                     _post_watch_hook(ctx, root, last)
                     if auto_build:

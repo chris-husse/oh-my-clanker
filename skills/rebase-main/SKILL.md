@@ -34,6 +34,11 @@ The last line is machine-readable:
   completes, run `omc internal rebase-main` again so the snapshot mirror
   still happens.
 
+Every `OMC_REBASE_MAIN` payload carries `"knowledge": {…}` (the primary's
+freshness verdict, same schema as `OMC_KNOWLEDGE`). When `knowledge.fresh` is
+false, relay its `reasons` and `fix` — the mirrored snapshot is faithful but
+stale.
+
 ## When to use
 
 - Anytime the base branch has moved and you want current code + a current

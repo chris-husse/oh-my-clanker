@@ -157,6 +157,7 @@ def test_start_skill_contract():
         "omc start",
         "$ARGUMENTS",
         "merge-base",
+        "OMC_KNOWLEDGE",
     ):
         assert needle in text, f"start skill missing {needle!r}"
     # start hands off to plan; plan owns the brainstorming handoff now
@@ -174,29 +175,55 @@ def test_gitnexus_ensure_contract():
 
 def test_gitnexus_index_contract():
     text = (ROOT / "skills" / "gitnexus-index" / "SKILL.md").read_text()
-    for needle in ("--skip-agents-md", "--skip-skills", "git worktree list", "primary"):
+    for needle in (
+        "omc internal gitnexus refresh",
+        "OMC_KNOWLEDGE",
+        "rc 3",
+        "git worktree list",
+        "primary",
+    ):
         assert needle in text, f"gitnexus-index missing {needle!r}"
+    assert "--skip-agents-md" not in text  # analyze flags live in Python now
 
 
 def test_gitnexus_document_contract():
     text = (ROOT / "skills" / "gitnexus-document" / "SKILL.md").read_text()
-    for needle in ("--provider", ".omc/docs/gitnexus/docs", ".gitnexus/wiki"):
+    for needle in (
+        "omc internal gitnexus refresh --enable-documentation",
+        ".omc/docs/gitnexus/docs",
+        "OMC_KNOWLEDGE",
+    ):
         assert needle in text, f"gitnexus-document missing {needle!r}"
-    assert "openai" in text and "default" in text  # never fall through to it
+    assert "cp -R" not in text and "--provider" not in text  # sync + model choice are Python's
 
 
 def test_gitnexus_explain_contract():
     text = (ROOT / "skills" / "gitnexus-explain" / "SKILL.md").read_text()
-    assert "omc internal gitnexus" in text  # queries go through the proxy
-    assert "--repo" not in text  # scoping is the proxy's job, not prose
-    assert "--branch" not in text
-    assert "node <CLI> query" not in text  # no raw CLI recipes remain
+    assert "omc internal gitnexus" in text
+    assert "OMC_KNOWLEDGE" in text and "stderr" in text
+    assert "--repo" not in text and "--branch" not in text
+    assert "node <CLI> query" not in text
 
 
 def test_explain_user_facing_contract():
     text = (ROOT / "skills" / "explain" / "SKILL.md").read_text()
-    for needle in (".omc/skills/explain-context", "gitnexus-explain", "$ARGUMENTS"):
+    for needle in (
+        ".omc/skills/explain-context",
+        "gitnexus-explain",
+        "$ARGUMENTS",
+        "OMC_KNOWLEDGE",
+    ):
         assert needle in text, f"explain missing {needle!r}"
+
+
+def test_machine_contract_listings_include_knowledge():
+    for rel in (
+        "src/omc/distribution/AGENTS.md",
+        ".omc/config/AGENTS.md",
+        ".omc/skills/review/SKILL.md",
+        ".omc/skills/explain-context/SKILL.md",
+    ):
+        assert "OMC_KNOWLEDGE" in (ROOT / rel).read_text(), rel
 
 
 def test_investigate_skill_contract():
@@ -235,6 +262,7 @@ def test_plan_skill_contract():
         "OMC_SLUG",
         "non-fatal",
         "model-tier",
+        "OMC_KNOWLEDGE",
     ):
         assert needle in text, f"plan skill missing {needle!r}"
     # composition rule: explain is called as a command, never unpacked
@@ -287,7 +315,7 @@ def test_dogfood_stage_and_context_skills():
 
 def test_rebase_main_skill_contract():
     text = (ROOT / "skills" / "rebase-main" / "SKILL.md").read_text()
-    for needle in ("omc internal rebase-main", "OMC_REBASE_MAIN", "rc 3", "conflict"):
+    for needle in ("omc internal rebase-main", "OMC_REBASE_MAIN", "rc 3", "conflict", "knowledge"):
         assert needle in text, f"rebase-main skill missing {needle!r}"
     assert "rsync" not in text  # the mirror is Python; the skill never shells rsync
 

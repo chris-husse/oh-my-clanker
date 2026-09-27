@@ -117,7 +117,12 @@ default. Then:
 ## Step 4 — hand off to plan
 
 1. Print a compact summary: ticket (key, title, 2–3 sentences),
-   surroundings, doc list, and the workspace (branch + worktree path).
+   surroundings, doc list, and the workspace (branch + worktree path). If
+   the seed carries an `OMC_KNOWLEDGE` line (the one OUTSIDE the JSON
+   string) with `fresh: false`, restate the alert in this summary and pass
+   it to `omc:plan` with the context. The `fix` is for the USER to run in
+   the primary checkout — this session never runs it (it mutates the
+   primary and takes locks).
 2. Invoke the `omc:plan` skill with the gathered context recap and complete
    input context. `plan`
    runs the explain pass, asks the user for their seed, and starts the

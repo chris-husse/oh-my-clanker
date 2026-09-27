@@ -23,7 +23,8 @@ Where this project keeps its truth, most-authoritative first:
    answer "why is X this way" and "what is still open".
 
 Conventions worth knowing: machine contracts are single-line JSON verdicts
-prefixed `OMC_SLUG` / `OMC_STAGE` / `OMC_SQUASH`; "the chicken" in docs means
+prefixed `OMC_SLUG` / `OMC_STAGE` / `OMC_SQUASH` / `OMC_REBASE_MAIN` /
+`OMC_KNOWLEDGE`; "the chicken" in docs means
 the internal predecessor tool this project descends from; provider quirks are
 documented as comments at the exact code site that depends on them
 (`src/omc/providers/*.py`).
