@@ -76,6 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Remove a leftover watch mutex and run anyway (bypasses the single-instance guard)",
     )
+    p_watch.add_argument(
+        "--reset-gitnexus",
+        action="store_true",
+        help="Force-clear the GitNexus index, wiki and docs mirror and rebuild them "
+        "(primary must be on the base branch)",
+    )
 
     p_dep = sub.add_parser(
         "dependency", help="External dependency knowledge cache (~/.omc): watch, list"
@@ -142,7 +148,17 @@ def _load_cfg_or_bail(ctx: ToolContext):
 
 
 def main(argv: list[str] | None = None) -> int:
-    raw = sys.argv[1:] if argv is None else argv
+    # ONE OmcError boundary for every command, `internal` verbs included: an
+    # expected failure prints `error: …` and returns the error's rc, never a
+    # traceback into a skill's stdout parser.
+    try:
+        return _run(sys.argv[1:] if argv is None else argv)
+    except OmcError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return exc.rc
+
+
+def _run(raw: list[str]) -> int:
     # `internal` is hidden skill<->CLI plumbing: intercepted before argparse so it
     # never appears in --help; machine-readable stdout, no banner.
     if raw and raw[0] == "internal":
@@ -159,11 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     # must work on a machine that never ran `omc configure`.
     if args.command not in ("version", "print-install-path", "aws-credential-process"):
         print(f"Oh My Clanker! v{__version__}", file=sys.stderr)
-    try:
-        return _dispatch(ctx, args)
-    except OmcError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return exc.rc
+    return _dispatch(ctx, args)
 
 
 def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
@@ -204,6 +216,7 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             auto_build=args.auto_build,
             rebase=args.rebase,
             clear_mutex=args.clear_mutex,
+            reset_gitnexus=args.reset_gitnexus,
         )
     if args.command == "dependency":
         if args.dep_command == "watch":

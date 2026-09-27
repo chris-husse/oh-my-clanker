@@ -1,8 +1,8 @@
 """`omc internal …` — the skill↔CLI contract (hidden, machine-readable).
 
 Intercepted before argparse; stdout is for machines. Exit codes: 0 ok,
-2 usage, 3 bail ("inconclusive — the calling skill falls back to its own
-judgment", chicken semantics; rebase conflicts bail rather than error).
+1 error, 2 usage, 3 bail ("inconclusive — the calling skill falls back to its
+own judgment", chicken semantics; rebase conflicts bail rather than error).
 """
 
 from __future__ import annotations
@@ -10,20 +10,29 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 from .config import resolve
 from .errors import OmcError
-from .gitnexus import ensure_gitnexus, gitnexus_argv, gitnexus_cli
+from .gitnexus import (
+    ensure_gitnexus,
+    gitnexus_argv,
+    gitnexus_cli,
+    refresh_knowledge,
+    snapshot_freshness,
+)
 from .mirror import mirror_snapshot
 from .providers.registry import provider_names
 from .toolctx import ToolContext
+from .watchlock import acquire_busy_narrated, busy_lock
 from .wtconfig import WT_TEMPLATE, primary_root, repo_root
 
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] | wt-template"
     " | notify --provider NAME [payload]"
-    " | gitnexus [--git REF] <ensure|query|context|impact|cypher> [args…]"
+    " | gitnexus [--git REF] <ensure|status|refresh [--enable-documentation]"
+    "|query|context|impact|cypher> [args…]"
     " | dependency <ensure|document|list> [args…]"
     " | build-progress LOGFILE}"
 )
@@ -33,6 +42,85 @@ _GITNEXUS_VERBS = ("query", "context", "impact", "cypher")
 
 def _verdict(payload: dict) -> None:
     print(f"OMC_REBASE_MAIN {json.dumps(payload)}", flush=True)
+
+
+def _say(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _knowledge_line(v) -> None:
+    print(f"OMC_KNOWLEDGE {json.dumps(v.to_json())}", flush=True)
+
+
+def _primary_and_base(ctx: ToolContext) -> tuple[str, str] | None:
+    primary = primary_root(ctx)
+    if primary is None:
+        print("error: not inside a git repository", file=sys.stderr)
+        return None
+    return primary, resolve.project_config(ctx).worktree.base_branch
+
+
+def _knowledge_status(ctx: ToolContext) -> int:
+    try:
+        pb = _primary_and_base(ctx)
+    except OmcError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if pb is None:
+        return 2
+    primary, base = pb
+    _knowledge_line(snapshot_freshness(ctx, Path(primary), base))  # no fetch: basis says so
+    return 0
+
+
+def _knowledge_refresh(ctx: ToolContext, rest: list[str]) -> int:
+    """Repair the primary's knowledge snapshot in place (spec §4). Never fetches
+    and never takes the INSTANCE lock: the verdict is measured against HEAD, so
+    a primary nobody syncs can still become fresh; `omc watch` owns syncing."""
+    parser = argparse.ArgumentParser(prog="omc internal gitnexus refresh", add_help=False)
+    parser.add_argument("--enable-documentation", action="store_true")
+    try:
+        args = parser.parse_args(rest)
+    except SystemExit:
+        print(_USAGE, file=sys.stderr)
+        return 2
+    try:
+        cfg = resolve.load_effective(ctx)
+        if cfg is None:
+            print("error: omc is not configured — run `omc configure` first.", file=sys.stderr)
+            return 2
+        pb = _primary_and_base(ctx)
+    except OmcError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if pb is None:
+        return 2
+    primary, base = pb
+    cp = ctx.run([ctx.git_bin, "rev-parse", "--abbrev-ref", "HEAD"], cwd=primary)
+    branch = (cp.stdout or "").strip()
+    if branch != base:
+        # analyze off the base would stamp the store with THAT branch and
+        # recreate the inversion — refuse before any node call and any lock.
+        print(
+            f"error: refresh requires the primary checkout to be on {base} (currently {branch})",
+            file=sys.stderr,
+        )
+        return 1
+    if ensure_gitnexus(ctx):
+        return 1
+    lock = busy_lock(ctx, cwd=primary)
+    # Held for the WHOLE repair so `omc start` never snapshots a half-written
+    # index/wiki; the context manager releases it on exceptions too.
+    with acquire_busy_narrated(lock, _say) if lock is not None else nullcontext():
+        v = refresh_knowledge(
+            ctx, cfg, primary, base, documentation=args.enable_documentation, reset=False, say=_say
+        )
+    behind = ctx.run([ctx.git_bin, "rev-list", "--count", f"HEAD..origin/{base}"], cwd=primary)
+    n = (behind.stdout or "").strip()
+    if behind.returncode == 0 and n.isdigit() and int(n) > 0:
+        _say(f"· primary is {n} commits behind origin/{base} — omc watch syncs it")
+    _knowledge_line(v)
+    return 0 if v.fresh else 3
 
 
 def _rebase_main(ctx: ToolContext, base_arg: str | None) -> int:
@@ -51,6 +139,9 @@ def _rebase_main(ctx: ToolContext, base_arg: str | None) -> int:
                 "synced": [],
                 "shared": [],
                 "note": "primary checkout — nothing to rebase",
+                # No fetch on this path (and none is added for a verdict) — `basis`
+                # names the local ref it was measured against.
+                "knowledge": snapshot_freshness(ctx, Path(primary), base).to_json(),
             }
         )
         return 0
@@ -62,6 +153,9 @@ def _rebase_main(ctx: ToolContext, base_arg: str | None) -> int:
         )
         return 1
 
+    # One verdict for both remaining shapes, measured against the ref we just fetched.
+    knowledge = snapshot_freshness(ctx, Path(primary), base).to_json()
+
     old = (ctx.run([ctx.git_bin, "rev-parse", "--short", "HEAD"]).stdout or "").strip()
     cp = ctx.run([ctx.git_bin, "rebase", f"origin/{base}"])
     if cp.returncode != 0:
@@ -69,7 +163,7 @@ def _rebase_main(ctx: ToolContext, base_arg: str | None) -> int:
             ctx.run([ctx.git_bin, "diff", "--name-only", "--diff-filter=U"]).stdout or ""
         ).split()
         # The rebase stays PAUSED for the user/skill to resolve — never aborted here.
-        _verdict({"ok": False, "conflicts": conflicts})
+        _verdict({"ok": False, "conflicts": conflicts, "knowledge": knowledge})
         return 3
 
     new = (ctx.run([ctx.git_bin, "rev-parse", "--short", "HEAD"]).stdout or "").strip()
@@ -86,6 +180,7 @@ def _rebase_main(ctx: ToolContext, base_arg: str | None) -> int:
             "rebased": f"{old}..{new}",
             "synced": result.synced,
             "shared": result.shared,
+            "knowledge": knowledge,
         }
     )
     return 0
@@ -110,6 +205,12 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
     """
     if rest == ["ensure"]:
         return ensure_gitnexus(ctx)
+    # Before the --git parse AND the CLI-presence guard: status needs no CLI,
+    # refresh installs one itself via ensure_gitnexus.
+    if rest == ["status"]:
+        return _knowledge_status(ctx)
+    if rest[:1] == ["refresh"]:
+        return _knowledge_refresh(ctx, rest[1:])
     dep_ref: str | None = None
     if rest[:1] == ["--git"]:
         if len(rest) < 2:
@@ -158,6 +259,10 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
         print("error: not inside a git repository", file=sys.stderr)
         return 2
     base = resolve.project_config(ctx).worktree.base_branch
+    verdict = snapshot_freshness(ctx, Path(primary), base)  # computed without fetch
+    if not verdict.fresh:
+        # stderr, flushed BEFORE the child spawns: stdout stays pure GitNexus JSON
+        print(f"OMC_KNOWLEDGE {json.dumps(verdict.to_json())}", file=sys.stderr, flush=True)
     argv = gitnexus_argv(ctx, *rest, "--repo", primary, "--branch", base)
     cp = ctx.run(argv, cwd=primary, capture=False)  # stream JSON straight through
     return cp.returncode

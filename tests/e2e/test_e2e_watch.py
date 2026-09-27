@@ -1,4 +1,6 @@
-"""Live `omc watch --once`: real git sync + real GitNexus reindex, no tokens."""
+"""Live `omc watch --once`: real git sync + real GitNexus reindex. Most tests
+need no tokens; the documentation test requires a Claude token
+(require_token)."""
 
 from __future__ import annotations
 
@@ -6,7 +8,7 @@ import re
 
 import pytest
 
-from .harness import configure_omc, make_work_repo, run_in
+from .harness import configure_omc, make_work_repo, require_token, run_in
 
 pytestmark = pytest.mark.e2e
 
@@ -62,9 +64,10 @@ def test_watch_once_up_to_date_still_refreshes_index(container):
     rc, out = run_in(container, ["omc", "watch", "--once"], cwd=repo, timeout=300)
     assert rc == 0, out
     assert "up to date" in out, out
-    # --once is the refresh-now button: the REAL index is built even with no new commits
+    # --once checks now and repairs whatever is stale: the REAL index exists
+    # afterwards even when there are no new commits
     rc, _ = run_in(container, ["test", "-d", f"{repo}/.gitnexus"])
-    assert rc == 0, f"--once did not force an index refresh:\n{out[:1500]}"
+    assert rc == 0, f"--once left the index missing:\n{out[:1500]}"
 
 
 def _seed_container_hook(container, repo, body):
@@ -203,3 +206,78 @@ def test_watch_once_heals_feature_branch_owned_index(container):
     assert rc != 0, "shadow branch store survived the heal"
     rc, _ = run_in(container, ["test", "-e", f"{repo}/.omc/docs/gitnexus/docs/x.md"])
     assert rc != 0, "stale docs mirror survived the heal"
+
+
+def test_watch_once_regroups_a_stale_pinned_wiki(container):
+    """The fork's GitNexus (PR #4) regroups on its own once omc runs `wiki` at the
+    right time; omc must not carry an unpin workaround. Seed: wiki metadata
+    behind the index with a one-module tree, then three distinct concerns land."""
+    require_token("claude")
+    configure_omc(container, "claude")
+    repo = make_work_repo(container, path="/work/regroup-repo")
+    rc, out = run_in(
+        container,
+        ["node", _CLI, "analyze", "--skip-agents-md", "--skip-skills"],
+        cwd=repo,
+        timeout=300,
+    )
+    assert rc == 0, out[:1500]
+    seed = (
+        "import json, os, subprocess\n"
+        f"repo = '{repo}'\n"
+        "head = subprocess.run(['git', '-C', repo, 'rev-parse', 'HEAD'],"
+        " capture_output=True, text=True).stdout.strip()\n"
+        "w = repo + '/.gitnexus/wiki'\n"
+        "os.makedirs(w, exist_ok=True)\n"
+        "tree = [{'name': 'Everything', 'slug': 'everything', 'files': ['README.md']}]\n"
+        "json.dump(tree, open(w + '/module_tree.json', 'w'))\n"
+        "json.dump(tree, open(w + '/first_module_tree.json', 'w'))\n"
+        "json.dump({'fromCommit': head, 'generatedAt': 'x', 'model': 'm', 'lang': '',"
+        " 'moduleFiles': {'Everything': ['README.md']}, 'moduleTree': tree},"
+        " open(w + '/meta.json', 'w'))\n"
+        "open(w + '/everything.md', 'w').write('# Everything\\n')\n"
+        "open(w + '/overview.md', 'w').write('# Overview\\n')\n"
+    )
+    rc, out = run_in(container, ["python3", "-c", seed])
+    assert rc == 0, out
+    # Three distinct concerns (auth, billing, reports), three files each,
+    # landing on origin so watch syncs them: >5 new files trips GitNexus's
+    # escalation and the LLM has genuinely separable material to group.
+    grow = (
+        f"git clone -q {repo}-origin /work/regroup-other && cd /work/regroup-other && "
+        "mkdir -p auth billing reports && "
+        "printf 'export function login(user, pw) { return user && pw ? "
+        "{ok: true, user} : {ok: false}; }\\n' > auth/login.js && "
+        "printf 'export function logout(session) { session.active = false; "
+        "return session; }\\n' > auth/logout.js && "
+        'printf \'export function hashPassword(pw) { return [...pw].reverse().join("");'
+        " }\\n' > auth/password.js && "
+        "printf 'export function createInvoice(items) { return {total: "
+        "items.reduce((a, i) => a + i.price, 0), items}; }\\n' > billing/invoice.js && "
+        "printf 'export function charge(card, amount) { return {card: card.slice(-4), "
+        'amount, status: "charged"}; }\\n\' > billing/charge.js && '
+        'printf \'export function refund(chargeId) { return {chargeId, status: "refunded"}; '
+        "}\\n' > billing/refund.js && "
+        "printf 'export function dailyReport(rows) { return rows.filter(r => "
+        "r.day === new Date().getDay()); }\\n' > reports/daily.js && "
+        "printf 'export function monthlyReport(rows) { return rows.filter(r => "
+        "r.month === new Date().getMonth()); }\\n' > reports/monthly.js && "
+        "printf 'export function exportCsv(rows) { return rows.map(r => "
+        'Object.values(r).join(",")).join("\\\\n"); }\\n\' > reports/export.js && '
+        "git add -A && git commit -qm 'auth, billing, reports' && git push -q origin main"
+    )
+    rc, out = run_in(container, ["bash", "-c", grow])
+    assert rc == 0, out
+
+    rc, out = run_in(
+        container, ["omc", "watch", "--once", "--enable-documentation"], cwd=repo, timeout=1800
+    )
+    assert rc == 0, f"watch failed:\n{out[:2000]}"
+    assert "✓ documentation refreshed" in out, out
+
+    rc, tree = run_in(container, ["bash", "-c", f"/bin/cat {repo}/.gitnexus/wiki/module_tree.json"])
+    assert rc == 0 and tree.count('"slug"') > 1, f"module tree still pinned to one module:\n{tree}"
+    rc, pages = run_in(container, ["bash", "-c", f"ls {repo}/.omc/docs/gitnexus/docs/*.md | wc -l"])
+    assert rc == 0 and int(pages.strip()) > 1, f"docs mirror empty or single page:\n{pages}"
+    rc, status = run_in(container, ["omc", "internal", "gitnexus", "status"], cwd=repo)
+    assert rc == 0 and '"fresh": true' in status, status

@@ -46,8 +46,9 @@ harness (Claude Code and Codex) gets the same ground rules:
   - The cheap/fast tier (Haiku-class or its equivalent on any provider) is
     **never used**, for anything.
 - **Machine contracts are sacred**: single-line `OMC_SLUG` / `OMC_STAGE` /
-  `OMC_SQUASH` / `OMC_REBASE_MAIN` / `OMC_TICKET` verdicts are parsed by tools
-  — emit them exactly as their skills specify, never wrapped in markdown.
+  `OMC_SQUASH` / `OMC_REBASE_MAIN` / `OMC_TICKET` / `OMC_KNOWLEDGE` verdicts are
+  parsed by tools — emit them exactly as their skills specify, never wrapped in
+  markdown.
 - **A verdict is an argument, not a destination within the active phase.** Those verdict lines — and
   every other sub-skill artifact (an MR description, a plan, a spec) — end the
   SUB-SKILL, never the turn. "Nothing may follow it", "no commentary", "and

@@ -5,9 +5,10 @@ Two flock-based locks (via filelock) live in the repo's SHARED .git dir
 
 - omc-watch.lock (INSTANCE): held by `omc watch` for its entire lifetime.
   Forbids parallel watches on one primary; `--clear-mutex` bypasses.
-- omc-watch-busy.lock (BUSY): held only while a watch tick is doing work —
-  free means any running watch is idle. `omc start` probes it before cutting
-  a worktree so it never snapshots a half-updated primary.
+- omc-watch-busy.lock (BUSY): held while ANYONE mutates the primary's
+  knowledge — a watch tick or `omc internal gitnexus refresh`. Free ⇔ nobody
+  is mutating. `omc start` probes it before cutting a worktree so it never
+  snapshots a half-updated primary.
 
 The kernel releases flock locks when their holder dies, so a crashed or
 SIGKILLed watch never wedges anything and a watch RESTART always finds the
@@ -17,7 +18,8 @@ local dev tool.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from filelock import FileLock, Timeout
@@ -28,7 +30,10 @@ INSTANCE_LOCK = "omc-watch.lock"
 BUSY_LOCK = "omc-watch-busy.lock"
 
 WATCH_BAIL_MSG = "Another `omc watch` instance may be running. Pass `--clear-mutex` to bypass"
-START_WAIT_MSG = "→ waiting for omc watch to finish. Pass `omc start --no-mutex` to bypass"
+START_WAIT_MSG = (
+    "→ waiting for omc watch or a knowledge refresh to finish. "
+    "Pass `omc start --no-mutex` to bypass"
+)
 
 
 def locks_dir(ctx: ToolContext, cwd: str | None = None) -> Path | None:
@@ -86,3 +91,26 @@ def wait_until_idle(lock: FileLock, *, say: Callable[[str], None] | None = None)
             say(START_WAIT_MSG)
         lock.acquire()  # filelock default: block indefinitely
     lock.release()
+
+
+BUSY_WAIT_MSG = "· waiting for another omc knowledge refresh to finish"
+
+
+@contextmanager
+def acquire_busy_narrated(
+    lock: FileLock, say: Callable[[str], None] | None = None
+) -> Iterator[None]:
+    """HOLD the busy lock for a knowledge mutation (watch tick, internal refresh).
+    Probe first; a holder elsewhere is narrated once, then we block. Not
+    `with lock:` — filelock is reentrant, so entering an already-held lock
+    would leave it held after exit."""
+    try:
+        lock.acquire(timeout=0)
+    except Timeout:
+        if say is not None:
+            say(BUSY_WAIT_MSG)
+        lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()

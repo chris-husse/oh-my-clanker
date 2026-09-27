@@ -39,6 +39,10 @@ Also read the generated docs at `.omc/docs/gitnexus/docs/` (primary root)
 when present — module pages often carry the architectural "why" the graph
 alone can't.
 
+The proxy prints `OMC_KNOWLEDGE {…}` on **stderr** (matched by prefix, not
+position — GitNexus's own warnings land there too) when the snapshot is
+stale. Relay that line to your caller as the first thing you return.
+
 ## Step 3 — return findings
 
 Return the evidence, organized for the caller to synthesize: the symbols and

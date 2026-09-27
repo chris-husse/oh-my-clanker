@@ -5,51 +5,27 @@ description: Internal — used by /omc:document; not meant for direct invocation
 
 # omc gitnexus-document (internal)
 
-## Step 1 — ensure CLI + index
+## Step 1 — ensure the CLI
 
-Run the `gitnexus-ensure` skill. Resolve the primary worktree root
-(`git worktree list`, first entry). No `.gitnexus/` index there yet → run the
-`gitnexus-index` skill first.
+Run the `gitnexus-ensure` skill.
 
-## Step 2 — generate the wiki
-
-Determine the provider: omc's configured default (`llm.default` in
-`~/.omc/config.yaml`; if unreadable, ask rather than guess). gitnexus's wiki
-providers include omc's supported `claude` and `codex` natively — it drives the
-LOCAL agent CLI, so this uses the same auth omc already requires. Pass the
-provider EXPLICITLY (never fall through to gitnexus's `openai` default, which
-needs credentials the user may not have).
-
-The model is the DOCS model — `llm.providers.<provider>.docs_model` in
-`~/.omc/config.yaml` — NEVER the session model (`…providers.<provider>.model`):
-wiki generation is bulk grounded summarization, and a thinking-heavy session
-model turns it into an hours-long silent run. When `docs_model` is unset, use
-the provider's docs floor: `claude-sonnet-5` for claude (pass it explicitly —
-gitnexus caches models in its own config and a stale choice would otherwise
-resurrect); for codex omit `--model` (its CLI default is the
-coding model):
+## Step 2 — refresh index + documentation
 
 ```sh
-node <CLI> wiki --provider <omc default provider> [--model <docs model>]
+omc internal gitnexus refresh --enable-documentation
 ```
 
-Run it from the primary root. This is LLM-driven and can take a while on a
-large repo — that's expected; stream/report its progress.
+Python owns the LLM choice (omc's configured default and that provider's docs
+model, never the session model); the wiki runs supervised (no deadline, killed
+only on a stall) and, when the verdict is fresh afterwards, is mirrored into
+`.omc/docs/gitnexus/docs/` in the primary root (`.omc/docs/` is generated
+output — keep it gitignored). This is LLM-driven and can take a while on a
+large repo. It waits for a running `omc watch` tick to finish before starting
+(busy lock) and never runs two regenerations at once.
 
-## Step 3 — sync to the omc layout
+## Step 3 — report
 
-`gitnexus wiki` writes `.gitnexus/wiki/` (markdown + `index.html` +
-`module_tree.json`). Mirror it to the user-visible location in the primary
-root:
-
-```sh
-rm -rf .omc/docs/gitnexus/docs && mkdir -p .omc/docs/gitnexus && cp -R .gitnexus/wiki .omc/docs/gitnexus/docs
-```
-
-(`.omc/docs/` is generated output — keep it gitignored.)
-
-## Step 4 — report
-
-List what landed in `.omc/docs/gitnexus/docs/` (page count, top-level titles).
-A failed wiki run → surface its output and stop; never sync a partial wiki
-silently.
+The last stdout line is `OMC_KNOWLEDGE {…}`. rc 0 → list what landed in
+`.omc/docs/gitnexus/docs/` (page count, top-level titles). rc 3 → the docs are
+still behind: relay the `reasons` and stop; never sync or report a partial wiki
+as current.

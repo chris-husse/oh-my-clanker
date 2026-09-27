@@ -44,6 +44,11 @@ Every outcome is non-fatal:
 
 A short structured block containing, in order:
 
+0. If the start seed or context carries an `OMC_KNOWLEDGE` line with
+   `fresh: false`, the primer's FIRST line is `knowledge snapshot stale:
+   <reasons> — fix: <fix> (run in <run_in>) — the user runs it in the
+   primary; this session never does`; the explain pass still runs and its
+   answer is marked as grounded in stale data.
 1. The work context (from `$ARGUMENTS`).
 2. explain's answer (or its absence note).
 3. Standing pointers: `docs/superpowers/specs/` (prior design records),

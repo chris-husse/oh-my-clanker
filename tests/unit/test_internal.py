@@ -176,6 +176,7 @@ def test_rebase_main_conflict_bails_rc3_and_leaves_rebase_paused(tmp_path, capsy
 
     assert rc == 3
     assert verdict["ok"] is False and "f.txt" in verdict["conflicts"]
+    assert "knowledge" in verdict
     cp = subprocess.run(["git", "status"], cwd=wt, capture_output=True, text=True)
     assert "rebase" in cp.stdout.lower()  # paused, not aborted
 
@@ -413,3 +414,228 @@ def test_gitnexus_proxy_git_still_rejects_bad_verbs(tmp_path, capsys, monkeypatc
         assert run_internal(["gitnexus", "--git"]) == 2
     finally:
         os.chdir(old)
+
+
+def _seed_fresh_index(repo):
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    (repo / ".gitnexus").mkdir(exist_ok=True)
+    (repo / ".gitnexus" / "meta.json").write_text(
+        json.dumps({"branch": "main", "lastCommit": head, "repoPath": str(repo)})
+    )
+
+
+def _knowledge_line(out):
+    line = next(ln for ln in out.splitlines() if ln.startswith("OMC_KNOWLEDGE "))
+    return json.loads(line.split(" ", 1)[1])
+
+
+_HEALING_NODE = (
+    "#!/bin/sh\n"
+    'echo "$@" >> "{calls}"\n'
+    'case "$*" in\n'
+    '  *" clean --force") rm -rf .gitnexus ;;\n'
+    '  *" analyze --skip-agents-md --skip-skills") mkdir -p .gitnexus; '
+    'printf \'{{"branch":"main","lastCommit":"%s","repoPath":"%s"}}\' '
+    '"$(/usr/bin/git rev-parse HEAD)" "$PWD" > .gitnexus/meta.json ;;\n'
+    "esac\n"
+    "echo ok\nexit 0\n"  # unconditional ok: ensure_gitnexus's --version probe must pass
+)
+
+
+def _gitnexus_env_with_config(tmp_path, monkeypatch, *, node_body=_HEALING_NODE):
+    """_gitnexus_env + a GLOBAL config (load_effective needs GlobalConfig, never
+    Config — _hydrate rejects the `worktree` key) + a forwarding git stub that
+    LOGS argv then execs the real git (the verdict needs real git)."""
+    from omc.config import store
+    from omc.config.schema import GlobalConfig
+
+    repo, wt, calls, env = _gitnexus_env(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "branch", "-M", "main"], check=True)
+    home = tmp_path / "omc-home"
+    store.save_global(home, GlobalConfig())
+    node = tmp_path / "bin" / "node"
+    node.write_text(node_body.format(calls=calls))
+    gitlog = tmp_path / "bin" / "git.calls"
+    git = tmp_path / "bin" / "git"
+    git.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{gitlog}"\nexec /usr/bin/git "$@"\n')
+    git.chmod(git.stat().st_mode | stat.S_IXUSR)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    return repo, wt, calls, gitlog
+
+
+def test_status_prints_verdict_without_node(tmp_path, capsys, monkeypatch):
+    repo, wt, calls, _ = _gitnexus_env_with_config(tmp_path, monkeypatch)
+    old = _chdir(wt)
+    try:
+        rc = run_internal(["gitnexus", "status"])
+    finally:
+        os.chdir(old)
+    assert rc == 0
+    v = _knowledge_line(capsys.readouterr().out)
+    assert v["fresh"] is False and v["reasons"][0]["code"] == "index-missing"
+    assert v["run_in"] == str(repo.resolve())
+    assert v["basis"] == "unresolved"  # no origin in this fixture
+    assert not calls.exists()
+
+
+def test_refresh_heals_and_exits_zero(tmp_path, capsys, monkeypatch):
+    repo, wt, calls, gitlog = _gitnexus_env_with_config(tmp_path, monkeypatch)
+    old = _chdir(wt)
+    try:
+        rc = run_internal(["gitnexus", "refresh"])
+    finally:
+        os.chdir(old)
+    out = capsys.readouterr().out
+    assert rc == 0
+    v = _knowledge_line(out)
+    assert v["fresh"] is True and v["basis"] == "HEAD"
+    assert out.strip().splitlines()[-1].startswith("OMC_KNOWLEDGE ")
+    assert not any(line.startswith("fetch ") for line in gitlog.read_text().splitlines())
+
+
+def test_refresh_still_stale_bails_rc3(tmp_path, capsys, monkeypatch):
+    # node stub that never writes metadata: analyze, clean, analyze all leave index-missing
+    inert = '#!/bin/sh\necho "$@" >> "{calls}"\necho ok\nexit 0\n'
+    repo, wt, calls, _ = _gitnexus_env_with_config(tmp_path, monkeypatch, node_body=inert)
+    old = _chdir(repo)
+    try:
+        rc = run_internal(["gitnexus", "refresh"])
+    finally:
+        os.chdir(old)
+    assert rc == 3
+    assert _knowledge_line(capsys.readouterr().out)["fresh"] is False
+
+
+def test_refresh_refuses_off_base_branch(tmp_path, capsys, monkeypatch):
+    repo, wt, calls, _ = _gitnexus_env_with_config(tmp_path, monkeypatch)
+    subprocess.run(["git", "-C", str(repo), "switch", "-qc", "feature/z"], check=True)
+    old = _chdir(repo)
+    try:
+        rc = run_internal(["gitnexus", "refresh"])
+    finally:
+        os.chdir(old)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "requires the primary checkout to be on main (currently feature/z)" in err
+    recorded = calls.read_text() if calls.exists() else ""
+    assert "analyze" not in recorded and "clean" not in recorded
+
+
+def test_refresh_unconfigured_exits_2(tmp_path, capsys, monkeypatch):
+    repo, wt, calls, env = _gitnexus_env(tmp_path)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    old = _chdir(repo)
+    try:
+        rc = run_internal(["gitnexus", "refresh"])
+    finally:
+        os.chdir(old)
+    assert rc == 2 and "omc configure" in capsys.readouterr().err
+
+
+def test_refresh_waits_for_busy_lock_holder(tmp_path, capsys, monkeypatch):
+    from omc.toolctx import ToolContext
+    from omc.watchlock import busy_lock
+
+    from .test_watchlock import _hold_in_subprocess
+
+    repo, wt, calls, _ = _gitnexus_env_with_config(tmp_path, monkeypatch)
+    _seed_fresh_index(repo)
+    lock = busy_lock(ToolContext.from_env(), cwd=str(repo))
+    p = _hold_in_subprocess(lock.lock_file, 1.5)
+    old = _chdir(repo)
+    try:
+        rc = run_internal(["gitnexus", "refresh"])
+    finally:
+        os.chdir(old)
+    p.wait()
+    assert rc == 0
+    assert "· waiting for another omc knowledge refresh to finish" in capsys.readouterr().err
+
+
+def test_refresh_hints_when_primary_is_behind_origin(tmp_path, capsys, monkeypatch):
+    from omc.config import store
+    from omc.config.schema import GlobalConfig
+
+    _, primary = _setup_primary_with_origin(tmp_path)  # has an origin
+    home = tmp_path / "omchome"
+    store.save_global(home, GlobalConfig())
+    monkeypatch.setenv("OMC_HOME", str(home))
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = bindir / "node.calls"
+    node = bindir / "node"
+    node.write_text(_HEALING_NODE.format(calls=calls))
+    node.chmod(node.stat().st_mode | stat.S_IXUSR)
+    cli = home / "dependencies" / "gitnexus" / "gitnexus" / "dist" / "cli" / "index.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("// fake")
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    # advance origin from another clone, fetch so the tracking ref is ahead of HEAD
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", str(tmp_path / "origin.git"), str(other)], check=True)
+    _git("config", "user.email", "o@o", cwd=other)
+    _git("config", "user.name", "o", cwd=other)
+    (other / "x").write_text("x")
+    _git("add", ".", cwd=other)
+    _git("commit", "-qm", "x", cwd=other)
+    _git("push", "-q", "origin", "main", cwd=other)
+    _git("fetch", "origin", "main", cwd=primary)
+    old = _chdir(primary)
+    try:
+        rc = run_internal(["gitnexus", "refresh"])
+    finally:
+        os.chdir(old)
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "· primary is 1 commits behind origin/main — omc watch syncs it" in err
+
+
+def test_proxy_prints_stale_verdict_on_stderr_only_when_stale(tmp_path, capsys, monkeypatch):
+    repo, wt, calls, env = _gitnexus_env(tmp_path)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    old = _chdir(wt)
+    try:
+        assert run_internal(["gitnexus", "query", "x"]) == 0
+        captured = capsys.readouterr()
+        assert captured.err.splitlines()[0].startswith("OMC_KNOWLEDGE ")
+        assert "OMC_KNOWLEDGE" not in captured.out
+        _seed_fresh_index(repo)
+        (repo / ".gitnexus" / "wiki").mkdir()
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+        ).stdout.strip()
+        (repo / ".gitnexus" / "wiki" / "meta.json").write_text(json.dumps({"fromCommit": head}))
+        assert run_internal(["gitnexus", "query", "x"]) == 0
+        assert "OMC_KNOWLEDGE" not in capsys.readouterr().err
+    finally:
+        os.chdir(old)
+
+
+def test_proxy_git_path_never_prints_verdict(tmp_path, capsys, monkeypatch):
+    repo, wt, calls, env = _gitnexus_env(tmp_path)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    _seed_dep(tmp_path / "omc-home")
+    old = _chdir(repo)
+    try:
+        run_internal(["gitnexus", "--git", "github.com/foo/bar", "query", "x"])
+    finally:
+        os.chdir(old)
+    assert "OMC_KNOWLEDGE" not in capsys.readouterr().err
+
+
+def test_rebase_main_payload_carries_knowledge_in_all_shapes(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    rc, verdict, _ = _run(["rebase-main", "--base", "main"], primary, tmp_path, capsys)
+    assert verdict["knowledge"]["fresh"] is False
+    assert verdict["knowledge"]["reasons"][0]["code"] == "index-missing"
+    wt = _add_worktree(primary, tmp_path)
+    _advance_main(primary)
+    rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
+    assert rc == 0 and "knowledge" in verdict
+    assert verdict["knowledge"]["run_in"] == str(primary.resolve())
