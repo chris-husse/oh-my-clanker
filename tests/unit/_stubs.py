@@ -51,13 +51,17 @@ def make_claude_stub(
     rc: int = 0,
     install_rc: int = 0,
     install_errors: list[str] | None = None,
+    marketplaces: list[dict] | None = None,
+    marketplace_failures: dict[str, str] | None = None,
+    available_omc: bool = True,
 ) -> Path:
     """A stateful `claude` stub for plugin-management tests.
 
     ``plugins`` seeds `claude plugin list --json` (each entry: ``id``, optional
     ``errors``/``enabled``). `plugin install X` adds X (healthy unless
     ``install_errors`` is set, or fails with ``install_rc``); `plugin uninstall
-    X` removes it; `plugin marketplace …` / `plugin update …` succeed silently;
+    X` removes it. Marketplace registration models Claude's source conflict
+    and removal cascades; failures can be injected by operation name.
     `--version` answers like the real CLI. Every other invocation prints
     ``stdout`` and exits ``rc`` (the slug/verdict path). Every argv line is
     appended to the returned calls file.
@@ -70,19 +74,33 @@ def make_claude_stub(
     calls = bindir / "claude.calls"
     entries = [{"enabled": True, **e} for e in (plugins or [])]
     state.write_text(json.dumps(entries))
+    markets = bindir / "claude.marketplaces.json"
+    markets.write_text(json.dumps(marketplaces or []))
     script = f"""#!{sys.executable}
-import json, sys
+import json, os, sys
 from pathlib import Path
 state, calls = Path({str(state)!r}), Path({str(calls)!r})
+markets = Path({str(markets)!r})
+isolated = os.environ.get("CLAUDE_CONFIG_DIR")
+if isolated:
+    root = Path(isolated)
+    root.mkdir(parents=True, exist_ok=True)
+    state, markets = root / "plugins.json", root / "marketplaces.json"
+    for path in (state, markets):
+        if not path.exists(): path.write_text("[]")
 args = sys.argv[1:]
 with calls.open("a") as fh:
-    fh.write(" ".join(args) + "\\n")
+    fh.write(("isolated " if isolated else "") + " ".join(args) + "\\n")
 if args[:1] == ["--version"]:
     print("2.1.0 (Claude Code)"); sys.exit(0)
 if args[:2] == ["plugin", "list"]:
     entries = json.loads(state.read_text())
     if "--json" in args:
-        print(json.dumps(entries))
+        if "--available" in args:
+            available = [{{"pluginId": "omc@oh-my-clanker"}}] if {available_omc!r} else []
+            print(json.dumps({{"installed": entries, "available": available}}))
+        else:
+            print(json.dumps(entries))
     else:
         print("Installed plugins:")
         for e in entries:
@@ -102,7 +120,35 @@ if args[:2] == ["plugin", "uninstall"]:
     pid = args[2]
     state.write_text(json.dumps([e for e in json.loads(state.read_text()) if e["id"] != pid]))
     print("uninstalled " + pid); sys.exit(0)
-if args[:2] in (["plugin", "marketplace"], ["plugin", "update"]):
+if args[:2] == ["plugin", "marketplace"]:
+    op = args[2]
+    failures = {marketplace_failures or {}!r}
+    if op in failures:
+        print(failures[op], file=sys.stderr); sys.exit(1)
+    entries = json.loads(markets.read_text())
+    if op == "list":
+        print(json.dumps(entries)); sys.exit(0)
+    if op == "add":
+        source = args[3]
+        if source.startswith("/"):
+            new = {{"name": "oh-my-clanker", "source": "directory",
+                   "path": source, "installLocation": source}}
+        else:
+            name = "oh-my-clanker" if source.endswith("oh-my-clanker") else source.split("/")[-1]
+            new = {{"name": name, "source": "github", "repo": source,
+                   "installLocation": "/cache/" + name}}
+        old = next((m for m in entries if m["name"] == new["name"]), None)
+        if old and any(old.get(k) != new.get(k) for k in ("source", "path", "repo")):
+            print("source differs from the one declared in settings", file=sys.stderr); sys.exit(1)
+        entries = [m for m in entries if m["name"] != new["name"]] + [new]
+        markets.write_text(json.dumps(entries))
+    if op == "remove":
+        name = args[3]
+        markets.write_text(json.dumps([m for m in entries if m["name"] != name]))
+        plugins = [p for p in json.loads(state.read_text()) if not p["id"].endswith("@" + name)]
+        state.write_text(json.dumps(plugins))
+    print("ok"); sys.exit(0)
+if args[:2] == ["plugin", "update"]:
     print("ok"); sys.exit(0)
 sys.stdout.write({stdout!r} + "\\n"); sys.exit({rc})
 """
