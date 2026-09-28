@@ -27,17 +27,33 @@ class Shell(ABC):
 
     @abstractmethod
     def build_invocation(
-        self, *, cwd: str, title: str, startup_argv: list[str], title_seq: str
+        self,
+        *,
+        cwd: str,
+        title: str,
+        startup_argv: list[str],
+        title_seq: str,
+        title_argv: list[str] | None = None,
     ) -> tuple[list[str], dict[str, str]]: ...
 
     def exec_env_overrides(self, tmpdir: str | None) -> dict[str, str]:
         return {}
 
     def exec_interactive(
-        self, *, cwd: str, title: str, startup_argv: list[str], title_seq: str
+        self,
+        *,
+        cwd: str,
+        title: str,
+        startup_argv: list[str],
+        title_seq: str,
+        title_argv: list[str] | None = None,
     ) -> None:  # pragma: no cover - effectful exec, E2E-verified
         argv, extra_files = self.build_invocation(
-            cwd=cwd, title=title, startup_argv=startup_argv, title_seq=title_seq
+            cwd=cwd,
+            title=title,
+            startup_argv=startup_argv,
+            title_seq=title_seq,
+            title_argv=title_argv,
         )
         tmpdir: str | None = None
         if extra_files:
@@ -52,3 +68,8 @@ class Shell(ABC):
 
 def joined_startup(startup_argv: list[str]) -> str:
     return shlex.join(startup_argv) if startup_argv else ""
+
+
+def joined_title(title_argv: list[str] | None, title: str) -> str:
+    """A shell command that attempts the generic title operation once."""
+    return shlex.join([*title_argv, title]) if title_argv else ""

@@ -5,7 +5,7 @@ terminal), but its two load-bearing properties can:
 
 - TITLE: `omc start` (no --headless) is driven TTY-less. bash `-i` still
   sources the generated rcfile, so the REAL execvp handoff runs and the OSC 0
-  title bytes for the slug land in captured output — emitted before the
+  title bytes for the full branch land in captured output — emitted before the
   session command, per the shell adapters' ordering contract.
 - SESSION NAME: omc names seeded sessions after the slug (interactive AND
   headless). A headless `omc start` run is followed by `claude --resume
@@ -70,8 +70,8 @@ def test_interactive_exec_emits_title_before_session(container):
     )
 
     slug, _ = _worktree_for(container, repo, "proj-1")
-    assert f"\x1b]0;{slug}\x07" in out, (
-        f"OSC title for {slug!r} not emitted by the exec handoff:\n{out[:1500]}"
+    assert f"\x1b]0;feature/{slug}\x07" in out, (
+        f"OSC title for feature/{slug!r} not emitted by the exec handoff:\n{out[:1500]}"
     )
 
 

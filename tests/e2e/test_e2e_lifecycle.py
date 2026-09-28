@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 
@@ -29,6 +30,12 @@ def _codex_model() -> str:
 
 def _set_write_capability(container):
     set_codex_container_policy(container, reasoning_effort="high", run=run_in)
+
+
+def _codex_fixture_trust_override(repo):
+    if repo != "/work/capability":
+        raise ValueError("Codex trust override is only for the disposable /work fixture")
+    return f'projects.{json.dumps(repo)}.trust_level="trusted"'
 
 
 def _image_provenance(container):
@@ -136,6 +143,8 @@ def test_codex_conversation_capabilities(container):
                     model,
                     "-c",
                     "tui.terminal_title=[]",
+                    "-c",
+                    _codex_fixture_trust_override(repo),
                     prompt,
                 ],
                 repo,
@@ -728,10 +737,12 @@ def _assert_finish_stage_order(markers):
     seen = markers.splitlines()
     required = ("check", "build", "verify", "review")
     assert all(stage in seen for stage in required), markers
-    # Implementation may run checks/reviews before finish; require one intact
-    # finish sequence without letting those earlier invocations determine order.
+    # Retries of one stage leave adjacent markers, but do not change stage
+    # order. Earlier implementation checks/reviews cannot stand in for finish.
+    steps = [stage for i, stage in enumerate(seen) if i == 0 or stage != seen[i - 1]]
     assert any(
-        tuple(seen[i : i + len(required)]) == required for i in range(len(seen) - len(required) + 1)
+        tuple(steps[i : i + len(required)]) == required
+        for i in range(len(steps) - len(required) + 1)
     ), markers
 
 

@@ -70,6 +70,43 @@ class ToolContext:
             kwargs["stdin"] = subprocess.DEVNULL
         return subprocess.run(list(argv), **kwargs)  # noqa: S603 - argv list, no shell
 
+    def run_bounded(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        cwd: str | os.PathLike[str] | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a captured command with a hard deadline for its entire process group."""
+        kwargs: dict[str, object] = {
+            "env": {**self.child_env(), **(extra_env or {})},
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "errors": "replace",
+            "start_new_session": True,
+        }
+        if cwd is not None:
+            kwargs["cwd"] = cwd
+        proc = subprocess.Popen(list(argv), **kwargs)  # noqa: S603 - argv list, no shell
+        try:
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise TimeoutError(f"command timed out after {timeout}s") from exc
+            return subprocess.CompletedProcess(list(argv), proc.returncode, stdout, stderr)
+        except BaseException:
+            # A child can exit while a descendant still owns the captured pipe;
+            # its process group persists after the direct child is reaped.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.communicate()
+            raise
+
     def run_supervised(
         self,
         argv: Sequence[str],

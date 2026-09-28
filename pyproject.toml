@@ -4,7 +4,12 @@ version = "0.1.9"
 description = "Oh My Clanker! Turn a ticket into a prepared worktree with a seeded LLM session."
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = ["questionary>=2.0,<3", "pyyaml>=6,<7", "filelock>=3,<4"]
+dependencies = [
+    "questionary>=2.0,<3",
+    "pyyaml>=6,<7",
+    "filelock>=3,<4",
+    "iterm2>=2.24,<3; sys_platform == 'darwin'",
+]
 
 [project.scripts]
 omc = "omc.cli:main"
@@ -34,6 +39,7 @@ path = "hatch_build.py"
 testpaths = ["tests"]
 markers = [
     "e2e: dockerized end-to-end tests (opt-in, slow, real LLMs)",
+    "local_iterm2: macOS iTerm2 desktop and authenticated local provider TUIs (explicit host tier)",
     "e2e_provider(name): declare provider intent for E2E container prerequisites",
     "expensive: LLM-heavy E2E (documentation generation) - run only with explicit user agreement",
 ]

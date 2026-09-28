@@ -18,6 +18,7 @@ from .probe import require_tools
 from .providers.registry import get_provider
 from .shells.registry import detect_shell
 from .slug import MCP_TOOL_PATTERNS, fetch_slug
+from .terminal_title import terminal_title_argv
 from .terminals import detect_terminal
 from .toolctx import ToolContext
 from .watchlock import busy_lock, wait_until_idle
@@ -25,13 +26,22 @@ from .wtconfig import primary_root, repo_root
 
 
 def _print_plan(
-    branch, base, wt_argv, title_seq, session_argv, shell_argv, notify_desc, knowledge_desc
+    branch,
+    base,
+    wt_argv,
+    title_seq,
+    title_argv,
+    session_argv,
+    shell_argv,
+    notify_desc,
+    knowledge_desc,
 ):
     print("omc start — plan (dry run, no changes made):")
     print(f"  branch:       {branch}")
     print(f"  fetch:        git fetch origin {base}")
     print(f"  worktree cmd: {shlex.join(wt_argv)}")
     print(f"  title seq:    {title_seq!r}")
+    print(f"  title argv:   {shlex.join([*title_argv, branch])}")
     print(f"  session argv: {session_argv}")
     print(f"  shell argv:   {shell_argv}")
     print(f"  notify:       {notify_desc}")
@@ -162,12 +172,17 @@ def run_start(
     session_argv = provider.session_argv(
         session_name=slug, model=model, seed=seed, notify_sink_argv=notify_argv
     )
-    title_seq = detect_terminal(ctx.env).title_sequence(slug)
+    title_seq = detect_terminal(ctx.env).title_sequence(branch)
+    title_argv = terminal_title_argv()
 
     if dry_run:
         shell = detect_shell(ctx.env)
         shell_argv, _ = shell.build_invocation(
-            cwd="<worktree>", title=slug, startup_argv=session_argv, title_seq=title_seq
+            cwd="<worktree>",
+            title=branch,
+            startup_argv=session_argv,
+            title_seq=title_seq,
+            title_argv=title_argv,
         )
         wt_argv = [
             ctx.wt_bin, "switch", "--create", branch,
@@ -186,7 +201,15 @@ def run_start(
         else:
             knowledge_desc = f"stale ({','.join(knowledge.codes())}) (computed without fetch)"
         _print_plan(
-            branch, base, wt_argv, title_seq, session_argv, shell_argv, notify_desc, knowledge_desc
+            branch,
+            base,
+            wt_argv,
+            title_seq,
+            title_argv,
+            session_argv,
+            shell_argv,
+            notify_desc,
+            knowledge_desc,
         )
         return 0
 
@@ -215,6 +238,10 @@ def run_start(
     os.environ.update({**provider.title_env(), "OMC_SLUG": slug})  # pragma: no cover
     shell = detect_shell(ctx.env)  # pragma: no cover
     shell.exec_interactive(  # pragma: no cover
-        cwd=path, title=slug, startup_argv=session_argv, title_seq=title_seq
+        cwd=path,
+        title=branch,
+        startup_argv=session_argv,
+        title_seq=title_seq,
+        title_argv=title_argv,
     )
     return 0  # pragma: no cover - unreachable after execvp
