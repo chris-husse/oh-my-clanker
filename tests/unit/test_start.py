@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+from types import SimpleNamespace
 
 import pytest
 
@@ -74,6 +75,51 @@ def test_dry_run_prints_plan(tmp_path, capsys):
     assert "session argv:" in out and "/omc:start\\n" in out
     assert "-n" in out and "proj-1-fix-login" in out  # session named after slug
     assert "title seq:" in out
+
+
+def test_dry_run_uses_full_branch_title_but_slug_session(tmp_path, capsys):
+    ctx = full_env(tmp_path)
+    assert run_start(ctx, Config(), "PROJ-1", dry_run=True) == 0
+    out = capsys.readouterr().out
+    assert "feature/proj-1-fix-login" in out
+    assert "omc.terminal_title" in out
+    assert "feature/proj-1-fix-login" in out.split("title argv:", 1)[1].splitlines()[0]
+    assert "'-n', 'proj-1-fix-login'" in out
+
+
+@pytest.mark.parametrize("mode", ["dry_run", "headless"])
+def test_noninteractive_start_never_executes_terminal_title(tmp_path, monkeypatch, mode):
+    from omc.terminals import Iterm2Terminal
+
+    ctx = full_env(tmp_path)
+    ctx.env["TERM_PROGRAM"] = "iTerm.app"
+    if mode == "headless":
+        (tmp_path / "wtree").mkdir()
+
+    def forbidden(_self, _ctx, _title):
+        pytest.fail(f"{mode} tried to update a live iTerm2 tab title")
+
+    monkeypatch.setattr(Iterm2Terminal, "set_title", forbidden)
+    assert run_start(ctx, Config(), "PROJ-1", **{mode: True}) == 0
+
+
+def test_interactive_handoff_uses_branch_title_and_slug_session(tmp_path, monkeypatch):
+    import omc.start as start_mod
+
+    ctx = full_env(tmp_path)
+    seen = []
+    monkeypatch.setattr(
+        start_mod,
+        "detect_shell",
+        lambda env: SimpleNamespace(exec_interactive=lambda **kwargs: seen.append(kwargs)),
+    )
+    monkeypatch.setattr(start_mod, "os", SimpleNamespace(environ={}))
+    assert run_start(ctx, Config(), "PROJ-1", no_mutex=True) == 0
+    assert seen[0]["title"] == "feature/proj-1-fix-login"
+    assert seen[0]["title_seq"] == "\033]0;feature/proj-1-fix-login\007"
+    assert seen[0]["title_argv"][-2:] == ["-m", "omc.terminal_title"]
+    assert seen[0]["startup_argv"][seen[0]["startup_argv"].index("-n") + 1] == "proj-1-fix-login"
+    assert start_mod.os.environ["OMC_SLUG"] == "proj-1-fix-login"
 
 
 @pytest.mark.parametrize(

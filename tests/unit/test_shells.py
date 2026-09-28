@@ -1,5 +1,7 @@
 import shlex
 
+import pytest
+
 from omc.shells.base import TMPDIR_PLACEHOLDER
 from omc.shells.registry import detect_shell
 
@@ -60,3 +62,34 @@ def test_zsh_and_bash_emit_title_before_startup():
         printf_at = rc.index("printf '%s' " + shlex.quote(ARGS["title_seq"]))
         startup_at = rc.index(shlex.join(ARGS["startup_argv"]))
         assert printf_at < startup_at, f"title must precede startup in:\n{rc}"
+
+
+@pytest.mark.parametrize("shell_name", ["fish", "bash", "zsh", "sh"])
+def test_title_helper_runs_before_startup_for_every_shell(shell_name):
+    argv, files = detect_shell({"SHELL": shell_name}).build_invocation(
+        **ARGS, title_argv=["/usr/bin/title-helper"]
+    )
+    body = (
+        argv[3]
+        if shell_name == "fish"
+        else argv[2]
+        if shell_name == "sh"
+        else next(iter(files.values()))
+    )
+    helper_call = (
+        '/usr/bin/title-helper "$__omc_desired_title"'
+        if shell_name == "fish"
+        else "/usr/bin/title-helper proj-1-fix"
+    )
+    assert body.index(helper_call) < body.index(shlex.join(ARGS["startup_argv"]))
+
+
+def test_exec_interactive_forwards_title_helper(monkeypatch):
+    import omc.shells.base as base
+
+    shell = detect_shell({})
+    monkeypatch.setattr(base.os, "chdir", lambda path: None)
+    executed = []
+    monkeypatch.setattr(base.os, "execvp", lambda program, argv: executed.append(argv))
+    shell.exec_interactive(**ARGS, title_argv=["/usr/bin/title-helper"])
+    assert executed and "/usr/bin/title-helper proj-1-fix" in executed[0][2]

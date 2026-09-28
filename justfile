@@ -3,7 +3,11 @@ set dotenv-load
 
 # Quick gate: build what the unit tests need, then run them. No LLM, no Docker.
 check:
-    uv run pytest -m "not e2e" -q
+    uv run pytest -m "not e2e and not local_iterm2" -q
+
+# macOS desktop acceptance: disposable iTerm2 tabs, fish, and real provider TUIs.
+iterm2-tests *args:
+    uv run pytest -m local_iterm2 -q tests/local {{args}}
 
 # Build the world: format check + lint + package build. NO tests (see `check`).
 build:

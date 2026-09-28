@@ -4,7 +4,7 @@ import os
 import shlex
 from collections.abc import Mapping
 
-from .base import Shell, joined_startup
+from .base import Shell, joined_startup, joined_title
 
 
 class ZshShell(Shell):
@@ -14,7 +14,7 @@ class ZshShell(Shell):
     def detect(cls, env: Mapping[str, str]) -> bool:
         return os.path.basename(env.get("SHELL", "")) == "zsh"
 
-    def build_invocation(self, *, cwd, title, startup_argv, title_seq):
+    def build_invocation(self, *, cwd, title, startup_argv, title_seq, title_argv=None):
         lines = [
             '[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"',
             f"precmd() {{ printf '%s' {shlex.quote(title_seq)} }}",
@@ -23,6 +23,9 @@ class ZshShell(Shell):
             # exits — so emit the title once, up front, before the session runs.
             f"printf '%s' {shlex.quote(title_seq)}",
         ]
+        title_command = joined_title(title_argv, title)
+        if title_command:
+            lines.append(f"{title_command} || :")
         startup = joined_startup(startup_argv)
         if startup:
             lines.append(startup)

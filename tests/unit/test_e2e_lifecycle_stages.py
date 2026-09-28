@@ -11,8 +11,14 @@ from tests.e2e.test_e2e_lifecycle import _assert_finish_stage_order
         "check\nbuild\nverify\nreview\n",
         "check\ncheck\nreview\ncheck\nbuild\nverify\nreview\n",
         "check\nbuild\nverify\nreview\ncheck\n",
+        "check\nbuild\ncheck\nreview\nverify\ncheck\ncheck\ncheck\nbuild\nbuild\nverify\nverify\nreview\nreview\n",
     ],
-    ids=["finish", "implementation-review-before-finish", "supplemental-check-after-finish"],
+    ids=[
+        "finish",
+        "implementation-review-before-finish",
+        "supplemental-check-after-finish",
+        "observed-repeated-finish-stages",
+    ],
 )
 def test_finish_stages_allow_validation_outside_finish(markers):
     _assert_finish_stage_order(markers)
@@ -28,6 +34,8 @@ def test_finish_stages_allow_validation_outside_finish(markers):
         "check\nbuild\nreview\nverify\n",
         "check\nbuild\nreview\nverify\nreview\n",
         "check\nbuild\ncheck\nverify\nreview\n",
+        "check\ncheck\nbuild\nbuild\nreview\nreview\nverify\nverify\n",
+        "check\ncheck\nbuild\nbuild\ncheck\ncheck\nverify\nverify\nreview\nreview\n",
     ],
     ids=[
         "no-stages",
@@ -37,6 +45,8 @@ def test_finish_stages_allow_validation_outside_finish(markers):
         "review-before-verify",
         "interleaved-review",
         "interleaved-check",
+        "duplicated-out-of-order",
+        "duplicated-interleaved-check",
     ],
 )
 def test_finish_stages_require_a_complete_ordered_block(markers):

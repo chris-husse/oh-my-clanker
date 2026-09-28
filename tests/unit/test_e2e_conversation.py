@@ -646,6 +646,7 @@ def test_e2e_image_default_builds_checkout(monkeypatch):
             return False
 
     monkeypatch.delenv("OMC_E2E_PREBUILT_IMAGE", raising=False)
+    monkeypatch.delenv("OMC_E2E_IMAGE_TAG", raising=False)
     monkeypatch.setenv("DOCKER_CONFIG", "/tmp")
     monkeypatch.setattr(image_module, "DockerImage", FakeImage)
     gen = e2e_image.__wrapped__()
@@ -653,6 +654,36 @@ def test_e2e_image_default_builds_checkout(monkeypatch):
     with pytest.raises(StopIteration):
         next(gen)
     assert seen["dockerfile_path"] == "docker/Dockerfile.e2e"
+    assert seen["tag"] == "omc-e2e:test"
+
+
+def test_e2e_image_custom_tag_still_builds_checkout(monkeypatch):
+    import testcontainers.core.image as image_module
+
+    from tests.e2e.conftest import REPO_ROOT, e2e_image
+
+    seen = {}
+
+    class FakeImage:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def __enter__(self):
+            return "fresh-image"
+
+        def __exit__(self, *_):
+            return False
+
+    monkeypatch.delenv("OMC_E2E_PREBUILT_IMAGE", raising=False)
+    monkeypatch.setenv("OMC_E2E_IMAGE_TAG", "omc-e2e:parallel-host")
+    monkeypatch.setenv("DOCKER_CONFIG", "/tmp")
+    monkeypatch.setattr(image_module, "DockerImage", FakeImage)
+    gen = e2e_image.__wrapped__()
+    assert next(gen) == "fresh-image"
+    with pytest.raises(StopIteration):
+        next(gen)
+    assert seen["path"] == str(REPO_ROOT)
+    assert seen["tag"] == "omc-e2e:parallel-host"
 
 
 def test_codex_actor_policy_is_top_level_even_with_plugin_tables(tmp_path, monkeypatch):
@@ -677,6 +708,15 @@ def test_codex_actor_policy_is_top_level_even_with_plugin_tables(tmp_path, monke
     assert parsed["sandbox_mode"] == "danger-full-access"
     assert parsed["model_reasoning_effort"] == "high"
     assert parsed["plugins"]["omc@oh-my-clanker"] == {"enabled": True}
+
+
+def test_codex_capability_trust_override_is_scoped_to_owned_fixture():
+    from tests.e2e.test_e2e_lifecycle import _codex_fixture_trust_override
+
+    override = _codex_fixture_trust_override("/work/capability")
+    assert tomllib.loads(override) == {"projects": {"/work/capability": {"trust_level": "trusted"}}}
+    with pytest.raises(ValueError, match="disposable /work fixture"):
+        _codex_fixture_trust_override("/Users/ordinary-project")
 
 
 def test_codex_actor_policy_uses_default_home_without_codex_home(tmp_path, monkeypatch):

@@ -100,7 +100,7 @@ def e2e_image():
         with DockerImage(
             path=str(REPO_ROOT),
             dockerfile_path="docker/Dockerfile.e2e",
-            tag="omc-e2e:test",
+            tag=os.environ.get("OMC_E2E_IMAGE_TAG", "omc-e2e:test"),
             buildargs={"TARGETARCH": _target_arch()},
         ) as image:
             yield str(image)

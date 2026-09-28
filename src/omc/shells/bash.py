@@ -4,7 +4,7 @@ import os
 import shlex
 from collections.abc import Mapping
 
-from .base import TMPDIR_PLACEHOLDER, Shell, joined_startup
+from .base import TMPDIR_PLACEHOLDER, Shell, joined_startup, joined_title
 
 _RC_NAME = "rc.bash"
 
@@ -16,7 +16,7 @@ class BashShell(Shell):
     def detect(cls, env: Mapping[str, str]) -> bool:
         return os.path.basename(env.get("SHELL", "")) == "bash"
 
-    def build_invocation(self, *, cwd, title, startup_argv, title_seq):
+    def build_invocation(self, *, cwd, title, startup_argv, title_seq, title_argv=None):
         rcfile = f"{TMPDIR_PLACEHOLDER}/{_RC_NAME}"
         lines = [
             '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"',
@@ -26,6 +26,9 @@ class BashShell(Shell):
             # session exits — so emit the title once, up front, before it runs.
             f"printf '%s' {shlex.quote(title_seq)}",
         ]
+        title_command = joined_title(title_argv, title)
+        if title_command:
+            lines.append(f"{title_command} || :")
         startup = joined_startup(startup_argv)
         if startup:
             lines.append(startup)
