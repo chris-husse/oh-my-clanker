@@ -15,7 +15,12 @@ dependencies = [
 omc = "omc.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "testcontainers>=4.8"]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2.4",
+    "pytest-xdist>=3.8",
+    "testcontainers>=4.8",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -42,7 +47,18 @@ markers = [
     "local_iterm2: macOS native tier — launches a private iTerm2 instance and real provider TUIs (just iterm2-tests)",
     "e2e_provider(name): declare provider intent for E2E container prerequisites",
     "expensive: LLM-heavy E2E (documentation generation) - run only with explicit user agreement",
+    "codex_gate: Codex integration cases; serial on the account volume (just codex-gate)",
+    "golden: ordered golden-path stage; run with -n 0 (scripts/e2e.sh phase 1)",
+    "variation(stage): forks a container from a golden stage snapshot",
 ]
+# Every test has a 5-minute ceiling; only the `expensive` tier may override it
+# with @pytest.mark.timeout. SIGALRM interrupts subprocess.communicate cleanly;
+# the thread method cannot interrupt and takes the whole xdist worker down.
+timeout = 300
+timeout_method = "signal"
+# The ceiling covers the test body only: fixture teardown (container stop,
+# Codex auth copy-back) must always run to completion.
+timeout_func_only = true
 
 [tool.ruff]
 line-length = 100

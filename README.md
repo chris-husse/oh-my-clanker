@@ -132,31 +132,43 @@ World build — format check, lint, package build; no tests:
 just build
 ```
 
-E2E tier — Dockerized, real provider CLIs, a fresh container per test. For
-workflow or provider changes, run the serial Codex and Claude lifecycle matrix
-locally or on a trusted private runner, then the token-free smoke suite:
+E2E tier — Dockerized, real provider CLIs, a fresh container per test, all in
+parallel. One command is the verify gate:
 
 ```bash
-just codex-login
-CODEX_AUTH_VOLUME=omc-e2e-codex-auth just lifecycle-tests
-just check
-just build
-just e2e-tests tests/e2e/test_e2e_smoke.py
+just e2e-tests
 ```
 
-When another checkout is building E2E tests concurrently, set a distinct
-`OMC_E2E_IMAGE_TAG` (for example, `OMC_E2E_IMAGE_TAG=omc-e2e:my-branch just e2e-tests tests/e2e/test_e2e_smoke.py`). This still builds the current checkout; it only prevents both runs from replacing the default `omc-e2e:test` tag.
+It builds the image once from this checkout (tagged by source sha), runs the
+**golden lifecycle path** sequentially — `omc start` → design → agreement →
+`/omc:implement`, one or two agent turns per stage, each snapshotted with
+`docker commit` — then runs everything else with `-n auto`: **variations**
+that fork a container from a stage snapshot and run one or two turns from
+there (a clean implement, a critical question, a sabotaged build), plus the
+smoke and marketplace cases. Every test has a 300 s ceiling (pytest-timeout);
+a test that cannot run in parallel fails instead of passing. Claude needs
+`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` in the gitignored `.env`.
 
-`just lifecycle-tests` selects the ten conversational cases in
-`tests/e2e/test_e2e_lifecycle.py`: capability and launch checks, then three
-start-to-implementation scenarios for each provider. It uses pytest's serial
-default because the Codex auth volume is shared. Rerun one provider with
-`CODEX_AUTH_VOLUME=omc-e2e-codex-auth just lifecycle-tests -k codex` or
-`just lifecycle-tests -k claude`; an unavailable selected provider fails loud
-rather than being skipped. The matrix makes real model calls and can take over
-an hour. `just e2e-tests tests/e2e/test_e2e_smoke.py` needs Docker but no
-provider credential; `just e2e-tests` runs the wider non-expensive E2E tier,
-and `just expensive-e2e-tests` deliberately selects the costly docs tests.
+Useful pieces:
+
+```bash
+just golden            # only the golden path (refreshes the stage snapshots)
+just e2e-rest tests/e2e/variations   # variations against existing snapshots
+just codex-login && just codex-gate             # Codex integration cases, serial, opt-in
+just lifecycle-full    # the old monolithic lifecycle runs (expensive tier, evidence only)
+just golden-full       # golden path incl. the expensive `implemented` stage (writes that snapshot)
+just e2e-rest -m "e2e and expensive and variation" tests/e2e/variations   # implement variations
+just e2e-rest tests/e2e/test_e2e_smoke.py   # token-free smoke only (no Claude token needed)
+just e2e-prune         # remove E2E images and snapshots that do not belong to this tree
+```
+
+Writing a variation: decorate a test with `@pytest.mark.variation("<stage>")`
+and take the `stage_session` fixture; it yields a fresh container forked from
+that stage, a conversation already bound to the resumable session, and the
+stage manifest (slug, repo, worktree, branch, model). Mutate the clone, send a
+turn, assert. The Codex gate runs serially because its account volume rotates
+an OAuth refresh token; it is required only for changes touching Codex code.
+`just expensive-e2e-tests` deliberately selects the costly docs tests.
 
 Live scenarios need authentication for both providers. Put the Claude token in
 `.env` at the repo root (`cp env.example .env`), which is gitignored and

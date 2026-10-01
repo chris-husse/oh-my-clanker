@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -11,6 +10,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+
+from .parallel import wait_for_lock
 
 CODEX_HOME = "/tmp/omc-codex-home"
 AUTH_MOUNT = "/codex-auth"
@@ -101,15 +102,18 @@ def codex_account(container, setup, *, use_account=True):
             container.stop()
         return
 
-    if os.environ.get("PYTEST_XDIST_WORKER"):
-        pytest.fail("Codex account E2E cannot run under pytest-xdist parallel workers.")
     lock_dir = Path(os.environ.get("OMC_E2E_AUTH_LOCK_DIR", tempfile.gettempdir()))
     lock_path = lock_dir / f"omc-codex-auth-{volume}.lock"
+    wait = float(os.environ.get("OMC_E2E_AUTH_LOCK_TIMEOUT", "240"))
     with lock_path.open("a+b") as lock_file:
+        # Under xdist, Codex items share one group (tests/e2e/parallel.py), so
+        # this normally returns at once; a misrouted item waits its turn
+        # instead of failing: the volume's refresh token must never rotate
+        # in two containers at once.
         try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            pytest.fail(f"Codex account volume {volume} is already in use by another E2E test.")
+            wait_for_lock(lock_file, wait)
+        except TimeoutError:
+            pytest.fail(f"Codex account volume {volume} is still in use after {wait:.0f}s.")
         container.with_volume_mapping(volume, AUTH_MOUNT, "rw").with_env("CODEX_HOME", CODEX_HOME)
         started = False
         copied = False

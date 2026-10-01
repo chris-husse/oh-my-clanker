@@ -176,6 +176,26 @@ def test_dogfood_build_stage():
     assert "just build" in text
 
 
+def test_dogfood_review_stage_rejects_slow_and_serial_tests():
+    text = (ROOT / ".omc" / "skills" / "review" / "SKILL.md").read_text()
+    for needle in (
+        "No slow tests",
+        "5-minute",
+        "No serial-only tests",
+        "-n auto",
+        "xdist_group",
+        "Important",
+    ):
+        assert needle in text, f"review stage missing {needle!r}"
+
+
+def test_dogfood_verify_stage_gates_on_parallel_e2e_only():
+    text = (ROOT / ".omc" / "skills" / "verify" / "SKILL.md").read_text()
+    assert "just e2e-tests" in text and "just codex-gate" in text
+    assert "never a gate" in text
+    assert "lifecycle-tests" not in text  # the hour-long matrix is gone as a gate
+
+
 def test_create_mr_skill_contract():
     text = (ROOT / "skills" / "create-mr" / "SKILL.md").read_text()
     for needle in ("get-mr-description", "--force-with-lease", "--amend"):
@@ -339,7 +359,7 @@ def test_dogfood_stage_and_context_skills():
     for name, needle in (
         ("check", "just check"),
         ("build", "just build"),
-        ("verify", "test_e2e_smoke"),
+        ("verify", "just e2e-tests"),
         ("review", "ToolContext"),
         ("explain-context", "docs/superpowers/specs"),
     ):

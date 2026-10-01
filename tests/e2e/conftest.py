@@ -11,6 +11,7 @@ import pytest
 
 from .codex_auth import codex_account, selected_volume
 from .harness import ALL_TOKEN_VARS
+from .parallel import CODEX_GROUP, item_provider
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -69,11 +70,23 @@ def _finish_container_setup(c):
 @pytest.fixture
 def e2e_provider(request):
     """Account prerequisites follow the test's declared provider intent."""
-    params = getattr(getattr(request.node, "callspec", None), "params", {})
-    if "provider" in params:
-        return params["provider"]
-    marker = request.node.get_closest_marker("e2e_provider")
-    return marker.args[0] if marker else None
+    return item_provider(request.node)
+
+
+def pytest_collection_modifyitems(items):
+    """Codex tests share one xdist group so the account volume is never
+    mounted by two workers at once; golden stages are grouped per provider
+    so `-n` never reorders them."""
+    for item in items:
+        provider = item_provider(item)
+        if provider == "codex":
+            # Every Codex-provider test is part of the opt-in gate: it needs the
+            # account volume, which rotates an OAuth refresh token, so it is
+            # serial and excluded from the default parallel run.
+            item.add_marker(pytest.mark.codex_gate)
+            item.add_marker(pytest.mark.xdist_group(CODEX_GROUP))
+        if item.get_closest_marker("golden"):
+            item.add_marker(pytest.mark.xdist_group(f"golden-{provider or 'claude'}"))
 
 
 @pytest.fixture(scope="session")
@@ -97,6 +110,12 @@ def e2e_image():
                 )
             yield prebuilt
             return
+        if os.environ.get("PYTEST_XDIST_WORKER"):
+            pytest.fail(
+                "parallel E2E needs one prebuilt image: run through `just e2e-tests` "
+                "(scripts/e2e.sh), or set OMC_E2E_PREBUILT_IMAGE — N workers would each "
+                "build and then delete their own image"
+            )
         with DockerImage(
             path=str(REPO_ROOT),
             dockerfile_path="docker/Dockerfile.e2e",
@@ -120,6 +139,78 @@ def container(e2e_image, e2e_provider):
     )
     with codex_account(c, _finish_container_setup, use_account=use_codex_account):
         yield c
+
+
+class _PlainContainer:
+    """The slice of testcontainers' surface the lifecycle helpers use, over a
+    docker-py container started WITHOUT testcontainers. Snapshots committed
+    from it therefore carry no `org.testcontainers.*` labels: Ryuk (ours or
+    another project's on the same host) prunes images by that label key at
+    session end, which is how committed snapshots kept disappearing."""
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def get_wrapped_container(self):
+        return self._raw
+
+
+@pytest.fixture(scope="module")
+def module_container(request, e2e_image):
+    """One container for a whole module: the golden path's stages share it
+    and snapshot it between turns. Claude only for now (Codex needs the
+    account volume plumbing of `codex_account`)."""
+    import docker
+
+    marker = request.node.get_closest_marker("e2e_provider")
+    provider = marker.args[0] if marker else "claude"
+    assert provider == "claude", "the golden path runs on Claude; Codex has no golden path yet"
+    env = {
+        var: os.environ[var]
+        for var in ALL_TOKEN_VARS
+        if os.environ.get(var)
+        and not (var == "OPENAI_API_KEY" and os.environ.get("CODEX_AUTH_VOLUME"))
+    }
+    raw = docker.from_env().containers.run(
+        e2e_image,
+        "sleep infinity",
+        detach=True,
+        environment=env,
+        labels={"omc.e2e": "golden"},
+    )
+    try:
+        yield _PlainContainer(raw)
+    finally:
+        raw.remove(force=True, v=True)
+
+
+@pytest.fixture
+def stage_session(request, e2e_provider):
+    """A container forked from the golden stage named by
+    @pytest.mark.variation("<stage>"), with a conversation bound to its
+    resumable session. Yields (container, session, manifest)."""
+    from testcontainers.core.container import DockerContainer
+
+    from .conversation import ClaudeConversation, Conversation
+    from .stages import read_manifest, stage_image
+
+    marker = request.node.get_closest_marker("variation")
+    assert marker and marker.args, "variation tests declare @pytest.mark.variation('<stage>')"
+    provider = e2e_provider or "claude"
+    image = stage_image(provider, marker.args[0])
+    use_codex_account = provider == "codex"
+    c = _forward_tokens(
+        DockerContainer(image).with_command("sleep infinity"),
+        use_codex_account=use_codex_account,
+    )
+    with codex_account(c, _finish_container_setup, use_account=use_codex_account):
+        manifest = read_manifest(c)
+        session = (
+            ClaudeConversation(c, manifest["model"]) if provider == "claude" else Conversation(c)
+        )
+        with session:
+            session.bind(manifest["slug"], manifest["worktree"], manifest["repo"])
+            yield c, session, manifest
 
 
 @pytest.fixture

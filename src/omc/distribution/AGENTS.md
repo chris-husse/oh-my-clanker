@@ -45,6 +45,10 @@ harness (Claude Code and Codex) gets the same ground rules:
     coding tier**.
   - The cheap/fast tier (Haiku-class or its equivalent on any provider) is
     **never used**, for anything.
+  - Test actors and test judges are not omc's own spec/review/judging work:
+    the `tests/e2e` suites default to the **standard coding tier** (a
+    three-line rubric over a one-line fixture needs no more), overridable
+    through `CLAUDE_E2E_MODEL` / `CLAUDE_E2E_JUDGE_MODEL`.
 - **Machine contracts are sacred**: single-line `OMC_SLUG` / `OMC_STAGE` /
   `OMC_SQUASH` / `OMC_REBASE_MAIN` / `OMC_TICKET` / `OMC_KNOWLEDGE` verdicts are
   parsed by tools — emit them exactly as their skills specify, never wrapped in
