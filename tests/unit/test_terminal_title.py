@@ -133,3 +133,13 @@ def test_worker_timeout_falls_back(capsys, monkeypatch, tmp_path):
     result = capsys.readouterr()
     assert result.out == "\033]0;feature/name\007"
     assert "cannot pin" in result.err
+
+
+def test_validate_title_names_control_characters_only():
+    from omc.terminal_title import validate_title
+
+    assert validate_title("feature/name") is None
+    assert validate_title("") is None  # emptiness is the helper's rule, not this one's
+    assert validate_title("bad\007title") == "control characters are not allowed"
+    assert validate_title("bad\x9dtitle") == "control characters are not allowed"
+    assert validate_title("tab\there") == "control characters are not allowed"

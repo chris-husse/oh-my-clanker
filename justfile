@@ -5,7 +5,7 @@ set dotenv-load
 check:
     uv run pytest -m "not e2e and not local_iterm2" -q
 
-# macOS desktop acceptance: disposable iTerm2 tabs, fish, and real provider TUIs.
+# macOS native acceptance: a PRIVATE copy of iTerm2 (never your running app), fish, real provider TUIs.
 iterm2-tests *args:
     uv run pytest -m local_iterm2 -q tests/local {{args}}
 

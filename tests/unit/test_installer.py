@@ -1,5 +1,7 @@
 import os
 import stat
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +20,9 @@ def _no_real_gitnexus(monkeypatch):
     # clone/build. Keep update_gitnexus a no-op success here. A per-test
     # monkeypatch.setattr overrides this autouse default.
     monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: 0)
+    # Legacy cases model uv/dependency behaviour only; the fish cases below opt
+    # back into the macOS provisioning path explicitly.
+    monkeypatch.setattr("omc.installer._is_macos", lambda: False)
 
 
 def _checkout(tmp_path):
@@ -251,3 +256,242 @@ def test_update_reinstalls_a_plugin_that_fails_to_load(tmp_path, capsys):
         < recorded.index("plugin install omc@oh-my-clanker --scope user")
     )
     assert "✓ claude: omc plugin repaired" in capsys.readouterr().err
+
+
+def _fresh_ctx(
+    tmp_path,
+    monkeypatch,
+    *,
+    bin_link=True,
+    reconcile_rc=0,
+    reconcile_err="",
+    timeout=False,
+    version="omc 9.9.9\n",
+    version_kwargs=None,
+):
+    """A ctx whose uv answers `tool dir --bin`/`tool dir` and whose fresh omc is recorded."""
+    from omc import installer
+
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "omc")})
+    bin_dir = tmp_path / "uv bin"
+    tool_dir = tmp_path / "uv tools"
+    (tool_dir / "omc" / "bin").mkdir(parents=True)
+    (tool_dir / "omc" / "bin" / "omc").write_text("#!/bin/sh\n")
+    bin_dir.mkdir()
+    if bin_link:
+        (bin_dir / "omc").write_text("#!/bin/sh\n")
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(("run", list(argv)))
+        if argv[:3] == ["uv", "tool", "dir"]:
+            out = str(bin_dir) if "--bin" in argv else str(tool_dir)
+            return SimpleNamespace(returncode=0, stdout=out + "\n", stderr="")
+        if argv[1:] == ["--version"]:
+            if version_kwargs is not None:
+                version_kwargs.append(kwargs)
+            if isinstance(version, BaseException):
+                raise version
+            return SimpleNamespace(returncode=0, stdout=version, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def run_bounded(argv, *, timeout, cwd=None, extra_env=None):
+        calls.append(("bounded", list(argv), timeout))
+        if timeout_flag[0]:
+            raise TimeoutError("command timed out after 30s")
+        return subprocess.CompletedProcess(list(argv), reconcile_rc, "", reconcile_err)
+
+    timeout_flag = [timeout]
+    monkeypatch.setattr(ctx, "run", run)
+    monkeypatch.setattr(ctx, "run_bounded", run_bounded)
+    monkeypatch.setattr(installer, "_uv", lambda ctx, *a: calls.append(("uv", a)) or 0)
+    monkeypatch.setattr(installer, "_is_macos", lambda: True)
+    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: calls.append(("dep",)) or 0)
+    expected_exe = bin_dir / "omc" if bin_link else tool_dir / "omc" / "bin" / "omc"
+    return ctx, calls, expected_exe
+
+
+def test_update_runs_fresh_cli_reconcile_between_uv_and_gates(tmp_path, monkeypatch, capsys):
+    from omc import installer
+
+    ctx, calls, exe = _fresh_ctx(tmp_path, monkeypatch)
+    assert installer.run_update(ctx) == 0
+    assert calls[0] == ("uv", ("tool", "upgrade", "omc"))
+    assert calls[1] == ("run", ["uv", "tool", "dir", "--bin"])
+    assert calls[2] == ("run", [str(exe), "--version"])
+    assert calls[3] == ("bounded", [str(exe), "shell-integration", "fish", "reconcile"], 30)
+    assert ("dep",) in calls and calls.index(("dep",)) > 3
+    err = capsys.readouterr().err
+    assert err.index("→ provisioning fish integration") < err.index(
+        "✓ omc 9.9.9 updated · ✓ fish integration"
+    )
+
+
+def test_version_probe_is_bounded_at_five_seconds(tmp_path, monkeypatch):
+    from omc import installer
+
+    seen = []
+    ctx, calls, _ = _fresh_ctx(tmp_path, monkeypatch, version_kwargs=seen)
+    assert installer.run_update(ctx) == 0
+    assert len(seen) == 1 and seen[0].get("timeout") == 5
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        subprocess.TimeoutExpired(["omc", "--version"], 5),
+        PermissionError("not executable"),
+        "omc \n",
+        "omc\n",
+    ],
+    ids=["timeout", "oserror", "omc-space", "omc-bare"],
+)
+def test_unusable_version_probe_degrades_to_no_version(tmp_path, monkeypatch, capsys, version):
+    from omc import installer
+
+    ctx, calls, exe = _fresh_ctx(tmp_path, monkeypatch, version=version)
+    assert installer.run_update(ctx) == 0
+    assert ("bounded", [str(exe), "shell-integration", "fish", "reconcile"], 30) in calls
+    assert capsys.readouterr().err.rstrip().splitlines()[-1] == (
+        "✓ omc updated · ✓ fish integration"
+    )
+
+
+def test_update_falls_back_to_tool_dir_when_bin_link_missing(tmp_path, monkeypatch):
+    from omc import installer
+
+    ctx, calls, exe = _fresh_ctx(tmp_path, monkeypatch, bin_link=False)
+    assert installer.run_update(ctx) == 0
+    assert ("run", ["uv", "tool", "dir"]) in calls
+    assert ("bounded", [str(exe), "shell-integration", "fish", "reconcile"], 30) in calls
+
+
+def test_fish_failure_never_aborts_update_and_is_reported_distinctly(tmp_path, monkeypatch, capsys):
+    from omc import installer
+
+    ctx, calls, _ = _fresh_ctx(
+        tmp_path,
+        monkeypatch,
+        reconcile_rc=2,
+        reconcile_err="error: fish integration: /x is not omc-owned\n",
+    )
+    assert installer.run_update(ctx) == 1  # every later gate succeeded → the fish outcome decides
+    assert ("dep",) in calls  # the remaining gates ran
+    err = capsys.readouterr().err
+    assert "error: fish integration: /x is not omc-owned" in err  # relayed verbatim
+    assert (
+        err.rstrip().splitlines()[-1]
+        == "✓ omc 9.9.9 updated · ✗ fish integration: reconcile exit 2"
+    )
+
+
+def test_fish_timeout_is_a_reason_not_an_abort(tmp_path, monkeypatch, capsys):
+    from omc import installer
+
+    ctx, calls, _ = _fresh_ctx(tmp_path, monkeypatch, timeout=True)
+    assert installer.run_update(ctx) == 1
+    assert ("dep",) in calls
+    assert "✗ fish integration: timed out after 30s" in capsys.readouterr().err
+
+
+def test_dependency_failure_outranks_fish_outcome(tmp_path, monkeypatch):
+    from omc import installer
+
+    ctx, calls, _ = _fresh_ctx(tmp_path, monkeypatch, reconcile_rc=1)
+    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: 3)
+    assert installer.run_update(ctx) == 3
+
+
+def test_missing_fresh_cli_is_a_reason(tmp_path, monkeypatch, capsys):
+    from omc import installer
+
+    ctx, calls, _ = _fresh_ctx(tmp_path, monkeypatch, bin_link=False)
+    (tmp_path / "uv tools" / "omc" / "bin" / "omc").unlink()
+    assert installer.run_update(ctx) == 1
+    assert not any(c[0] == "bounded" for c in calls)
+    assert "✗ fish integration: installed omc executable not found" in capsys.readouterr().err
+
+
+def test_non_macos_skips_the_fish_step_entirely(tmp_path, monkeypatch, capsys):
+    from omc import installer
+
+    ctx, calls, _ = _fresh_ctx(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer, "_is_macos", lambda: False)
+    assert installer.run_update(ctx) == 0
+    assert not any(c[0] in ("run", "bounded") for c in calls)
+    err = capsys.readouterr().err
+    assert "provisioning fish" not in err and err.rstrip().splitlines()[-1] == "✓ omc updated"
+
+
+def test_install_runs_post_step_and_reports(tmp_path, monkeypatch, capsys):
+    from omc import installer
+
+    ctx, calls, exe = _fresh_ctx(tmp_path, monkeypatch, reconcile_rc=1)
+    assert installer.run_install(ctx, str(_checkout(tmp_path))) == 1
+    assert calls[0][0] == "uv" and calls[0][1][:3] == ("tool", "install", "--reinstall")
+    assert ("bounded", [str(exe), "shell-integration", "fish", "reconcile"], 30) in calls
+    captured = capsys.readouterr()
+    assert "re-rooted future `omc update`s" in captured.out
+    assert (
+        captured.err.rstrip().splitlines()[-1]
+        == "✓ omc 9.9.9 installed · ✗ fish integration: reconcile exit 1"
+    )
+
+
+def test_uninstall_removes_only_an_owned_hook_and_never_blocks(tmp_path, monkeypatch, capsys):
+    from omc import installer
+    from omc.fish_integration import managed_fish_path, run_fish_integration
+
+    ctx = ToolContext.from_env(
+        {"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "omc"), "SHELL": "/bin/zsh"}
+    )
+    monkeypatch.setattr(installer, "_is_macos", lambda: True)
+    uv_calls = []
+    monkeypatch.setattr(installer, "_uv", lambda ctx, *a: uv_calls.append(a) or 0)
+    ctx.home.mkdir()
+    assert run_fish_integration(ctx, "enable") == 0
+    hook = managed_fish_path(ctx)
+    assert installer.run_uninstall(ctx) == 0
+    assert not hook.exists() and not ctx.home.exists()
+    assert uv_calls == [("tool", "uninstall", "omc")]
+    err = capsys.readouterr().err
+    assert "fish shells already running keep the loaded title hook" in err
+    # unowned file: left in place with one note; uninstall still completes
+    hook.write_bytes(b"user content\n")
+    ctx.home.mkdir()
+    assert installer.run_uninstall(ctx) == 0
+    assert hook.read_bytes() == b"user content\n" and not ctx.home.exists()
+    err = capsys.readouterr().err
+    assert err.count("· fish integration: left") == 1
+    # symlink: same
+    hook.unlink()
+    hook.symlink_to(tmp_path / "absent")
+    assert installer.run_uninstall(ctx) == 0
+    assert hook.is_symlink()
+
+
+def test_uninstall_on_non_macos_removes_an_owned_hook_only(tmp_path, monkeypatch, capsys):
+    from omc import installer
+    from omc.fish_integration import managed_fish_path, run_fish_integration
+
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "omc")})
+    monkeypatch.setattr(installer, "_uv", lambda ctx, *a: 0)
+    assert run_fish_integration(ctx, "enable") == 0  # a Linux user who opted in by hand
+    hook = managed_fish_path(ctx)
+    assert installer.run_uninstall(ctx) == 0
+    assert not hook.exists()
+    assert "fish shells already running keep the loaded title hook" in capsys.readouterr().err
+    hook.write_bytes(b"user content\n")
+    assert installer.run_uninstall(ctx) == 0
+    assert hook.read_bytes() == b"user content\n"
+    err = capsys.readouterr().err
+    assert err.count("· fish integration: left") == 1 and "already running" not in err
+
+
+def test_uninstall_without_a_hook_says_nothing_about_fish(tmp_path, monkeypatch, capsys):
+    from omc import installer
+
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "omc")})
+    monkeypatch.setattr(installer, "_uv", lambda ctx, *a: 0)
+    assert installer.run_uninstall(ctx) == 0
+    assert "fish" not in capsys.readouterr().err

@@ -14,9 +14,17 @@ def terminal_title_argv() -> list[str]:
     return [sys.executable, "-m", "omc.terminal_title"]
 
 
-def run_title(ctx: ToolContext, title: str) -> int:
+def validate_title(title: str) -> str | None:
+    """None when `title` may be sent to a terminal, else why not (C0/C1 control characters)."""
     if any(unicodedata.category(char) == "Cc" for char in title):
-        print("omc: invalid title: control characters are not allowed", file=sys.stderr)
+        return "control characters are not allowed"
+    return None
+
+
+def run_title(ctx: ToolContext, title: str) -> int:
+    reason = validate_title(title)
+    if reason is not None:
+        print(f"omc: invalid title: {reason}", file=sys.stderr)
         return 1
     return 0 if detect_terminal(ctx.env).set_title(ctx, title) else 1
 
