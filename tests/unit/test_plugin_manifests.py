@@ -145,12 +145,20 @@ def test_review_proxy_runs_grug():
         "/omc:check",
         "Deliberate complexity",
         'regardless of `"configured"`',
+        "grug skill unavailable — plugin stale? run omc update",
+        "top-tier",
+        "batched",
     ):
         assert needle in text, f"review proxy missing {needle!r}"
     # grug runs after the project stage (anchor on the Steps body: the frontmatter
     # already names .omc/skills/review)
     steps = text.index("## Steps")
     assert text.index(".omc/skills/review", steps) < text.index("grug diff", steps)
+    # the lens is unavailable → the stage FAILS, it never passes lens-less
+    unavailable = text.index("grug skill unavailable")
+    assert '"passed": false' in text[unavailable - 400 : unavailable + 200]
+    # fix first (top tier), waive second, ask last — and batched
+    assert text.index("Fix first, top tier") < text.index("**waive**") < text.index("batched")
     assert "nothing to do" in text and '"configured"' in text and "OMC_STAGE" in text
     # the other three proxies stay pure pass-throughs
     for stage in ("check", "build", "verify"):
@@ -457,6 +465,9 @@ def test_spec_skill_contract():
         "grug spec",
         "Deliberate complexity",
         "None.",
+        "grug skill unavailable — plugin stale? run omc update",
+        "Fix, by the top tier",
+        "Ask, batched",
     ):
         assert needle in text, f"spec skill missing {needle!r}"
     # spec-phase emphasis is architecture; implementation choices are plan-phase
@@ -465,6 +476,13 @@ def test_spec_skill_contract():
     # (anchor on Step 2: the frontmatter already mentions /omc:explain)
     step2 = text.index("## Step 2")
     assert text.index("/omc:explain", step2) < text.index("grug section", step2)
+    step4 = text.index("## Step 4")
+    assert text.index("Fix, by the top tier", step4) < text.index("Waive by record", step4)
+    assert text.index("Waive by record", step4) < text.index("Ask, batched", step4)
+    # grug unavailable is a hard stop: Step 5 must not commit or continue past it
+    step5 = text.index("## Step 5")
+    assert "grug skill unavailable" in text[step5:]
+    assert "hard stop" in text[step5:]
     # the waiver section is unconditional so review can rely on it
     assert text.index("Deliberate complexity") < text.index("## Step 2")
 

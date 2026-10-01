@@ -1,3 +1,44 @@
+## Claude `--available` excludes installed plugins (2026-10-01)
+
+Observed on the host with Claude 2.1.286: `claude plugin list --available
+--json` returns `{"installed": [...], "available": [...]}` and the `available`
+array lists only plugins that are NOT installed — the intersection with the
+eight installed plugin ids was empty. omc's marketplace-source repair
+(2026-09-25) proved "the marketplace offers omc" by looking for omc in that
+array on the LIVE config, which can never succeed once omc is installed. The
+update path therefore raised "refusing plugin replacement: marketplace does not
+offer omc@oh-my-clanker" before `claude plugin update` ran, `omc update`
+printed the error as a best-effort warning and exited 0, and the installed
+plugin stayed at 0.1.11 while the marketplace clone sat at 0.1.13. The
+symptom: the grug skill shipped in 0.1.13 never fired in any session.
+
+Timeline from shell history and file timestamps: `omc update` at 08:57 local
+refreshed the marketplace clone (known_marketplaces lastUpdated 11:57:56Z)
+and Claude materialized a 0.1.13 cache directory one second later, but
+`installed_plugins.json` kept its 2026-09-28 entry for 0.1.11.
+
+The live-config proof now reads the registered marketplace's
+`.claude-plugin/marketplace.json` at its `installLocation` (`_offered` in
+`src/omc/plugin.py`); the isolated probe keeps using the available list, where
+omc is legitimately not installed. `ensure_plugin` also compares the installed
+version with the offered one and treats a difference as "stale": start,
+configure and update heal it through the update sequence, and an update that
+leaves the version unchanged raises instead of reporting "updated".
+
+`tests/e2e/test_e2e_marketplace_repair.py::test_update_advances_an_installed_plugin`
+covers the healthy-update path against the real CLI: install from a directory
+marketplace stamped 0.0.1, rewrite it to the checkout version, run the update
+path, assert the registry reports the new version and the cached payload
+carries `skills/grug`. The E2E image pins Claude 2.1.286 for this behaviour.
+
+Because `omc start` now stops when the installed version still differs from
+the offered one after a heal, the release invariant that `pyproject.toml`,
+`.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` carry the
+same version (`scripts/stamp_version.py`,
+`tests/unit/test_plugin_manifests.py::test_all_version_strings_agree`) is
+load-bearing: a mis-stamped release would make every start raise until a
+fixed release ships.
+
 ## Claude marketplace source repair (2026-09-25)
 
 Claude 2.1.281 rejects adding `chris-husse/oh-my-clanker` when settings

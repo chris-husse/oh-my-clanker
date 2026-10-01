@@ -36,10 +36,11 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 
 # The supported provider CLIs. Pin Codex to the plugin commands verified in this
 # harness; 0.144.5 only registered marketplaces and did not install plugins.
-# Claude 2.1.281 enforces declared marketplace sources. Earlier cached CLIs
-# allowed re-add to replace them, hiding stale-worktree repair failures.
+# Claude 2.1.281 enforces declared marketplace sources; 2.1.286 is the version on
+# which `plugin list --available` was verified to EXCLUDE installed plugins
+# (2026-10-01) — the behaviour omc's live-config proof must not depend on.
 ARG CODEX_VERSION=0.156.1
-ARG CLAUDE_VERSION=2.1.281
+ARG CLAUDE_VERSION=2.1.286
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} @openai/codex@${CODEX_VERSION}
 
 # wt (worktrunk) — prebuilt static musl release binary (see note above)
