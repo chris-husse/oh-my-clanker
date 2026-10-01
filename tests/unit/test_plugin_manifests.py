@@ -81,6 +81,8 @@ INTERNAL_SKILLS = (
     "gitnexus-index",
     "gitnexus-document",
     "gitnexus-explain",
+    "ticket-sync",
+    "grug",
 )
 
 
@@ -112,6 +114,8 @@ def test_finish_skill_contract():
         "Close the worktree",
         "review comments",
         "Chat about this",
+        "grug",  # review runs omc's own lens, so a review failure may come from it
+        'regardless of `"configured"`',  # unconfigured review can still fail via grug
     ):
         assert needle in text, f"finish skill missing {needle!r}"
     assert "gh pr create" not in text  # never creates the MR/PR
@@ -128,7 +132,29 @@ def test_stage_proxy_contract():
         text = (ROOT / "skills" / stage / "SKILL.md").read_text()
         for needle in (f".omc/skills/{stage}", "OMC_STAGE", '"configured"'):
             assert needle in text, f"{stage} proxy missing {needle!r}"
-        assert "nothing to do" in text  # unconfigured is a pass, not a failure
+        # the project half of an unconfigured stage is a pass (review's grug half still runs)
+        assert "nothing to do" in text
+
+
+def test_review_proxy_runs_grug():
+    text = (ROOT / "skills" / "review" / "SKILL.md").read_text()
+    for needle in (
+        "grug diff",
+        "fix now",
+        "waive",
+        "/omc:check",
+        "Deliberate complexity",
+        'regardless of `"configured"`',
+    ):
+        assert needle in text, f"review proxy missing {needle!r}"
+    # grug runs after the project stage (anchor on the Steps body: the frontmatter
+    # already names .omc/skills/review)
+    steps = text.index("## Steps")
+    assert text.index(".omc/skills/review", steps) < text.index("grug diff", steps)
+    assert "nothing to do" in text and '"configured"' in text and "OMC_STAGE" in text
+    # the other three proxies stay pure pass-throughs
+    for stage in ("check", "build", "verify"):
+        assert "grug" not in (ROOT / "skills" / stage / "SKILL.md").read_text()
 
 
 def test_squash_skill_contract():
@@ -427,10 +453,76 @@ def test_spec_skill_contract():
         "architectural",
         "follow-up",
         "review",
+        "grug section",
+        "grug spec",
+        "Deliberate complexity",
+        "None.",
     ):
         assert needle in text, f"spec skill missing {needle!r}"
     # spec-phase emphasis is architecture; implementation choices are plan-phase
     assert "plan phase" in text
+    # grug judges each section AFTER explain has answered, with that answer as context
+    # (anchor on Step 2: the frontmatter already mentions /omc:explain)
+    step2 = text.index("## Step 2")
+    assert text.index("/omc:explain", step2) < text.index("grug section", step2)
+    # the waiver section is unconditional so review can rely on it
+    assert text.index("Deliberate complexity") < text.index("## Step 2")
+
+
+GRUG_RULE_IDS = (
+    "grug:say-no",
+    "grug:80-20",
+    "grug:factor-late",
+    "grug:cut-point",
+    "grug:simple-repeat",
+    "grug:locality",
+    "grug:debuggable",
+    "grug:fence",
+    "grug:small-refactor",
+    "grug:generics",
+    "grug:test-level",
+    "grug:evidence-perf",
+    "grug:api-common-case",
+    "grug:logging",
+    "grug:simple-concurrency",
+    "grug:too-complex-for-grug",
+)
+
+
+def test_grug_skill_contract():
+    text = (ROOT / "skills" / "grug" / "SKILL.md").read_text()
+    for rule in GRUG_RULE_IDS:
+        assert rule in text, f"grug skill missing rule {rule!r}"
+    for needle in (
+        "$ARGUMENTS",
+        "spec <path>",
+        "section <text>",
+        "diff [<base>]",
+        'grug: "',
+        "simpler:",
+        "none — needs a human answer",
+        "Deliberate complexity",
+        "Important",
+        "Minor",
+        "fix now",
+        "waive",
+        ".omc/config/AGENTS.md",
+        ".omc/config/coding-convention.md",
+        "worktree.base_branch",
+        "no design record found",
+        "behavior-preserving",
+        "grug summary:",
+        "not the end of your turn",
+        "A rule not named in either list is Minor",
+    ):
+        assert needle in text, f"grug skill missing {needle!r}"
+    # internal leaf: no user entry point, no graph, no explain
+    assert "/omc:grug" not in text
+    assert "omc internal gitnexus" not in text
+    assert "/omc:explain" not in text
+    # the two owners are named in the frontmatter description
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert "/omc:spec" in m.group(1) and "/omc:review" in m.group(1)
 
 
 # --- Anti-stall contract -----------------------------------------------------
