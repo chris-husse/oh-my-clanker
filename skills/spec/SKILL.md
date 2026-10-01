@@ -14,28 +14,56 @@ Write the design doc per repo conventions:
 `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` (topic = `$OMC_SLUG`
 when set, else a short feature slug).
 
+Every design doc ends with an unconditional final section:
+
+```markdown
+## Deliberate complexity
+
+None.
+```
+
+It lists every Important grug finding the user waived during hardening,
+each with its one-line reason. It reads `None.` when nothing was waived. Its
+presence is guaranteed so that `review` can rely on it later.
+
 ## Step 2 — per-section hardening
 
-For EACH section of the spec, invoke `/omc:explain` with:
+For EACH section of the spec, two calls:
 
-> Does this proposed change make architectural sense in this codebase:
-> <section summary>? What existing components does it touch, and what
-> problems might occur?
+1. Invoke `/omc:explain` with:
 
-Refine the section with the answer. Emphasis here is architecture, purpose,
-and general function — implementation-level choices (enums, parameters,
-reuse) belong to the plan phase, not here.
+   > Does this proposed change make architectural sense in this codebase:
+   > <section summary>? What existing components does it touch, and what
+   > problems might occur?
+
+2. Invoke the internal `grug` skill with `grug section <section text,
+   followed by explain's answer as context>`. With explain's answer in hand,
+   grug can say "reuse the existing X" instead of guessing.
+
+Refine the section with both answers. Emphasis here is architecture,
+purpose, general function, and whether each mechanism pays for itself —
+implementation-level choices (enums, parameters, reuse) belong to the
+plan phase, not here.
 
 ## Step 3 — whole-spec pass
 
 Run `/omc:explain` once more over the complete spec: does it cohere at a
 high level, and does anything conflict with how the codebase already works?
+Then invoke `grug spec <path>` over the committed-to-be file for
+cross-section findings: total new surface, layer count, mechanisms with a
+single user.
 
 ## Step 4 — iterate
 
-Repeat steps 2–3 until explain stops surfacing real issues. Surface genuine
-architectural decisions to the user as explicit follow-up questions — never
-make silent choices on their behalf.
+Repeat steps 2–3 until neither explain nor grug surfaces real issues. Every
+Important grug finding is dispositioned one of three ways: fold the simpler
+alternative into the section when it keeps the converged design; waive it
+into "Deliberate complexity" citing the recorded decision when it contradicts
+an entry in the record's "Decisions taken during brainstorm" table — the
+brainstorm already settled it, so it is not a CRITICAL question; otherwise
+surface it to the user as an explicit numbered CRITICAL follow-up question —
+never make silent choices on their behalf. What the user waives goes into
+"Deliberate complexity" with its reason.
 
 ## Step 5 — commit & report
 

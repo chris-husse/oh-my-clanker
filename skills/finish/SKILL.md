@@ -62,13 +62,18 @@ in that order — check first, as the cheap fail-fast gate: a broken unit
 test dies in seconds, not after a world-build. Each is a proxy for the
 project's own `.omc/skills/<stage>/SKILL.md`:
 
-- Unconfigured (`"configured": false`) → note it was skipped and move on.
-- A stage that changed TRACKED files (formatters, autofixes) → amend those
-  changes into the squashed commit (`git add -u && git commit --amend
-  --no-edit`); leave untracked artifacts alone.
-- A stage that FAILED (`"passed": false`) → **stop at that stage** (do not run
-  the remaining stages, do not push): report which stage failed and why, and
-  leave the branch squashed so the user can fix and re-run `finish`.
+- A stage that FAILED (`"passed": false`, regardless of `"configured"`) →
+  **stop at that stage** (do not run the remaining stages, do not push):
+  report which stage failed and why, and leave the branch squashed so the
+  user can fix and re-run `finish`.
+- A stage that changed TRACKED files (formatters, autofixes, grug's
+  behavior-preserving fixes and its waivers written into the design record)
+  → amend those changes into the squashed commit (`git add -u && git commit
+  --amend --no-edit`); leave untracked artifacts alone.
+- Unconfigured (`"configured": false`) → the project half was skipped; note
+  it and move on once `"passed"` (read first, above) is `true`. The `review`
+  proxy also runs omc's own grug lens on every project, so `review` can report
+  `"configured": false, "passed": false`.
 
 ## Step 5 — describe and push
 
