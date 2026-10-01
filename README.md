@@ -27,7 +27,7 @@
    | Claude Code | `/plugin marketplace add chris-husse/oh-my-clanker` then `/plugin install omc@oh-my-clanker` |
    | Codex | `codex plugin marketplace add chris-husse/oh-my-clanker`, then install `omc` from `/plugins` |
 
-   For Claude Code you can skip this table: `omc configure`, `omc update` and `omc start` all install (and repair) the plugin for you.
+   For Claude Code you can skip this table: `omc configure`, `omc update` and `omc start` all install the plugin, repair one Claude refuses to load, and refresh one that fell behind the marketplace (`omc start --dry-run` reports `stale (<installed> → <offered> offered; omc start will update it)` without touching anything).
 
    `omc`'s session skill hands off to [superpowers](https://github.com/obra/superpowers)'s brainstorming skill. The plugin manifest deliberately declares **no** dependency on it — Claude Code matches a dependency by its exact `name@marketplace` id and refuses to load omc when superpowers came from a different marketplace, and it never installs the dependency for you anyway. Instead omc installs superpowers itself for Claude Code (from the official marketplace); for Codex install it yourself:
 

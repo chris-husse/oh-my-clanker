@@ -128,12 +128,86 @@ def _claude_json(ctx: ToolContext, argv: list[str]):
 
 
 def _available(ctx: ToolContext) -> None:
+    """Prove the marketplace offers omc — PROBE CONFIG ONLY.
+
+    `plugin list --available --json` lists plugins that are NOT installed
+    (claude 2.1.286, verified 2026-10-01: the installed set and the available
+    set were disjoint for all eight installed plugins). Inside the isolated
+    probe omc is not installed yet, so its presence here is a valid proof.
+    On the live config, where omc IS installed, this list can never contain
+    it — see _offered for the live-config proof.
+    """
     data = _claude_json(ctx, ["claude", "plugin", "list", "--available", "--json"])
     available = data.get("available") if isinstance(data, dict) else None
     if not isinstance(available, list) or not any(
         isinstance(p, dict) and p.get("pluginId") == PLUGIN_REF for p in available
     ):
         raise OmcError(f"refusing plugin replacement: marketplace does not offer {PLUGIN_REF}")
+
+
+def _offered(ctx: ToolContext) -> str | None:
+    """Prove the registered oh-my-clanker marketplace offers omc on the LIVE
+    config, and return the version it offers (None when the manifest entry
+    carries no version).
+
+    Reads the registration's installLocation from `claude plugin marketplace
+    list --json` — Claude's clone for a github source, the directory itself
+    for a directory source (older registrations carry only `path`) — then
+    `.claude-plugin/marketplace.json` there. Deliberately NOT `plugin list
+    --available`: that list excludes installed plugins (see _available), so
+    using it here made every `omc update` on an installed plugin abort
+    before `plugin update` ran — the installed plugin sat at 0.1.11 while
+    the marketplace offered 0.1.13 (2026-10-01).
+    """
+    entries = _claude_json(ctx, ["claude", "plugin", "marketplace", "list", "--json"])
+    current = None
+    if isinstance(entries, list):
+        current = next(
+            (e for e in entries if isinstance(e, dict) and e.get("name") == MARKETPLACE_NAME),
+            None,
+        )
+    if current is None:
+        raise OmcError(f"the {MARKETPLACE_NAME} marketplace is not registered")
+    location = current.get("installLocation") or current.get("path")
+    if not location:
+        raise OmcError(f"the {MARKETPLACE_NAME} marketplace registration has no install location")
+    manifest = Path(str(location)) / ".claude-plugin" / "marketplace.json"
+    try:
+        data = json.loads(manifest.read_text())
+    except (OSError, ValueError) as exc:
+        raise OmcError(f"cannot read the marketplace manifest at {manifest}: {exc}") from exc
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    entry = next(
+        (p for p in (plugins or []) if isinstance(p, dict) and p.get("name") == "omc"), None
+    )
+    if entry is None:
+        raise OmcError(
+            f"refusing plugin replacement: marketplace at {location} does not offer {PLUGIN_REF}"
+        )
+    version = entry.get("version")
+    return str(version) if version else None
+
+
+def _skew(ctx: ToolContext, omc: dict) -> tuple[str, str] | None:
+    """(installed, offered) when both versions are known and differ — the
+    plugin loads but is stale. None otherwise, including when the marketplace
+    is not registered or its manifest is unreadable: omc never fails over its
+    own plumbing, and a missing version on either side (older Claude output
+    without `version`, a manifest without one) is not skew. Plain string
+    inequality: the installed snapshot always came from the registered
+    marketplace, so "different" means "stale" in practice, and after a heal
+    "equal" is the only honest success criterion.
+    """
+    installed = omc.get("version")
+    if not installed:
+        return None
+    try:
+        offered = _offered(ctx)
+    except OmcError:
+        return None
+    if not offered or offered == str(installed):
+        return None
+    return str(installed), offered
 
 
 def _source_matches(entry: dict, source: str) -> bool:
@@ -177,6 +251,10 @@ def _prepare_marketplace(ctx: ToolContext, source: str) -> bool:
     `marketplace remove` also UNINSTALLS its plugins, so prove the replacement
     can be fetched and installed in a disposable config before doing that.
     Never edit Claude's registry/settings files ourselves.
+
+    The probe proves offering through `plugin list --available` (valid there:
+    omc is not installed in the scratch config); the live config proves it
+    through the marketplace manifest (`_offered`).
     """
     prefix = ["claude", "plugin", "marketplace"]
     entries = _claude_json(ctx, [*prefix, "list", "--json"])
@@ -212,7 +290,7 @@ def _prepare_marketplace(ctx: ToolContext, source: str) -> bool:
             raise OmcError("oh-my-clanker marketplace still points at a different source")
     if not replaced:
         _checked(ctx, [*prefix, "update", MARKETPLACE_NAME])
-    _available(ctx)
+    _offered(ctx)  # live-config proof: the manifest, never the available list
     return replaced
 
 
@@ -224,7 +302,9 @@ def ensure_plugin(
 
     Missing → install. Installed but failed to load / disabled → refresh the
     marketplace snapshot and reinstall. Healthy and ``update`` → run the
-    provider's update sequence. Every mutating path re-probes afterwards and
+    provider's update sequence. Installed, loadable, but behind the
+    marketplace's offered version (skew) → run the update sequence, and report
+    the version transition. Every mutating path re-probes afterwards and
     raises ``OmcError`` (carrying Claude's own error text) if the plugin still
     doesn't load — a broken plugin must never be reported as "ok".
 
@@ -239,18 +319,29 @@ def ensure_plugin(
     omc = _find(entries, "omc")
     superpowers = _find(entries, "superpowers")
     omc_problems = _problems(omc) if omc is not None else []
+    # Skew is judged HERE only — never inside _problems, which also serves the
+    # probe's load check in _prepare_marketplace and would route a stale but
+    # loadable plugin through the destructive uninstall/reinstall path.
+    # _find prefix-matches so a fork-installed omc still counts as installed and
+    # loadable; only the canonical id is compared with (or updated from) the
+    # oh-my-clanker manifest.
+    canonical = omc is not None and omc.get("id") == PLUGIN_REF
+    skew = _skew(ctx, omc) if canonical and not omc_problems else None
 
     if check_only:
         if omc is None:
             return "missing (omc start will install it)"
         if omc_problems:
             return f"failed to load: {omc_problems[0]} (omc start will reinstall it)"
+        if skew is not None:
+            return f"stale ({skew[0]} → {skew[1]} offered; omc start will update it)"
         if superpowers is None:
             return "ok; superpowers missing (omc start will install it)"
         return "ok"
 
     source = marketplace_source(ctx.env)
-    if omc is None or omc_problems or update:
+    refresh = omc is None or bool(omc_problems) or update or skew is not None
+    if refresh:
         _check_project_source(ctx, source)
     omc_fix = (
         f"claude plugin marketplace add {shlex.quote(source)} && "
@@ -273,7 +364,7 @@ def ensure_plugin(
         actions.append("installed superpowers")
 
     replaced = False
-    if omc is None or omc_problems or update:
+    if refresh:
         try:
             replaced = _prepare_marketplace(ctx, source)
         except OmcError as exc:
@@ -283,6 +374,7 @@ def ensure_plugin(
                 f"  fix manually: {omc_fix}"
             ) from exc
 
+    before = str(omc.get("version") or "") if omc is not None else ""
     if omc is None:
         _say(f"installing the omc plugin from {source}…")
         _install(ctx, PLUGIN_REF, manual_fix=omc_fix)
@@ -296,7 +388,9 @@ def ensure_plugin(
             _checked(ctx, ["claude", "plugin", "uninstall", PLUGIN_REF])
         _install(ctx, PLUGIN_REF, manual_fix=omc_fix)
         actions.append("repaired")
-    elif update:
+    elif update or skew is not None:
+        if skew is not None and not update:
+            _say(f"the omc plugin is stale ({skew[0]} installed, {skew[1]} offered) — updating…")
         if replaced:
             _install(ctx, PLUGIN_REF, manual_fix=omc_fix)
         else:
@@ -321,4 +415,16 @@ def ensure_plugin(
             "  check `claude plugin list`; if the error names a missing dependency, "
             "your marketplace snapshot may predate the fix — retry after `omc update`"
         )
+    if actions[-1] == "updated":
+        # An update that left the version behind is not an update. Say so with
+        # both versions and the manual command, instead of "✓ updated".
+        still = _skew(ctx, omc)
+        if still is not None:
+            raise OmcError(
+                f"the omc plugin is still {still[0]} after updating ({still[1]} offered) — "
+                f"run: claude plugin update {PLUGIN_REF}"
+            )
+        after = str(omc.get("version") or "")
+        if before and after and before != after:
+            return f"updated ({before} → {after})"
     return actions[-1]

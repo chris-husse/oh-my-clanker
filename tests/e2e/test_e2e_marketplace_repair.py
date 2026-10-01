@@ -58,6 +58,73 @@ print(ensure_plugin(ctx, 'claude', update=True))
     )
 
 
+_REWRITE = (
+    "import re, sys; from pathlib import Path\n"
+    "root, version = sys.argv[1], sys.argv[2]\n"
+    "for rel in ('.claude-plugin/plugin.json', '.claude-plugin/marketplace.json'):\n"
+    "    p = Path(root) / rel\n"
+    '    pattern = r\'"version": *"[^"]*"\'\n'
+    "    p.write_text(re.sub(pattern, '\"version\": \"' + version + '\"', p.read_text()))\n"
+)
+
+
+def _checkout_version(container) -> str:
+    out = _run(
+        container,
+        [
+            "python3",
+            "-c",
+            "import json; print(json.load(open('/repo/.claude-plugin/plugin.json'))['version'])",
+        ],
+    )
+    return out.strip().splitlines()[-1]
+
+
+def _stale_marketplace(container, old_version: str) -> str:
+    """Install omc from a directory marketplace stamped ``old_version``, then
+    move that marketplace to the checkout's version — the shape of 'the
+    marketplace advanced after I installed'. Returns the checkout version."""
+    configure_omc(container, "claude")
+    _run(container, ["claude", "plugin", "marketplace", "remove", "oh-my-clanker"])
+    _run(
+        container,
+        [
+            "python3",
+            "-c",
+            "import shutil; from pathlib import Path; "
+            "p=Path('/tmp/old-omc'); p.mkdir(); "
+            "shutil.copytree('/repo/.claude-plugin', p/'.claude-plugin'); "
+            "shutil.copytree('/repo/skills', p/'skills')",
+        ],
+    )
+    _run(container, ["python3", "-c", _REWRITE, "/tmp/old-omc", old_version])
+    _run(container, ["claude", "plugin", "marketplace", "add", "/tmp/old-omc"])
+    _run(container, ["claude", "plugin", "install", "omc@oh-my-clanker", "--scope", "user"])
+    current = _checkout_version(container)
+    _run(container, ["python3", "-c", _REWRITE, "/tmp/old-omc", current])
+    return current
+
+
+def test_update_advances_an_installed_plugin(container):
+    # The 2026-10-01 regression against the REAL CLI: omc installed and
+    # healthy, the marketplace has moved on, `omc update`'s plugin step must
+    # advance the installed version and say so.
+    current = _stale_marketplace(container, "0.0.1")
+    before = json.loads(_run(container, ["claude", "plugin", "list", "--json"]))
+    omc_before = next(p for p in before if p["id"] == "omc@oh-my-clanker")
+    assert omc_before["version"] == "0.0.1", omc_before
+    assert not omc_before.get("errors"), omc_before
+
+    rc, out = _repair(container, "/tmp/old-omc")
+    assert rc == 0, out
+    assert f"updated (0.0.1 → {current})" in out, out
+    after = json.loads(_run(container, ["claude", "plugin", "list", "--json"]))
+    omc_after = next(p for p in after if p["id"] == "omc@oh-my-clanker")
+    assert omc_after["version"] == current, omc_after
+    assert omc_after["enabled"] and not omc_after.get("errors"), omc_after
+    assert "grug" in _run(container, ["ls", omc_after["installPath"] + "/skills"])
+
+
 @pytest.mark.parametrize("source", ["/repo", "https://github.com/chris-husse/oh-my-clanker"])
 def test_deleted_worktree_marketplace_is_replaced(container, source):
     _old_marketplace(container)

@@ -10,7 +10,13 @@ from omc.errors import OmcError, Refusal
 from omc.start import run_start
 from omc.toolctx import ToolContext
 
-from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, stub_env
+from ._stubs import (
+    HEALTHY_PLUGINS,
+    make_claude_stub,
+    make_stub,
+    remote_marketplace,
+    stub_env,
+)
 
 OK_VERDICT = 'OMC_SLUG {"ok": true, "slug": "proj-1-fix-login"}'
 
@@ -331,6 +337,55 @@ def test_dry_run_reports_a_plugin_that_fails_to_load(tmp_path, capsys):
     assert run_start(ctx, Config(), "PROJ-1", dry_run=True) == 0
     assert "→ omc plugin for claude: failed to load: boom" in capsys.readouterr().err
     assert "plugin install" not in calls.read_text()  # dry run never mutates
+
+
+def test_start_heals_a_stale_plugin(tmp_path, capsys):
+    # The plugin loads but is behind the marketplace: start updates it BEFORE
+    # the seeded session runs, so the new session carries the new skills
+    # (Claude's "restart required" is satisfied by the launch itself).
+    bindir = tmp_path / "bin"
+    _make_git_stub(bindir)
+    stale = [
+        {"id": "omc@oh-my-clanker", "version": "0.1.11"},
+        {"id": "superpowers@claude-plugins-official"},
+    ]
+    calls = make_claude_stub(
+        bindir,
+        plugins=stale,
+        marketplaces=[remote_marketplace(tmp_path)],
+        offered_version="0.1.13",
+        stdout=OK_VERDICT,
+    )
+    make_stub(bindir, "wt", stdout=json.dumps({"path": str(tmp_path / "wtree")}))
+    (tmp_path / "wtree").mkdir()
+    ctx = ToolContext.from_env(stub_env(bindir, SHELL="/bin/bash"))
+    assert run_start(ctx, Config(), "PROJ-1", headless=True) == 0
+    assert "→ omc plugin for claude: updated (0.1.11 → 0.1.13)" in capsys.readouterr().err
+    lines = calls.read_text().splitlines()
+    update_at = lines.index("plugin update omc@oh-my-clanker")
+    seed_at = next(i for i, ln in enumerate(lines) if ln.startswith("-p /omc:start"))
+    assert update_at < seed_at
+
+
+def test_dry_run_reports_a_stale_plugin(tmp_path, capsys):
+    bindir = tmp_path / "bin"
+    _make_git_stub(bindir)
+    stale = [
+        {"id": "omc@oh-my-clanker", "version": "0.1.11"},
+        {"id": "superpowers@claude-plugins-official"},
+    ]
+    calls = make_claude_stub(
+        bindir,
+        plugins=stale,
+        marketplaces=[remote_marketplace(tmp_path)],
+        offered_version="0.1.13",
+        stdout=OK_VERDICT,
+    )
+    make_stub(bindir, "wt", stdout=json.dumps({"path": str(tmp_path / "wtree")}))
+    ctx = ToolContext.from_env(stub_env(bindir, SHELL="/bin/bash"))
+    assert run_start(ctx, Config(), "PROJ-1", dry_run=True) == 0
+    assert "→ omc plugin for claude: stale (0.1.11 → 0.1.13 offered" in capsys.readouterr().err
+    assert "plugin update" not in calls.read_text()  # dry run never mutates
 
 
 OLD_SEED = (

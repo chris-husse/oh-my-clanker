@@ -3,10 +3,10 @@ import json
 import pytest
 
 from omc.errors import OmcError
-from omc.plugin import ensure_plugin, marketplace_source
+from omc.plugin import _offered, ensure_plugin, marketplace_source
 from omc.toolctx import ToolContext
 
-from ._stubs import HEALTHY_PLUGINS, make_claude_stub, stub_env
+from ._stubs import HEALTHY_PLUGINS, make_claude_stub, remote_marketplace, stub_env
 
 OMC = {"id": "omc@oh-my-clanker"}
 SUPERPOWERS = {"id": "superpowers@claude-plugins-official"}
@@ -15,12 +15,6 @@ STALE_MARKETPLACE = {
     "source": "directory",
     "path": "/deleted/worktree",
     "installLocation": "/deleted/worktree",
-}
-REMOTE_MARKETPLACE = {
-    "name": "oh-my-clanker",
-    "source": "github",
-    "repo": "chris-husse/oh-my-clanker",
-    "installLocation": "/cache/oh-my-clanker",
 }
 DEP_ERROR = (
     'Dependency "superpowers@superpowers-marketplace" is not installed — run '
@@ -112,12 +106,63 @@ def test_superpowers_from_any_marketplace_satisfies(tmp_path):
 
 
 def test_update_refreshes_a_healthy_plugin(tmp_path):
-    ctx, calls = _ctx(tmp_path, plugins=HEALTHY_PLUGINS)
+    # The 2026-10-01 regression: with omc INSTALLED, Claude's `--available`
+    # list no longer contains it, and the live-config proof aborted every
+    # `omc update` before `plugin update` ran. The proof must not depend on
+    # that list.
+    ctx, calls = _ctx(
+        tmp_path, plugins=HEALTHY_PLUGINS, marketplaces=[remote_marketplace(tmp_path)]
+    )
     assert ensure_plugin(ctx, "claude", update=True) == "updated"
     lines = calls.read_text().splitlines()
     assert "plugin marketplace update oh-my-clanker" in lines
     assert "plugin update omc@oh-my-clanker" in lines
     assert "plugin install omc@oh-my-clanker --scope user" not in lines
+
+
+def test_live_proof_reads_the_marketplace_manifest(tmp_path):
+    # A marketplace that dropped omc is caught by its manifest — and nothing
+    # is updated or removed.
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=HEALTHY_PLUGINS,
+        marketplaces=[remote_marketplace(tmp_path)],
+        offers_omc=False,
+    )
+    with pytest.raises(OmcError, match=r"marketplace at .* does not offer omc@oh-my-clanker"):
+        ensure_plugin(ctx, "claude", update=True)
+    lines = calls.read_text().splitlines()
+    assert "plugin update omc@oh-my-clanker" not in lines
+    assert "plugin marketplace remove oh-my-clanker --scope user" not in lines
+
+
+def test_live_proof_falls_back_to_path(tmp_path):
+    # Older registrations carry `path` but no `installLocation` for a
+    # directory source; the proof reads the manifest from `path`. Tested on
+    # the helper directly: through ensure_plugin this registration would be
+    # REPLACED (marketplace_source() falls back to the GitHub source in a
+    # stub env), and the stub's fresh registration always has installLocation.
+    location = tmp_path / "marketplaces" / "oh-my-clanker"
+    registration = {"name": "oh-my-clanker", "source": "directory", "path": str(location)}
+    ctx, _ = _ctx(tmp_path, plugins=HEALTHY_PLUGINS, marketplaces=[registration])
+    (location / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (location / ".claude-plugin" / "marketplace.json").write_text(
+        json.dumps({"name": "oh-my-clanker", "plugins": [{"name": "omc", "version": "0.1.0"}]})
+    )
+    assert _offered(ctx) == "0.1.0"
+
+
+def test_live_proof_without_registration_or_manifest_is_an_error(tmp_path):
+    ctx, _ = _ctx(tmp_path, plugins=HEALTHY_PLUGINS)
+    with pytest.raises(OmcError, match="not registered"):
+        _offered(ctx)
+    ctx, _ = _ctx(tmp_path / "second", plugins=HEALTHY_PLUGINS, marketplaces=[STALE_MARKETPLACE])
+    with pytest.raises(OmcError, match="cannot read the marketplace manifest"):
+        _offered(ctx)
+    bare = {"name": "oh-my-clanker", "source": "github", "repo": "chris-husse/oh-my-clanker"}
+    ctx, _ = _ctx(tmp_path / "third", plugins=HEALTHY_PLUGINS, marketplaces=[bare])
+    with pytest.raises(OmcError, match="no install location"):
+        _offered(ctx)
 
 
 def test_update_installs_when_missing(tmp_path):
@@ -186,7 +231,7 @@ def test_update_replaces_stale_marketplace_source(tmp_path, broken):
     ctx, calls = _ctx(tmp_path, plugins=[omc, SUPERPOWERS], marketplaces=[STALE_MARKETPLACE])
     assert ensure_plugin(ctx, "claude", update=True) == ("repaired" if broken else "updated")
     entries = json.loads((tmp_path / "bin" / "claude.marketplaces.json").read_text())
-    assert entries == [REMOTE_MARKETPLACE]
+    assert entries == [remote_marketplace(tmp_path)]
     assert "errors" not in _state(tmp_path)["omc@oh-my-clanker"]
     lines = calls.read_text().splitlines()
     assert lines.index("isolated plugin install omc@oh-my-clanker --scope user") < lines.index(
@@ -200,7 +245,7 @@ def test_marketplace_failure_does_not_uninstall_plugin(tmp_path, failure):
     ctx, calls = _ctx(
         tmp_path,
         plugins=[{**OMC, "errors": [DEP_ERROR]}, SUPERPOWERS],
-        marketplaces=[STALE_MARKETPLACE if failure == "add" else REMOTE_MARKETPLACE],
+        marketplaces=[STALE_MARKETPLACE if failure == "add" else remote_marketplace(tmp_path)],
         marketplace_failures={failure: "network unavailable"},
     )
     before = _state(tmp_path)
@@ -217,7 +262,7 @@ def test_missing_omc_in_replacement_does_not_remove_existing_marketplace(tmp_pat
         tmp_path,
         plugins=[OMC, SUPERPOWERS],
         marketplaces=[STALE_MARKETPLACE],
-        available_omc=False,
+        offers_omc=False,
     )
     with pytest.raises(OmcError, match="omc"):
         ensure_plugin(ctx, "claude", update=True)
@@ -311,3 +356,127 @@ def test_replacement_plugin_install_failure_preserves_existing_plugin(tmp_path):
     assert (
         "plugin marketplace remove oh-my-clanker --scope user" not in calls.read_text().splitlines()
     )
+
+
+STALE_OMC = {**OMC, "version": "0.1.11"}
+
+
+def test_update_advances_a_stale_plugin(tmp_path):
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=[STALE_OMC, SUPERPOWERS],
+        marketplaces=[remote_marketplace(tmp_path)],
+        offered_version="0.1.13",
+    )
+    assert ensure_plugin(ctx, "claude", update=True) == "updated (0.1.11 → 0.1.13)"
+    lines = calls.read_text().splitlines()
+    assert "plugin marketplace update oh-my-clanker" in lines
+    assert "plugin update omc@oh-my-clanker" in lines
+    assert "plugin uninstall omc@oh-my-clanker" not in lines  # stale is never the reinstall path
+    assert _state(tmp_path)["omc@oh-my-clanker"]["version"] == "0.1.13"
+
+
+@pytest.mark.parametrize(("installed", "offered"), [("0.1.11", "0.1.13"), ("0.1.13", "0.1.9")])
+def test_update_that_does_not_move_the_version_fails_loud(tmp_path, installed, offered):
+    # Claude says ok and changes nothing (the shape `omc update` lied about
+    # for three days) — and the downgrade pair: "different" is skew too.
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=[{**OMC, "version": installed}, SUPERPOWERS],
+        marketplaces=[remote_marketplace(tmp_path)],
+        offered_version=offered,
+        update_moves_version=False,
+    )
+    with pytest.raises(OmcError) as info:
+        ensure_plugin(ctx, "claude", update=True)
+    # The update ran and did nothing — not skipped.
+    assert "plugin update omc@oh-my-clanker" in calls.read_text().splitlines()
+    message = str(info.value)
+    assert f"still {installed}" in message
+    assert f"{offered} offered" in message
+    assert "claude plugin update omc@oh-my-clanker" in message
+
+
+def test_stale_plugin_is_healed_on_start_path(tmp_path, capsys):
+    # No update flag: this is what `omc start` and `omc configure` call.
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=[STALE_OMC, SUPERPOWERS],
+        marketplaces=[remote_marketplace(tmp_path)],
+        offered_version="0.1.13",
+    )
+    assert ensure_plugin(ctx, "claude") == "updated (0.1.11 → 0.1.13)"
+    lines = calls.read_text().splitlines()
+    assert "plugin update omc@oh-my-clanker" in lines
+    assert "plugin install omc@oh-my-clanker --scope user" not in lines
+    assert "stale" in capsys.readouterr().err
+
+
+def test_check_only_reports_stale_without_mutating(tmp_path):
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=[STALE_OMC, SUPERPOWERS],
+        marketplaces=[remote_marketplace(tmp_path)],
+        offered_version="0.1.13",
+    )
+    status = ensure_plugin(ctx, "claude", check_only=True)
+    assert status.startswith("stale (0.1.11 → 0.1.13 offered")
+    recorded = calls.read_text()
+    assert "plugin update" not in recorded
+    assert "plugin install" not in recorded
+    assert "plugin marketplace update" not in recorded
+
+
+def test_current_plugin_is_ok_without_update_commands(tmp_path):
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=[{**OMC, "version": "0.1.13"}, SUPERPOWERS],
+        marketplaces=[remote_marketplace(tmp_path)],
+        offered_version="0.1.13",
+    )
+    assert ensure_plugin(ctx, "claude") == "ok"
+    assert "plugin update" not in calls.read_text()
+
+
+def test_unregistered_marketplace_is_not_skew(tmp_path):
+    # omc installed, no oh-my-clanker registration (e.g. installed under
+    # another marketplace name): plumbing is never skew, start proceeds.
+    ctx, calls = _ctx(tmp_path, plugins=[STALE_OMC, SUPERPOWERS], offered_version="0.1.13")
+    assert ensure_plugin(ctx, "claude") == "ok"
+    assert "plugin update" not in calls.read_text()
+
+
+@pytest.mark.parametrize("check_only", [False, True])
+def test_fork_installed_omc_is_not_compared_with_the_canonical_marketplace(tmp_path, check_only):
+    # omc@<other marketplace> installed AND oh-my-clanker registered: the
+    # canonical manifest says nothing about the fork's version, so no skew,
+    # no `plugin update omc@oh-my-clanker` (which Claude would reject).
+    fork = {"id": "omc@my-fork", "version": "0.1.11"}
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=[fork, SUPERPOWERS],
+        marketplaces=[remote_marketplace(tmp_path)],
+        offered_version="0.1.13",
+    )
+    assert ensure_plugin(ctx, "claude", check_only=check_only) == "ok"
+    assert "plugin update" not in calls.read_text()
+
+
+def test_unreadable_manifest_is_not_skew_in_dry_run(tmp_path):
+    # Registered, but the directory is gone (stale worktree) while the plugin
+    # still loads: dry-run says ok rather than crashing over plumbing.
+    ctx, _ = _ctx(tmp_path, plugins=[STALE_OMC, SUPERPOWERS], marketplaces=[STALE_MARKETPLACE])
+    assert ensure_plugin(ctx, "claude", check_only=True) == "ok"
+
+
+@pytest.mark.parametrize("side", ["installed", "offered"])
+def test_unknown_versions_are_not_skew(tmp_path, side):
+    plugins = [{**OMC, "version": ""} if side == "installed" else STALE_OMC, SUPERPOWERS]
+    ctx, calls = _ctx(
+        tmp_path,
+        plugins=plugins,
+        marketplaces=[remote_marketplace(tmp_path)],
+        offered_version=None if side == "offered" else "0.1.13",
+    )
+    assert ensure_plugin(ctx, "claude") == "ok"
+    assert "plugin update" not in calls.read_text()
