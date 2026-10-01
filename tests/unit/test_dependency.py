@@ -672,3 +672,87 @@ def test_document_stall_emits_no_100(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert 'OMC_PROGRESS {"percent": 100}' not in out
     assert "OMC_DEPENDENCY" not in out
+
+
+def _api_config(ctx, *, model="claude-sonnet-5-5", key="sk-ant-test-0123456789abcdef"):
+    from omc.config import store
+    from omc.config.schema import DocsConfig, GlobalConfig, LLMConfig, ProviderConfig, SecretsConfig
+
+    store.save_global(
+        ctx.home,
+        GlobalConfig(
+            llm=LLMConfig(
+                default="claude",
+                docs=DocsConfig(backend="api"),
+                providers={"claude": ProviderConfig(docs_model=model)},
+            )
+        ),
+    )
+    if key:
+        store.save_secrets(ctx.home, SecretsConfig(api_keys={"claude": key}))
+    return key
+
+
+def _env_echoing_node(tmp_path, nodecalls, *, rc=0, stderr=""):
+    node = tmp_path / "bin" / "node"
+    err = f'echo "{stderr}" >&2\n' if stderr else ""
+    node.write_text(
+        f'#!/bin/sh\necho "$@" >> "{nodecalls}"\n'
+        f'echo "KEY=$GITNEXUS_API_KEY" >> "{nodecalls}"\npwd >> "{nodecalls}"\n{err}exit {rc}\n'
+    )
+    node.chmod(node.stat().st_mode | stat.S_IXUSR)
+
+
+def test_document_api_backend_key_only_in_child_env(tmp_path, capsys):
+    ctx, _, nodecalls = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    key = _api_config(ctx)
+    _env_echoing_node(tmp_path, nodecalls)
+    assert run_document(ctx, "github.com/foo/bar") == 0
+    log = nodecalls.read_text()
+    argv_line, key_line = log.splitlines()[0], log.splitlines()[1]
+    assert argv_line.endswith(
+        "wiki --provider custom --base-url https://api.anthropic.com/v1/"
+        " --model claude-sonnet-5-5 --reasoning-model"
+    )
+    assert key_line == f"KEY={key}"  # reached the child env ...
+    assert key not in argv_line  # ... never the argv
+    out = capsys.readouterr()
+    assert key not in out.out + out.err
+    assert "· via claude api (claude-sonnet-5-5)" in out.err
+
+
+def test_document_cli_backend_with_a_stored_key_passes_no_key(tmp_path, capsys):
+    from omc.config import store
+    from omc.config.schema import SecretsConfig
+
+    ctx, _, nodecalls = _ctx(tmp_path)
+    _seed_indexed(ctx)  # default config: backend cli
+    store.save_secrets(ctx.home, SecretsConfig(api_keys={"claude": "sk-ant-test-0123456789abcdef"}))
+    _env_echoing_node(tmp_path, nodecalls)
+    assert run_document(ctx, "github.com/foo/bar") == 0
+    lines = nodecalls.read_text().splitlines()
+    assert lines[0].endswith("wiki --provider claude --model sonnet") and lines[1] == "KEY="
+
+
+def test_document_api_failure_tail_is_redacted_before_truncation(tmp_path, capsys):
+    ctx, _, nodecalls = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    key = _api_config(ctx)
+    # 370 chars of noise, then the key spans offsets 384-412: a naive [:400] would
+    # cut it in half and leak `sk-ant-test-0123`; redaction must happen first,
+    # and the redacted line (395 chars) keeps its ****** inside the cut.
+    _env_echoing_node(tmp_path, nodecalls, rc=1, stderr="x" * 370 + f"LLM API error {key} boom")
+    assert run_document(ctx, "github.com/foo/bar") == 1
+    err = capsys.readouterr().err
+    assert key not in err and key[:12] not in err and "******" in err
+
+
+def test_document_api_without_key_is_a_clean_error(tmp_path, capsys):
+    ctx, _, nodecalls = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    _api_config(ctx, key="")
+    assert run_document(ctx, "github.com/foo/bar") == 1
+    err = capsys.readouterr().err
+    assert "error:" in err and "run omc configure" in err
+    assert not nodecalls.exists()  # resolution fails before any gitnexus call

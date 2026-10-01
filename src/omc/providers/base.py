@@ -92,6 +92,25 @@ class Provider(ABC):
         free-text and move fast — pinning one here would rot)."""
         return ""
 
+    def api_base_url(self) -> str:
+        """HTTP API base URL for the `api` documentation backend, WITH a trailing
+        slash. "" = this provider has no API backend: configure refuses
+        `llm.docs.backend=api` for it (spec 2026-10-01 §2.1/§5)."""
+        return ""
+
+    def api_model_family(self, alias: str) -> str:
+        """Model-id prefix for a CLI family alias ("sonnet" -> "claude-sonnet-").
+        "" = not a family alias, treat the value as a full model id. Full ids are
+        resolved from the provider's LIVE model list at configure time — there is
+        deliberately no static alias→id table anywhere, so nothing rots."""
+        return ""
+
+    def auth_status_argv(self) -> list[str]:
+        """Argv that reports the CLI's login state as JSON with a `loggedIn`
+        boolean; [] = no such command (the headless model probe is the only
+        login check). Pure like everything here."""
+        return []
+
     @abstractmethod
     def plugin_update_argvs(self, marketplace_source: str | None = None) -> list[list[str]]:
         """Commands that update this provider's installed omc plugin, in order.

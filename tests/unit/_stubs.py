@@ -56,6 +56,9 @@ def make_claude_stub(
     offers_omc: bool = True,
     offered_version: str | None = "0.1.0",
     update_moves_version: bool = True,
+    auth_logged_in: bool = True,
+    headless_reply: str = "OK",
+    headless_rc: int = 0,
 ) -> Path:
     """A stateful `claude` stub for plugin-management tests, faithful to the
     real CLI where omc depends on it (claude 2.1.286, 2026-10-01):
@@ -80,12 +83,19 @@ def make_claude_stub(
     - Marketplace add models Claude's source conflict; remove cascades to the
       marketplace's plugins; failures can be injected by operation name.
 
-    `--version` answers like the real CLI. Every other invocation prints
-    ``stdout`` and exits ``rc`` (the slug/verdict path). Every argv line is
-    appended to the returned calls file.
+    `--version` answers like the real CLI. `auth status` answers JSON with
+    ``loggedIn``; `-p "Reply with exactly OK."` (the docsllm probe prompt)
+    answers ``headless_reply``/``headless_rc``; other `-p` prompts keep the
+    generic fallthrough. Every other invocation prints ``stdout`` and exits
+    ``rc`` (the slug/verdict path). Every argv line is appended to the
+    returned calls file.
     """
     import json
     import sys
+
+    # == omc.docsllm.HEADLESS_PROBE_PROMPT (kept literal: tests/_stubs must not
+    # import omc at write time)
+    probe_prompt = "Reply with exactly OK."
 
     bindir.mkdir(parents=True, exist_ok=True)
     root = bindir.parent / "marketplaces"
@@ -144,6 +154,12 @@ def write_manifest(entry):
 
 if args[:1] == ["--version"]:
     print("2.1.286 (Claude Code)"); sys.exit(0)
+if args[:2] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn": {auth_logged_in!r}, "authMethod": "claude.ai",
+                      "apiProvider": "firstParty"}}))
+    sys.exit(0)
+if args[:2] == ["-p", {probe_prompt!r}]:
+    sys.stdout.write({headless_reply!r} + "\\n"); sys.exit({headless_rc})
 if args[:2] == ["plugin", "list"]:
     entries = json.loads(state.read_text())
     if "--json" in args:

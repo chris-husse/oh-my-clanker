@@ -12,8 +12,20 @@ class ProviderConfig:
 
 
 @dataclass
+class DocsConfig:
+    """How documentation (GitNexus wiki) is generated — spec 2026-10-01 §2.1.
+    provider: which configured provider documents; blank = llm.default.
+    backend: "cli" (the provider CLI, today's path) or "api" (the provider's
+    HTTP API with the key stored in secrets.yaml)."""
+
+    provider: str = ""
+    backend: str = "cli"
+
+
+@dataclass
 class LLMConfig:
     default: str = "claude"
+    docs: DocsConfig = field(default_factory=DocsConfig)
     providers: dict[str, ProviderConfig] = field(
         default_factory=lambda: {"claude": ProviderConfig()}
     )
@@ -32,6 +44,16 @@ class NotificationsConfig:
 
 
 @dataclass
+class SecretsConfig:
+    """Persisted at <home>/secrets.yaml, mode 0600 — API keys per provider
+    (spec 2026-10-01 §2.2). repr=False: a traceback, print(cfg) or a pytest
+    assertion diff must never show a key."""
+
+    schema_version: int = 1
+    api_keys: dict[str, str] = field(default_factory=dict, repr=False)
+
+
+@dataclass
 class Config:
     """Runtime composite of GlobalConfig + ProjectConfig; also the hydration
     shape of the legacy combined ~/.omc/config.json. Never persisted as one
@@ -41,6 +63,9 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
+    # Composed from <home>/secrets.yaml by resolve.load_effective; never persisted
+    # as part of this composite. repr=False: see SecretsConfig.
+    secrets: SecretsConfig = field(default_factory=SecretsConfig, repr=False)
 
 
 @dataclass

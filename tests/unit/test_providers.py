@@ -224,3 +224,28 @@ def test_notifies_natively_flags():
     # codex: no native channel — omc's alert is its only one.
     assert get_provider("claude").notifies_natively() is True
     assert get_provider("codex").notifies_natively() is False
+
+
+def test_api_backend_adapter_defaults_and_claude_values():
+    claude, codex = get_provider("claude"), get_provider("codex")
+    # Trailing slash is deliberate: GitNexus strips it; omc joins without "//".
+    assert claude.api_base_url() == "https://api.anthropic.com/v1/"
+    assert codex.api_base_url() == ""  # no API documentation backend → configure refuses `api`
+    assert claude.auth_status_argv() == ["claude", "auth", "status"]
+    assert codex.auth_status_argv() == []
+
+
+@pytest.mark.parametrize(
+    ("alias", "prefix"),
+    [
+        ("fable", "claude-fable-"),
+        ("opus", "claude-opus-"),
+        ("sonnet", "claude-sonnet-"),
+        ("claude-sonnet-5-5", ""),  # a full id is not a family alias
+        ("haiku", ""),  # never a family: the cheap tier is never used (tier policy)
+        ("", ""),
+    ],
+)
+def test_claude_api_model_family(alias, prefix):
+    assert get_provider("claude").api_model_family(alias) == prefix
+    assert get_provider("codex").api_model_family(alias) == ""

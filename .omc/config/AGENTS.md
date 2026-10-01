@@ -54,8 +54,12 @@ the bug).
 
 ## Architectural invariants
 
-- **`ToolContext` (src/omc/toolctx.py) is the only subprocess/env boundary.**
-  Nothing else imports subprocess or reads `~/.omc`. Argv lists only — never
+- **`ToolContext` (src/omc/toolctx.py) is the only subprocess/env/network
+  boundary.** Nothing else spawns a process, imports `urllib`, or reads
+  `~/.omc` (`http_get` is omc's single network call). The only *runtime*
+  `subprocess` imports outside it are for `subprocess.TimeoutExpired` in
+  `except` clauses (notify.py, watch.py); gitnexus.py's is annotation-only
+  under `TYPE_CHECKING` — add no more. Argv lists only — never
   `shell=True`; user-controlled strings go through `shlex.quote`.
 - Exit codes: 0 ok, 1 error (`OmcError`), 2 refusal (`Refusal`),
   3 bail (`omc internal` only: "inconclusive, caller falls back to its own
