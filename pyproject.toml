@@ -39,7 +39,7 @@ path = "hatch_build.py"
 testpaths = ["tests"]
 markers = [
     "e2e: dockerized end-to-end tests (opt-in, slow, real LLMs)",
-    "local_iterm2: macOS iTerm2 desktop and authenticated local provider TUIs (explicit host tier)",
+    "local_iterm2: macOS native tier — launches a private iTerm2 instance and real provider TUIs (just iterm2-tests)",
     "e2e_provider(name): declare provider intent for E2E container prerequisites",
     "expensive: LLM-heavy E2E (documentation generation) - run only with explicit user agreement",
 ]

@@ -1,7 +1,9 @@
 import shlex
+import sys
 
 import pytest
 
+from omc.fish_integration import fish_hook_path
 from omc.shells.base import TMPDIR_PLACEHOLDER
 from omc.shells.registry import detect_shell
 
@@ -93,3 +95,80 @@ def test_exec_interactive_forwards_title_helper(monkeypatch):
     monkeypatch.setattr(base.os, "execvp", lambda program, argv: executed.append(argv))
     shell.exec_interactive(**ARGS, title_argv=["/usr/bin/title-helper"])
     assert executed and "/usr/bin/title-helper proj-1-fix" in executed[0][2]
+
+
+FISH_TITLE_ARGV = ["/usr/bin/python3", "-m", "omc.terminal_title"]
+
+
+def _inline_else(helper, title, cwd):
+    """Today's inline fish title code, frozen byte for byte (spec §6)."""
+    return "; ".join(
+        [
+            f"set -g __omc_desired_title {shlex.quote(title)}",
+            "set -g __omc_last_attempt ''",
+            'function fish_title; printf "%s\\n" "$__omc_desired_title"; end',
+            "function __omc_refresh_title",
+            "set -l saved_status $status",
+            "set -l branch (command git branch --show-current 2>/dev/null)",
+            'if test $status -eq 0; and test -n "$branch"; '
+            'set -g __omc_desired_title "$branch"; end',
+            'if test "$__omc_last_attempt" != "$__omc_desired_title"',
+            'set -g __omc_last_attempt "$__omc_desired_title"',
+            f'{helper} "$__omc_desired_title"; or true',
+            "end",
+            "return $saved_status",
+            "end",
+            "function __omc_title_preexec --on-event fish_preexec; __omc_refresh_title; end",
+            "function __omc_title_prompt --on-event fish_prompt; __omc_refresh_title; end",
+            "function __omc_title_pwd --on-variable PWD; __omc_refresh_title; end",
+            f"cd {shlex.quote(cwd)}",
+            "__omc_refresh_title",
+        ]
+    )
+
+
+def test_fish_generated_command_is_one_if_else_around_the_hook(monkeypatch):
+    monkeypatch.setattr(sys, "executable", "/opt/py/bin/python3")
+    argv, files = detect_shell({"SHELL": "fish"}).build_invocation(
+        **ARGS, title_argv=FISH_TITLE_ARGV
+    )
+    assert files == {} and argv[:3] == ["fish", "-i", "-C"]
+    body = argv[3]
+    assert body.count("; else; ") == 1
+    if_branch, rest = body.split("; else; ", 1)
+    else_branch, startup = rest.rsplit("; end; ", 1)
+    assert startup == shlex.join(ARGS["startup_argv"])
+    predicate = if_branch.split("; set -g __omc_title_helper", 1)[0]
+    assert predicate == (
+        "if status is-interactive; and string match -rq -- "
+        "'^(w[0-9]+t[0-9]+p[0-9]+:)?[0-9A-Fa-f-]{36}$' \"$ITERM_SESSION_ID\"; "
+        'and begin; test "$TERM_PROGRAM" = iTerm.app; or test "$LC_TERMINAL" = iTerm2; end; '
+        'and not set -q TMUX; and not set -q STY; and test "$OMC_FISH_TITLE_DISABLE" != 1'
+    )
+    steps = [
+        "set -g __omc_title_helper /opt/py/bin/python3 -m omc",
+        f"source {shlex.quote(str(fish_hook_path()))}",
+        "cd /w/tree",
+        "__omc_title_refresh",
+    ]
+    positions = [if_branch.index(step) for step in steps]
+    assert positions == sorted(positions) and if_branch.endswith("__omc_title_refresh")
+    assert else_branch == _inline_else(shlex.join(FISH_TITLE_ARGV), "proj-1-fix", "/w/tree")
+    assert '/usr/bin/python3 -m omc.terminal_title "$__omc_desired_title"' in else_branch
+
+
+def test_fish_without_title_argv_is_unchanged():
+    argv, _ = detect_shell({"SHELL": "fish"}).build_invocation(**ARGS)
+    assert "; else; " not in argv[3] and "__omc_title_helper" not in argv[3]
+    assert argv[3] == (
+        "function fish_title; echo proj-1-fix; end; cd /w/tree; "
+        f"printf '%s' {shlex.quote(ARGS['title_seq'])}; {shlex.join(ARGS['startup_argv'])}"
+    )
+
+
+def test_fish_dry_run_output_is_terminal_independent():
+    # The builder never reads the environment: identical output whatever the terminal.
+    shell = detect_shell({"SHELL": "fish"})
+    first, _ = shell.build_invocation(**ARGS, title_argv=FISH_TITLE_ARGV)
+    second, _ = shell.build_invocation(**ARGS, title_argv=FISH_TITLE_ARGV)
+    assert first == second

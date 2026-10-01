@@ -5,6 +5,8 @@ OSC 0 remains the best-effort fallback when the iTerm2 API cannot pin a tab.
 
 from __future__ import annotations
 
+import re
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
@@ -42,6 +44,28 @@ class OscTerminal(Terminal):
         return True
 
 
+_SESSION_PREFIX = re.compile(r"w\d+t\d+p\d+")
+
+
+def iterm2_session_id(env: Mapping[str, str]) -> str | None:
+    """The bare session UUID from ITERM_SESSION_ID (`w0t1p0:<uuid>` or `<uuid>`), else None.
+
+    UUID round trip plus the optional window/tab/pane prefix: the value names the
+    caller's own tab to the API worker, so anything looser is refused.
+    """
+    raw = env.get("ITERM_SESSION_ID", "")
+    prefix, separator, candidate = raw.partition(":")
+    if not separator:
+        candidate = raw
+    elif _SESSION_PREFIX.fullmatch(prefix) is None:
+        return None
+    try:
+        parsed = uuid.UUID(candidate)
+    except ValueError:
+        return None
+    return candidate if str(parsed).lower() == candidate.lower() else None
+
+
 class Iterm2Terminal(OscTerminal):
     name = "iterm2"
 
@@ -50,34 +74,14 @@ class Iterm2Terminal(OscTerminal):
         return env.get("TERM_PROGRAM") == "iTerm.app" or env.get("LC_TERMINAL") == "iTerm2"
 
     def set_title(self, ctx: ToolContext, title: str) -> bool:
-        import re
         import sys
-        import uuid
 
-        raw_id = ctx.env.get("ITERM_SESSION_ID", "")
-        prefix, separator, suffix = raw_id.partition(":")
-        session_id = suffix if separator else raw_id
-        try:
-            parsed = uuid.UUID(session_id)
-            valid = str(parsed).lower() == session_id.lower() and (
-                not separator or re.fullmatch(r"w\d+t\d+p\d+", prefix) is not None
-            )
-        except ValueError:
-            valid = False
-        if valid:
+        from .iterm2_title import worker_argv
+
+        session_id = iterm2_session_id(ctx.env)
+        if session_id is not None:
             try:
-                result = ctx.run_bounded(
-                    [
-                        sys.executable,
-                        "-m",
-                        "omc.iterm2_title",
-                        "--session-id",
-                        session_id,
-                        "--",
-                        title,
-                    ],
-                    timeout=5,
-                )
+                result = ctx.run_bounded(worker_argv(session_id, title=title), timeout=5)
                 if result.returncode == 0:
                     return True
             except (TimeoutError, OSError):

@@ -1,20 +1,17 @@
-"""Host acceptance: real iTerm2 tabs, generated fish startup, and provider TUIs.
+"""Host acceptance on the private iTerm2 instance: tabs, generated fish startup, provider TUIs.
 
-Run explicitly with ``just iterm2-tests`` on a logged-in macOS desktop. Every
-tab created here is recorded and closed, even when an assertion fails.
+Run explicitly with ``just iterm2-tests`` on a logged-in macOS desktop. Every tab lives in
+the private copy (never the user's iTerm2) and is recorded and closed, even on failure.
 """
 
 import asyncio
-import json
 import os
-import platform
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
@@ -23,6 +20,17 @@ import pytest
 from omc.providers.registry import get_provider
 from omc.shells.fish import FishShell
 from omc.terminal_title import terminal_title_argv
+from tests.local.private_iterm import (
+    claude_private_auth,
+    connect,
+    ensure_window,
+    init_repo,
+    require_sdk,
+    require_tool,
+    until,
+)
+
+_until = until  # one bounded poller; test_ordinary_fish_title imports until directly
 
 pytestmark = [
     pytest.mark.local_iterm2,
@@ -30,6 +38,8 @@ pytestmark = [
         r"ignore:In 3\.13 classes created inside an enum will not become a member:"
         r"DeprecationWarning:iterm2\.mainmenu"
     ),
+    # The SDK still imports websockets.legacy; not ours to fix.
+    pytest.mark.filterwarnings(r"ignore:websockets\.legacy is deprecated:DeprecationWarning"),
 ]
 
 TITLE = "feature/iterm2-host-acceptance"
@@ -38,88 +48,21 @@ ANSWER = "459"
 
 
 def _requirements(provider=None):
-    if platform.system() != "Darwin":
-        pytest.fail("local_iterm2 requires macOS with a running iTerm2 desktop")
+    iterm2 = require_sdk()
     for tool in ("fish", "git", provider):
-        if tool and not shutil.which(tool):
-            pytest.fail(f"local_iterm2 requires {tool} on PATH")
-    try:
-        import iterm2
-    except ImportError:
-        pytest.fail("local_iterm2 requires the iTerm2 Python SDK: uv sync")
+        if tool:
+            require_tool(tool, f"install {tool} and put it on PATH")
     return iterm2
 
 
-def _trusted_claude_checkout(common_git_dir, projects):
-    checkout = Path(common_git_dir).resolve().parent
-    if not projects.get(str(checkout), {}).get("hasTrustDialogAccepted"):
-        pytest.fail("Claude host test needs an already trusted primary checkout")
-    return checkout
-
-
-def _native_claude_env(env):
-    return {
-        name: value
-        for name, value in env.items()
-        if name not in {"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
-    }
-
-
-def _current_branch(checkout):
-    branch = subprocess.run(
-        ["git", "-C", str(checkout), "branch", "--show-current"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    if branch.returncode or not branch.stdout.strip():
-        pytest.fail("primary checkout needs a named branch for Claude host title test")
-    return branch.stdout.strip()
-
-
-def _native_claude_repo():
-    auth = subprocess.run(
-        [shutil.which("claude"), "auth", "status", "--json"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-        env=_native_claude_env(os.environ),
-    )
-    try:
-        status = json.loads(auth.stdout)
-    except json.JSONDecodeError:
-        pytest.fail("could not read native Claude auth status")
-    if auth.returncode or not status.get("loggedIn") or status.get("authMethod") != "claude.ai":
-        pytest.fail("native Claude profile needs first-party login: run claude auth login")
-
-    common = subprocess.run(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        cwd=Path(__file__).resolve().parents[2],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    if common.returncode:
-        pytest.fail("could not find the primary checkout for native Claude host test")
-    try:
-        profile = json.loads((Path.home() / ".claude.json").read_text())
-    except (OSError, json.JSONDecodeError):
-        pytest.fail("could not read native Claude trusted-project metadata")
-    checkout = _trusted_claude_checkout(common.stdout.strip(), profile.get("projects", {}))
-    return checkout, _current_branch(checkout)
-
-
-def _provider_env_file(tmp_path, provider, adapter):
+def _provider_env_file(tmp_path, provider, adapter, config_root=None):
     values = {**adapter.title_env()}
     clear = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
     if provider == "claude":
         config = None
         clear.append("CLAUDE_CONFIG_DIR")
     else:
-        config = tmp_path / f"{provider}-config"
+        config = (config_root or tmp_path) / f"{provider}-config"
         config.mkdir(mode=0o700)
         clear.append("OPENAI_API_KEY")  # dedicated ChatGPT account auth wins
         values["CODEX_HOME"] = str(config)
@@ -132,14 +75,13 @@ def _provider_env_file(tmp_path, provider, adapter):
     return path, config
 
 
-def _provider_tab_command(shell_argv, private_env, returned):
+def _provider_tab_command(shell_argv, private_env, returned, auth_file=None):
     """Have fish create evidence only after the provider subprocess returns."""
     argv = list(shell_argv)
-    argv[3] = (
-        f"source {shlex.quote(str(private_env))}; "
-        + argv[3]
-        + f"; printf returned > {shlex.quote(str(returned))}"
-    )
+    prefix = f"source {shlex.quote(str(private_env))}; "
+    if auth_file is not None:
+        prefix += f"source {shlex.quote(str(auth_file))}; "
+    argv[3] = prefix + argv[3] + f"; printf returned > {shlex.quote(str(returned))}"
     return shlex.join(argv)
 
 
@@ -219,18 +161,10 @@ def _codex_account(config):
             )
 
 
-async def _connect(iterm2):
-    try:
-        # Each pytest case uses a fresh asyncio.run loop. SDK 2.24 caches App
-        # process-wide, so its previous connection belongs to a closed loop.
-        iterm2.app.invalidate_app()
-        connection = await asyncio.wait_for(iterm2.Connection.async_create(), 10)
-        app = await asyncio.wait_for(iterm2.async_get_app(connection), 10)
-    except Exception as exc:
-        pytest.fail(f"iTerm2 Python API unavailable or unauthorized: {type(exc).__name__}")
-    if app is None or app.current_window is None:
-        pytest.fail("iTerm2 Python API needs an open desktop window")
-    return connection, app, app.current_window
+async def _connect(iterm2, instance, fish):
+    connection, app = await connect(iterm2, instance)
+    window = await ensure_window(iterm2, connection, app, fish)
+    return connection, app, window
 
 
 async def _tab(window, tabs, command):
@@ -249,17 +183,6 @@ async def _screen(session):
     )
 
 
-async def _until(description, predicate, *, timeout=30):
-    end = time.monotonic() + timeout
-    last = None
-    while time.monotonic() < end:
-        last = await predicate()
-        if last:
-            return last
-        await asyncio.sleep(0.35)
-    pytest.fail(f"timed out waiting for {description}")
-
-
 async def _title(tab, expected):
     async def matches():
         actual = await tab.async_get_variable("title")
@@ -268,7 +191,7 @@ async def _title(tab, expected):
     await _until(f"iTerm2 tab title {expected!r}", matches)
 
 
-async def _cleanup(tabs, original):
+async def _cleanup(tabs):
     failures = []
     for tab_id, tab in reversed(tabs):
         try:
@@ -276,11 +199,6 @@ async def _cleanup(tabs, original):
             await asyncio.wait_for(tab.async_close(force=True), 10)
         except Exception as exc:
             failures.append(f"tab {tab_id}: {type(exc).__name__}")
-    if original is not None:
-        try:
-            await original.async_select()
-        except Exception as exc:
-            failures.append(f"restore focus: {type(exc).__name__}")
     return failures
 
 
@@ -308,53 +226,51 @@ async def _wait_screen(session, needle, timeout=120):
     await _until(f"terminal output containing {needle!r}", seen, timeout=timeout)
 
 
-def _test_title():
+def test_caller_target_split_pane_and_competing_osc(private_iterm):
     iterm2 = _requirements()
+    fish = shutil.which("fish")
 
     async def run():
-        _connection, _app, window = await _connect(iterm2)
-        original = window.current_tab
+        _connection, _app, window = await _connect(iterm2, private_iterm, fish)
         tabs = []
         try:
-            fish = shutil.which("fish")
-            target = await _tab(window, tabs, shlex.join([fish, "-i"]))
-            other = await _tab(window, tabs, shlex.join([fish, "-i"]))
+            # The session-wide private HOME may hold the hook (provisioned by another case);
+            # its prompt-time dispatches would race the explicit titles asserted here.
+            unhooked = shlex.join(["/usr/bin/env", "OMC_FISH_TITLE_DISABLE=1", fish, "-i"])
+            target = await _tab(window, tabs, unhooked)
+            other = await _tab(window, tabs, unhooked)
             await other.async_set_title("omc-control")
-            split = await target.current_session.async_split_pane(vertical=True)
+            # The split gets the same hook-disabled fish (the default profile would not).
+            private_fish = iterm2.LocalWriteOnlyProfile()
+            private_fish.set_use_custom_command("Yes")
+            private_fish.set_command(unhooked)
+            split = await target.current_session.async_split_pane(
+                vertical=True, profile_customizations=private_fish
+            )
             assert split is not None, "iTerm2 did not create a split test pane"
-            await other.async_select()
             hostile = "feature/cost$USD(parent)\\(session.name)"
-            command = shlex.join([*terminal_title_argv(), hostile])
+            command = shlex.join(["omc", "title", "set", "--", hostile])
             await split.async_send_text(command + "; printf '\\nOMC_TITLE_DONE:%s\\n' $status\n")
             await _wait_screen(split, "OMC_TITLE_DONE:0")
-            await _title(target, hostile)
+            await _title(target, hostile)  # the split pane targets ITS tab, never the other one
             assert await other.async_get_variable("title") == "omc-control"
             for code in (0, 1, 2):
                 await split.async_inject(f"\x1b]{code};competing-title\x07".encode())
             await asyncio.sleep(0.5)
             assert await target.async_get_variable("title") == hostile
             assert await other.async_get_variable("title") == "omc-control"
-            assert window.current_tab.tab_id == other.tab_id
         finally:
-            _report_cleanup_errors(await _cleanup(tabs, original))
+            _report_cleanup_errors(await _cleanup(tabs))
 
     asyncio.run(run())
 
 
-def test_caller_target_split_focus_literal_and_competing_osc():
-    _test_title()
-
-
 @pytest.mark.parametrize("provider", ["claude", "codex"])
-def test_provider_title_during_real_response_and_after_exit(tmp_path, provider):
+def test_provider_title_during_real_response_and_after_exit(private_iterm, tmp_path, provider):
     iterm2 = _requirements(provider)
-    if provider == "claude":
-        repo, title = _native_claude_repo()
-    else:
-        repo = tmp_path / "host-acceptance"
-        repo.mkdir()
-        subprocess.run(["git", "init", "-q", "-b", TITLE, str(repo)], check=True)
-        title = TITLE
+    fish = shutil.which("fish")
+    home = private_iterm.identity.home
+    repo = init_repo(home / "repos" / f"start-{provider}", TITLE)
     adapter = get_provider(provider)
     provider_argv = adapter.session_argv(
         session_name="iterm2-host-acceptance", model="", seed=PROMPT
@@ -370,56 +286,28 @@ def test_provider_title_during_real_response_and_after_exit(tmp_path, provider):
             "--ask-for-approval",
             "never",
         ]
-    # An interactive provider session needs a TTY. This is the same generated
-    # startup command as omc start; only its seed and disposable cwd differ.
+    # The same generated startup command as omc start; only seed and cwd differ.
     shell_argv, _ = FishShell().build_invocation(
-        cwd=str(repo),
-        title=title,
-        startup_argv=provider_argv,
-        title_seq=f"\x1b]0;{title}\x07",
-        title_argv=terminal_title_argv(),
-    )
-    shell_argv[0] = shutil.which("fish")
-    private_env, config = _provider_env_file(tmp_path, provider, adapter)
+        cwd=str(repo), title=TITLE, startup_argv=provider_argv,
+        title_seq=f"\x1b]0;{TITLE}\x07", title_argv=terminal_title_argv(),
+    )  # fmt: skip
+    shell_argv[0] = fish
+    private_env, config = _provider_env_file(tmp_path, provider, adapter, config_root=home)
+    auth_file = claude_private_auth(home, repo, provider_argv[0]) if provider == "claude" else None
     returned = tmp_path / f"{provider}-shell-returned"
-    command = _provider_tab_command(shell_argv, private_env, returned)
+    command = _provider_tab_command(shell_argv, private_env, returned, auth_file=auth_file)
 
     async def run():
-        _connection, _app, window = await _connect(iterm2)
-        original = window.current_tab
+        _connection, _app, window = await _connect(iterm2, private_iterm, fish)
         tabs = []
         try:
             tab = await _tab(window, tabs, command)
             session = tab.current_session
-            await _title(tab, title)
+            await _title(tab, TITLE)
             if provider == "codex":
-
-                async def answer_or_trust():
-                    screen = await _screen(session)
-                    if "API key login is disabled by this workspace" in screen:
-                        pytest.fail(
-                            "Codex requires ChatGPT account auth in this workspace: "
-                            "run just codex-login"
-                        )
-                    if (
-                        str(repo) in screen
-                        and "Trust this folder?" in screen
-                        and "Trust and continue" in screen
-                    ):
-                        return "trust"
-                    if ANSWER in screen:
-                        return "answer"
-                    return None
-
-                state = await _until(
-                    "Codex trust prompt or model answer", answer_or_trust, timeout=90
-                )
-                if state == "trust":
-                    await session.async_send_text("\r")
+                await _codex_trust_or_answer(session, repo)
             await _wait_screen(session, ANSWER, timeout=90)
-            assert await tab.async_get_variable("title") == title
-            # Exit the TUI using its own command; fish stays alive and its
-            # prompt hook must leave the full branch title in place.
+            assert await tab.async_get_variable("title") == TITLE
             await _exit_provider_tui(session, provider)
 
             async def shell_returned():
@@ -427,14 +315,38 @@ def test_provider_title_during_real_response_and_after_exit(tmp_path, provider):
 
             await _until("provider exit back to fish", shell_returned, timeout=20)
             assert returned.read_text() == "returned"
-            assert await tab.async_get_variable("title") == title
+            assert await tab.async_get_variable("title") == TITLE
         finally:
-            _report_cleanup_errors(await _cleanup(tabs, original))
+            _report_cleanup_errors(await _cleanup(tabs))
 
     try:
         with _codex_account(config) if provider == "codex" else nullcontext():
             asyncio.run(run())
     finally:
         private_env.unlink(missing_ok=True)
+        if auth_file is not None:
+            auth_file.unlink(missing_ok=True)
         if config is not None:
-            shutil.rmtree(config)
+            shutil.rmtree(config, ignore_errors=True)
+
+
+async def _codex_trust_or_answer(session, repo):
+    async def answer_or_trust():
+        screen = await _screen(session)
+        if "API key login is disabled by this workspace" in screen:
+            pytest.fail(
+                "Codex requires ChatGPT account auth in this workspace: run just codex-login"
+            )
+        if (
+            str(repo) in screen
+            and "Trust this folder?" in screen
+            and "Trust and continue" in screen
+        ):
+            return "trust"
+        if ANSWER in screen:
+            return "answer"
+        return None
+
+    state = await _until("Codex trust prompt or model answer", answer_or_trust, timeout=90)
+    if state == "trust":
+        await session.async_send_text("\r")

@@ -4,9 +4,11 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 
 import pytest
 
+from omc.fish_integration import fish_hook_path
 from omc.shells.fish import FishShell
 
 
@@ -36,9 +38,24 @@ def fish_session(tmp_path):
     config.mkdir(parents=True)
     (config / "config.fish").write_text('echo USER_CONFIG >> "$OMC_TITLE_LOG"\n')
     log = tmp_path / "titles.log"
-    env = {**os.environ, "OMC_TITLE_LOG": str(log), "XDG_CONFIG_HOME": str(tmp_path / "config")}
+    scrub = (
+        "ITERM_SESSION_ID", "TERM_PROGRAM", "LC_TERMINAL", "TMUX", "STY", "OMC_FISH_TITLE_DISABLE",
+        "XDG_CACHE_HOME", "XDG_DATA_HOME",
+    )  # fmt: skip
+    base = {k: v for k, v in os.environ.items() if k not in scrub}
+    # Pre-created so fish's interactive init never runs a bare `mkdir` on a restricted PATH
+    # (the double-sourcing case below runs with PATH = stub dir).
+    for base_dir in ("cache", "data"):
+        (tmp_path / base_dir / "fish" / "generated_completions").mkdir(parents=True)
+    env = {
+        **base,
+        "OMC_TITLE_LOG": str(log),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+    }
 
-    def run(extra="", *, title_argv=None, startup=None):
+    def run(extra="", *, title_argv=None, startup=None, env_extra=None):
         argv, files = FishShell().build_invocation(
             cwd=str(repo),
             title="feature/first",
@@ -50,7 +67,12 @@ def fish_session(tmp_path):
         argv[0] = fish
         argv[3] += "; " + extra + "; exit"
         proc = subprocess.run(
-            argv, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15
+            argv,
+            cwd=tmp_path,
+            env={**env, **(env_extra or {})},
+            capture_output=True,
+            text=True,
+            timeout=25,
         )
         return proc, log.read_text().splitlines() if log.exists() else []
 
@@ -144,4 +166,66 @@ def test_refresh_preserves_previous_command_status(fish_session):
     proc, lines = run("false; __omc_refresh_title; echo STATUS:$status")
     assert proc.returncode == 0, proc.stderr
     assert "STATUS:1" in proc.stdout
+    assert lines == ["USER_CONFIG", "feature/first", "STARTUP"]
+
+
+def test_generated_start_in_iterm2_dispatches_exactly_one_set_despite_double_sourcing(
+    fish_session, tmp_path, monkeypatch
+):
+    repo, run = fish_session
+    # The builder embeds sys.executable as the hook's helper; point it at a recorder that
+    # accepts `-m omc title apply <file>` so no real SDK worker can run.
+    fake_python = tmp_path / "fake python"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$OMC_TITLE_LOG"\n'
+        'if [ "$4" = apply ] && [ -r "$5" ]; then IFS= read -r l < "$5"; '
+        'printf \'request: %s\\n\' "$l" >> "$OMC_TITLE_LOG"; fi\n'
+        "exit 0\n"
+    )
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(fake_python))
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "git").symlink_to(shutil.which("git"))
+    (stubs / "omc").write_text(
+        '#!/bin/sh\nprintf \'PATH-OMC %s\\n\' "$*" >> "$OMC_TITLE_LOG"\nexit 0\n'
+    )
+    (stubs / "omc").chmod(0o755)
+    confd = tmp_path / "config" / "fish" / "conf.d"
+    confd.mkdir(parents=True)
+    shutil.copyfile(fish_hook_path(), confd / "omc-title.fish")  # conf.d copy: the first sourcing
+    wait = (
+        "set -l t 0; while test $t -lt 200; "
+        "and test (count (string match -r '^request:' <$OMC_TITLE_LOG)) -lt 1; "
+        "set t (math $t + 1); /bin/sleep 0.05; end"
+    )
+    proc, lines = run(
+        f"emit fish_prompt; emit fish_prompt; {wait}; /bin/sleep 0.2",
+        env_extra={
+            "ITERM_SESSION_ID": "w0t1p0:38B11221-B7E1-4F36-8A3B-50D549172632",
+            "TERM_PROGRAM": "iTerm.app",
+            "PATH": str(stubs),
+            "OMC_HOME": str(tmp_path / "omc-home"),
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "USER_CONFIG" in lines and "STARTUP" in lines
+    assert len([ln for ln in lines if ln.startswith("-m omc title apply ")]) == 1
+    assert [ln for ln in lines if ln.startswith("request: ")] == ["request: set feature/first"]
+    # the preset helper is never overridden
+    assert not any(ln.startswith("PATH-OMC") for ln in lines)
+    assert "feature/first" not in lines  # the inline recorder (else branch) did not run
+
+
+def test_generated_start_with_session_disable_uses_inline_path(fish_session):
+    _, run = fish_session
+    proc, lines = run(
+        env_extra={
+            "ITERM_SESSION_ID": "w0t1p0:38B11221-B7E1-4F36-8A3B-50D549172632",
+            "TERM_PROGRAM": "iTerm.app",
+            "OMC_FISH_TITLE_DISABLE": "1",
+        }
+    )
+    assert proc.returncode == 0, proc.stderr
     assert lines == ["USER_CONFIG", "feature/first", "STARTUP"]

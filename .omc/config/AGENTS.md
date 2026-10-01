@@ -29,7 +29,8 @@ the bug).
   A missing prerequisite is a `pytest.fail` naming the exact command that
   satisfies it (missing token → "put an ANTHROPIC_API_KEY in .env …").
 - Tier *selection* is allowed: `just check` (fast gate: unit tests, no
-  LLM/network/Docker) vs `just build` (ruff + package build, no tests) vs
+  LLM/Docker; network only for the installed-wheel test on a cold uv cache)
+  vs `just build` (ruff + package build, no tests) vs
   `just e2e-tests` (Docker-per-test, real LLMs, token-gated). Within a
   selected tier, every test runs or fails loud.
 
@@ -76,6 +77,11 @@ the bug).
   a stale branch multiple times. Installing is a USER decision, made from
   the primary checkout on `main`; if a task seems to require reinstalling
   omc, stop and tell the user the exact command instead of running it.
+  The one exception is `tests/unit/test_installed_wheel.py`: it installs a wheel
+  it just built (never a checkout path, so no `omc update` is re-rooted) into a
+  private `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`, with `OMC_HOME`, `HOME` and every
+  `XDG_*` asserted to lie under pytest's tmp before uv runs; only the host uv
+  cache is shared, so on a cold cache this one `just check` test needs network.
 
 ## Build & verify
 

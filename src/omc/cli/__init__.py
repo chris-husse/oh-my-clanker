@@ -124,6 +124,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--cache-dir", default=None, help="Session cache dir (default ~/.omc/aws-credential-cache)"
     )
 
+    p_title = sub.add_parser(
+        "title", help="Pin or release this iTerm2 tab's title (quiet; used by the fish hook)"
+    )
+    title_sub = p_title.add_subparsers(dest="title_command", required=True)
+    p_title_set = title_sub.add_parser(
+        "set", help="Pin the caller's tab title: omc title set -- <title>"
+    )
+    p_title_set.add_argument("title")
+    title_sub.add_parser("release", help="Restore iTerm2's live default title for the caller's tab")
+    p_title_apply = title_sub.add_parser(
+        "apply", help="Apply a hook-written request file (serialized)"
+    )
+    p_title_apply.add_argument("request_file")
+
+    p_shell = sub.add_parser(
+        "shell-integration", help="Manage the fish tab-title hook (enable|disable|status|reconcile)"
+    )
+    shell_sub = p_shell.add_subparsers(dest="shell", required=True)
+    p_fish = shell_sub.add_parser("fish")
+    p_fish.add_argument("action", choices=("enable", "disable", "status", "reconcile"))
+
     p_install = sub.add_parser("install", help="(Re)install omc from a local checkout")
     p_install.add_argument("path", nargs="?", default=".", help="Checkout path (default: .)")
 
@@ -173,12 +194,27 @@ def _run(raw: list[str]) -> int:
     # version/print-install-path: stdout is a one-line machine contract.
     # aws-credential-process: stdout is the credential_process JSON contract, and it
     # must work on a machine that never ran `omc configure`.
-    if args.command not in ("version", "print-install-path", "aws-credential-process"):
+    # title/shell-integration: quiet helpers driven by the fish hook and the installer.
+    if args.command not in (
+        "version",
+        "print-install-path",
+        "aws-credential-process",
+        "title",
+        "shell-integration",
+    ):
         print(f"Oh My Clanker! v{__version__}", file=sys.stderr)
     return _dispatch(ctx, args)
 
 
 def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
+    if args.command == "title":
+        from ..title import run_title_command  # lazy, never loads configuration
+
+        return run_title_command(ctx, args)
+    if args.command == "shell-integration":
+        from ..fish_integration import run_fish_integration  # lazy, never loads configuration
+
+        return run_fish_integration(ctx, args.action)
     if args.command == "version":
         from ..installsrc import version_string
 

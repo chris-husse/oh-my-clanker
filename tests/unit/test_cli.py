@@ -166,3 +166,73 @@ def test_service_account_token_flag_is_optional_and_defaults_to_none():
     assert parser.parse_args(base).with_service_account_token is None
     args = parser.parse_args([*base, "--with-service-account-token", "/etc/op/token"])
     assert args.with_service_account_token == "/etc/op/token"
+
+
+def test_python_dash_m_omc_is_the_cli():
+    import subprocess
+    import sys
+
+    cp = subprocess.run(
+        [sys.executable, "-m", "omc", "--version"], capture_output=True, text=True, timeout=30
+    )
+    assert cp.returncode == 0
+    assert cp.stdout.startswith("omc ")
+
+
+def test_title_and_shell_integration_are_banner_exempt():
+    import inspect
+
+    from omc.cli import _run  # the banner tuple lives in _run; both names must be exempt
+
+    source = inspect.getsource(_run)
+    assert '"title"' in source and '"shell-integration"' in source
+
+
+def test_shell_integration_is_quiet_unconfigured_and_refuses_with_exit_2(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "omc"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    assert main(["shell-integration", "fish", "enable"]) == 0
+    assert capsys.readouterr() == ("", "")  # no banner, nothing on success
+    assert main(["shell-integration", "fish", "status"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["owned"] is True and captured.err == ""
+    assert main(["shell-integration", "fish", "disable"]) == 0
+    hook = tmp_path / "config" / "fish" / "conf.d" / "omc-title.fish"
+    assert not hook.exists()
+    hook.write_bytes(b"user content\n")
+    assert main(["shell-integration", "fish", "enable"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and str(hook) in err and "Traceback" not in err
+    assert hook.read_bytes() == b"user content\n"
+
+
+def test_readme_documents_every_user_facing_title_surface():
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    for needle in (
+        "omc shell-integration fish reconcile",
+        "omc shell-integration fish disable",
+        "omc shell-integration fish status",
+        "OMC_FISH_TITLE_DISABLE=1",
+        "omc title set -- <branch>",
+        "conf.d/omc-title.fish",
+        "last writer wins",
+        "nested shell",
+        "just iterm2-tests",
+        "cooldown",
+        "bypasses the cooldown",
+        "do not abort",
+        "· ✗ fish integration: <reason>",
+        "the next time the decision changes (branch, repository, or leaving Git)",
+        "inside tmux or screen are deliberately inert",
+        "waits out the cooldown and then applies",
+        "Outside iTerm2, or with `OMC_FISH_TITLE_DISABLE=1`, `omc start` keeps today's behavior",
+    ):
+        assert needle in readme, needle
+    assert "(or with an unauthorized API) `omc start` warns" not in readme
+    assert "retries once per failure" not in readme
+    assert "retried on the next branch or directory change" not in readme
+    assert "if that lands inside the cooldown it is dropped" not in readme
+    assert "omc title reconcile" not in readme  # the dropped first attempt's command
