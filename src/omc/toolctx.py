@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import contextlib
+import http.client
 import os
 import signal
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 _UV_KEYS = ("UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_CACHE_DIR")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: returning None makes urllib raise HTTPError for the
+    3xx, which ``http_get`` reports as an ordinary ``(3xx, body)`` result."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
+        return None
 
 
 @dataclass
@@ -294,6 +305,48 @@ class ToolContext:
         if error:
             raise error[0]
         return rc
+
+    def http_get(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: float = 30.0,
+    ) -> tuple[int, str]:
+        """GET ``url``; returns ``(status, body)``. omc's ONLY network primitive —
+        it lives here so the subprocess/env/network boundary stays single and
+        tests fake one seam (like ``run``/``run_bounded``).
+
+        Never raises: an HTTP error status is a RESULT (``(401, body)``), and a
+        transport failure (refused, DNS, timeout) is ``(0, <error text>)``.
+        The proxy MAP comes only from ``self.env`` (``http_proxy``/``https_proxy``,
+        any case), never ``os.environ`` — with an explicit map urllib adds no
+        system proxies. Its bypass check (``no_proxy``/macOS exclusions) is
+        urllib's own and still consults the process environment; in production
+        ``self.env`` is a copy of ``os.environ`` so the two agree. The caller
+        owns redaction: this layer never sees what a header means. Redirects are
+        never followed (a 3xx is returned as the result): urllib would replay every
+        header, credentials included, to whatever host ``Location`` names.
+        """
+        proxies = {
+            scheme: self.env[k]
+            for scheme in ("http", "https")
+            for k in (f"{scheme}_proxy", f"{scheme.upper()}_PROXY")
+            if self.env.get(k)
+        }
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies), _NoRedirect())
+        try:
+            req = urllib.request.Request(url, headers=dict(headers or {}), method="GET")
+            try:
+                with opener.open(req, timeout=timeout) as resp:  # noqa: S310 - https/http only, caller-built URL
+                    return resp.status, resp.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as exc:
+                with exc:
+                    return exc.code, exc.read().decode("utf-8", errors="replace")
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            # URLError is an OSError; HTTPException (BadStatusLine, IncompleteRead)
+            # is not and urllib does not wrap it; ValueError = a malformed URL.
+            return 0, str(exc)
 
 
 def tool_version(ctx: ToolContext, argv: Sequence[str], *, timeout: float = 5) -> tuple[bool, str]:

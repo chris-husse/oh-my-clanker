@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .errors import OmcError
 from .mirror import DOCS_MIRROR_REL, clear_docs_mirror, mirror_dir
 from .toolctx import ToolContext
 from .wikirun import _WIKI_POLL_SECONDS, _WIKI_STALL_SECONDS, PageCountTracker
@@ -335,29 +336,32 @@ def _destroy_and_rebuild(ctx: ToolContext, root: Path, base: str, say) -> tuple[
 
 
 def _run_wiki(ctx: ToolContext, cfg: Config, root: Path, say) -> bool:
-    from .providers.registry import docs_model_for
+    from .providers.registry import docs_llm_for
 
-    name = cfg.llm.default
-    args = ["wiki", "--provider", name]
-    # Docs model, never the session model: wiki is bulk grounded summarization
-    # and a thinking-heavy session model turns it into an hours-long silent run.
-    docs_model = docs_model_for(cfg, name)
-    if docs_model:
-        args += ["--model", docs_model]
-    say(f"→ regenerating documentation via {name} (LLM-heavy)")
+    try:
+        run = docs_llm_for(cfg)
+    except OmcError as exc:
+        # ConfigError (no key / alias model) or get_provider's plain OmcError —
+        # reachable only by hand-edited files. Return False like the stall path:
+        # `omc watch`'s loop has no OmcError guard and must never crash.
+        say(f"✗ documentation: {exc}")
+        return False
+    say(f"→ regenerating documentation via {run.label}")
     tracker = PageCountTracker(root / ".gitnexus" / "wiki")
     cp, stalled = ctx.run_supervised(
-        gitnexus_argv(ctx, *args),
+        gitnexus_argv(ctx, *run.wiki_args),
         cwd=str(root),
         heartbeat=tracker.beat,
         stall_after=_WIKI_STALL_SECONDS,
         poll=_WIKI_POLL_SECONDS,
+        extra_env=run.extra_env,  # the key reaches exactly this node child
     )
     if stalled:
         say(f"✗ wiki stalled — no progress for {int(_WIKI_STALL_SECONDS)}s; killed")
         return False
     if cp.returncode != 0:
-        say(f"✗ wiki failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
+        # redact BEFORE truncating: a key cut in half still leaks its prefix
+        say(f"✗ wiki failed: {run.redact((cp.stderr or cp.stdout or '').strip())[:400]}")
     return True  # the recomputed verdict, not the exit code, decides
 
 

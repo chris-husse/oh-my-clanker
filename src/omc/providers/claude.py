@@ -5,6 +5,16 @@ import shlex
 
 from .base import Provider
 
+# Anthropic's OpenAI-compatible endpoint (docs read 2026-10-01): /chat/completions
+# under this base accepts `Authorization: Bearer <key>`, `max_completion_tokens`,
+# system messages (hoisted) and streaming — exactly what GitNexus's llm-client
+# sends for `--provider custom`. Trailing slash kept: GitNexus strips it itself.
+API_BASE_URL = "https://api.anthropic.com/v1/"
+
+# CLI family aliases -> API id prefixes. The newest id with the prefix is picked
+# from the live /v1/models list at configure time (docsllm.resolve_model).
+_API_FAMILIES = {"fable": "claude-fable-", "opus": "claude-opus-", "sonnet": "claude-sonnet-"}
+
 
 class ClaudeProvider(Provider):
     name = "claude"
@@ -16,6 +26,17 @@ class ClaudeProvider(Provider):
 
     def docs_model_default(self) -> str:
         return "sonnet"  # standard coding tier — the docs floor
+
+    def api_base_url(self) -> str:
+        return API_BASE_URL
+
+    def api_model_family(self, alias):
+        return _API_FAMILIES.get(alias, "")
+
+    def auth_status_argv(self):
+        # `claude auth status` prints a JSON object with loggedIn/authMethod/
+        # apiProvider (verified live on 2.1.286, 2026-10-01).
+        return ["claude", "auth", "status"]
 
     def headless_argv(self, prompt, *, model, allowed_tools=None, session_name=""):
         # Prompt must come RIGHT AFTER -p: --allowed-tools is variadic and would

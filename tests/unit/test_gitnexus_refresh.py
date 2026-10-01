@@ -210,3 +210,77 @@ def test_wiki_still_behind_leaves_mirror_untouched(tmp_path):
     assert "wiki-missing" in v.codes()
     assert not (repo / ".omc" / "docs").exists()
     assert "✗ documentation still behind after regeneration" in said
+
+
+def _api_cfg(key="sk-ant-test-0123456789abcdef", model="claude-sonnet-5-5"):
+    from omc.config.schema import DocsConfig, LLMConfig, ProviderConfig, SecretsConfig
+
+    return Config(
+        llm=LLMConfig(
+            default="claude",
+            docs=DocsConfig(backend="api"),
+            providers={"claude": ProviderConfig(docs_model=model)},
+        ),
+        secrets=SecretsConfig(api_keys={"claude": key} if key else {}),
+    )
+
+
+def test_wiki_api_backend_passes_key_in_env_only(tmp_path):
+    _, repo = _repo_with_origin(tmp_path)
+    w = repo / ".gitnexus" / "wiki"
+    w.mkdir()
+    (w / "meta.json").write_text(json.dumps({"fromCommit": "b" * 40}))  # wiki-unknown
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    node = tmp_path / "bin" / "node"
+    node.write_text(node.read_text().replace('echo "$@" >>', 'echo "KEY=$GITNEXUS_API_KEY $@" >>'))
+    said = []
+    v = refresh_knowledge(
+        ctx, _api_cfg(), str(repo), "main", say=said.append, documentation=True, reset=False
+    )
+    recorded = calls.read_text()
+    assert (
+        "wiki --provider custom --base-url https://api.anthropic.com/v1/"
+        " --model claude-sonnet-5-5 --reasoning-model" in recorded
+    )
+    assert "KEY=sk-ant-test-0123456789abcdef " in recorded  # the wiki line's env
+    assert v.fresh
+    assert "→ regenerating documentation via claude api (claude-sonnet-5-5)" in said
+    assert not any("sk-ant-test" in s for s in said)
+
+
+def test_wiki_api_without_key_narrates_and_does_not_crash(tmp_path):
+    _, repo = _repo_with_origin(tmp_path)  # index fresh, no wiki
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    said = []
+    v = refresh_knowledge(
+        ctx, _api_cfg(key=""), str(repo), "main", say=said.append, documentation=True, reset=False
+    )
+    assert not v.fresh
+    assert any(s.startswith("✗ documentation: ") and "run omc configure" in s for s in said)
+    assert "wiki" not in (calls.read_text() if calls.exists() else "")
+
+
+def test_wiki_api_failure_tail_is_redacted_before_truncation(tmp_path):
+    # Mirror of test_dependency's run_document case: 370 chars of noise, then the
+    # key spans offsets 384-412, so a naive [:400] would cut it in half and leak
+    # `sk-ant-test-0123`; _run_wiki must redact first.
+    key = "sk-ant-test-0123456789abcdef"
+    _, repo = _repo_with_origin(tmp_path)
+    w = repo / ".gitnexus" / "wiki"
+    w.mkdir()
+    (w / "meta.json").write_text(json.dumps({"fromCommit": "b" * 40}))  # wiki-unknown
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    node = tmp_path / "bin" / "node"
+    arm = '*" wiki --provider"*) '
+    text = node.read_text()
+    assert arm in text
+    noise = "x" * 370 + f"LLM API error {key} boom"
+    node.write_text(text.replace(arm, f"{arm}printf '%s' '{noise}' >&2; exit 1; "))
+    said = []
+    v = refresh_knowledge(
+        ctx, _api_cfg(key), str(repo), "main", say=said.append, documentation=True, reset=False
+    )
+    assert not v.fresh
+    assert any(s.startswith("✗ wiki failed: ") for s in said)
+    assert not any(key in s or key[:12] in s for s in said)
+    assert any("******" in s for s in said)

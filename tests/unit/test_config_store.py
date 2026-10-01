@@ -1,7 +1,9 @@
+import stat as _stat
+
 import pytest
 
 from omc.config import store
-from omc.config.schema import GlobalConfig, ProjectConfig, ProviderConfig
+from omc.config.schema import GlobalConfig, ProjectConfig, ProviderConfig, SecretsConfig
 from omc.errors import ConfigError
 
 
@@ -290,3 +292,196 @@ def test_load_legacy_rejects_bad_json(tmp_path):
     (tmp_path / "config.json").write_text("{nope")
     with pytest.raises(ConfigError):
         store.load_legacy(tmp_path)
+
+
+def test_docs_defaults_and_round_trip(tmp_path):
+    cfg = GlobalConfig()
+    assert cfg.llm.docs.provider == "" and cfg.llm.docs.backend == "cli"
+    cfg.llm.docs.backend = "api"
+    store.save_global(tmp_path, cfg)
+    text = (tmp_path / "config.yaml").read_text()
+    assert "docs:" in text and "backend: api" in text
+    assert store.load_global(tmp_path).llm.docs.backend == "api"
+
+
+def test_config_without_docs_section_loads_with_defaults(tmp_path):
+    # Every existing config.yaml predates `docs:` — omitted fields take defaults.
+    (tmp_path / "config.yaml").write_text("schema_version: 1\nllm:\n  default: claude\n")
+    cfg = store.load_global(tmp_path)
+    assert cfg.llm.docs.backend == "cli" and cfg.llm.docs.provider == ""
+
+
+def test_set_key_docs_leaves_and_blank_provider():
+    cfg = GlobalConfig()
+    store.set_key(cfg, "llm.docs.backend", "api")
+    store.set_key(cfg, "llm.docs.provider", "claude")
+    assert (cfg.llm.docs.backend, cfg.llm.docs.provider) == ("api", "claude")
+    store.set_key(cfg, "llm.docs.provider", "")  # blank = follow llm.default
+    assert cfg.llm.docs.provider == ""
+    with pytest.raises(ConfigError, match="llm.docs.backend"):
+        store.set_key(cfg, "llm.docs.backend", "http")
+    with pytest.raises(ConfigError, match="retired.*claude.*codex"):
+        store.set_key(cfg, "llm.docs.provider", "retired")
+    with pytest.raises(ConfigError, match="unknown config key: docs.nope"):
+        store.set_key(cfg, "llm.docs.nope", "x")
+    with pytest.raises(ConfigError, match="unknown config key: docs.backend.x"):
+        store.set_key(cfg, "llm.docs.backend.x", "api")
+    with pytest.raises(ConfigError, match="llm.docs is a section"):
+        store.set_key(cfg, "llm.docs", "api")  # bare section is refused with the full dotted path
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("llm:\n  docs:\n    backend: http\n", "llm.docs.backend"),
+        ("llm:\n  docs:\n    backend: 1\n", "llm.docs.backend"),
+        ("llm:\n  docs:\n    provider: [a]\n", "llm.docs.provider"),
+        ("llm:\n  docs:\n    provider: retired\n", "retired.*claude.*codex"),
+        ("llm:\n  default: codex\n  docs:\n    backend: api\n", "not supported yet"),
+        ("llm:\n  docs:\n    provider: codex\n    backend: api\n", "not supported yet"),
+    ],
+)
+def test_load_rejects_bad_docs_values(tmp_path, body, match):
+    (tmp_path / "config.yaml").write_text(body)
+    with pytest.raises(ConfigError, match=match):
+        store.load_global(tmp_path)
+
+
+def test_api_for_codex_refused_on_save_regardless_of_set_order(tmp_path):
+    # --set order is arbitrary: backend=api then default=codex passes every
+    # set-time check; the SAVE path must refuse what the next load would reject.
+    cfg = GlobalConfig()
+    store.set_key(cfg, "llm.docs.backend", "api")
+    store.set_key(cfg, "llm.providers.codex.model", "o-x")
+    store.set_key(cfg, "llm.default", "codex")
+    with pytest.raises(ConfigError, match="codex: API documentation backend not supported yet"):
+        store.save_global(tmp_path, cfg)
+    assert not (tmp_path / "config.yaml").exists()
+    with pytest.raises(ConfigError, match="codex: API documentation backend"):
+        store.validate_llm(cfg.llm)
+
+
+_KEY = "sk-ant-api03-EXAMPLEKEYabcdefghijklmnop1234"
+
+
+def test_secrets_round_trip_mode_0600_and_missing_is_empty(tmp_path):
+    assert store.load_secrets(tmp_path).api_keys == {}  # missing file, never an error
+    store.save_secrets(tmp_path, SecretsConfig(api_keys={"claude": _KEY}))
+    path = tmp_path / "secrets.yaml"
+    assert _stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert store.load_secrets(tmp_path).api_keys == {"claude": _KEY}
+    assert not list(tmp_path.glob("secrets.yaml.*"))  # no temp file left behind
+
+
+def test_save_secrets_creates_home_and_tightens_a_0644_file(tmp_path):
+    home = tmp_path / "fresh-home"  # a first-ever --set api_key= may run before any save
+    store.save_secrets(home, SecretsConfig(api_keys={"claude": _KEY}))
+    assert (home / "secrets.yaml").exists()
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    (loose / "secrets.yaml").write_text("schema_version: 1\napi_keys: {}\n")
+    (loose / "secrets.yaml").chmod(0o644)
+    store.save_secrets(loose, SecretsConfig(api_keys={"claude": _KEY}))
+    assert _stat.S_IMODE((loose / "secrets.yaml").stat().st_mode) == 0o600
+
+
+def test_secrets_repr_never_shows_the_key():
+    cfg = SecretsConfig(api_keys={"claude": _KEY})
+    assert _KEY not in repr(cfg) and _KEY not in str(cfg)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "schema_version: 1\nbogus: 1\n",
+        "api_keys: [a]\n",
+        "api_keys:\n  claude: 31\n",  # YAML reads 0x1F as an int
+        "api_keys:\n  retired: sk-x\n",
+        "api_keys:\n  claude: ''\n",
+        "api_keys:\n  claude: 'sk-x y'\n",
+        "api_keys:\n  claude: 'op://Employee/item/password'\n",
+        "- not a mapping\n",
+    ],
+)
+def test_load_secrets_rejects_bad_files(tmp_path, body):
+    (tmp_path / "secrets.yaml").write_text(body)
+    with pytest.raises(ConfigError, match="secrets.yaml"):
+        store.load_secrets(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        # a key pasted where the provider NAME belongs (transposed by hand)
+        (f"api_keys:\n  {_KEY}: claude\n", "unsupported provider name in api_keys"),
+        # a key pasted as a top-level key
+        (f"schema_version: 1\n{_KEY}: 1\n", "only schema_version and api_keys are allowed"),
+    ],
+)
+def test_load_secrets_never_echoes_a_hand_edited_key_name(tmp_path, body, match):
+    (tmp_path / "secrets.yaml").write_text(body)
+    with pytest.raises(ConfigError, match=match) as exc:
+        store.load_secrets(tmp_path)
+    assert "secrets.yaml" in str(exc.value)
+    assert _KEY not in str(exc.value) and _KEY[:12] not in str(exc.value)
+
+
+def test_load_secrets_yaml_error_names_file_but_not_contents(tmp_path):
+    # PyYAML quotes the offending line in its message — that line may BE the key.
+    (tmp_path / "secrets.yaml").write_text(f"api_keys:\n  claude: {_KEY}\n  : bad\n\tx")
+    with pytest.raises(ConfigError) as exc:
+        store.load_secrets(tmp_path)
+    assert "secrets.yaml" in str(exc.value) and _KEY not in str(exc.value)
+
+
+def test_load_secrets_yaml_error_omits_a_short_key_pyyaml_would_quote_whole(tmp_path):
+    # A long key is truncated by PyYAML's snippet, so the test above cannot catch a
+    # regression to `{exc}`; a short key sits wholly inside the quoted snippet.
+    short = "sk-q7Zx"
+    (tmp_path / "secrets.yaml").write_text(f"api_keys:\n  claude: {short}\n  : bad\n\tx")
+    with pytest.raises(ConfigError) as exc:
+        store.load_secrets(tmp_path)
+    assert "secrets.yaml" in str(exc.value) and short not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "value", ["", "sk x", "sk\tx", "sk-x\n", "op://Employee/item/password", "sk-é", 7]
+)
+def test_validate_api_key_rejects_without_echoing(value):
+    with pytest.raises(ConfigError) as exc:
+        store.validate_api_key(value, "llm.providers.claude.api_key")
+    assert "llm.providers.claude.api_key" in str(exc.value)
+    assert str(value) not in str(exc.value) or value == ""
+    if isinstance(value, str) and value.startswith("op://"):
+        assert "paste the key itself" in str(exc.value)
+
+
+def test_set_api_key_validates_provider_and_value():
+    cfg = SecretsConfig()
+    store.set_api_key(cfg, "claude", _KEY)
+    assert cfg.api_keys == {"claude": _KEY}
+    with pytest.raises(ConfigError, match="retired.*claude.*codex"):
+        store.set_api_key(cfg, "retired", _KEY)
+    with pytest.raises(ConfigError):
+        store.set_api_key(cfg, "claude", "")
+    assert cfg.api_keys == {"claude": _KEY}  # failed sets never mutate
+
+
+def test_set_api_key_refuses_a_provider_without_an_api_backend():
+    cfg = SecretsConfig()
+    with pytest.raises(ConfigError, match="codex: API documentation backend not supported yet"):
+        store.set_api_key(cfg, "codex", _KEY)
+    assert cfg.api_keys == {}  # a refused set never mutates
+
+
+def test_load_secrets_refuses_a_key_for_a_provider_without_an_api_backend(tmp_path):
+    (tmp_path / "secrets.yaml").write_text(f"api_keys:\n  codex: {_KEY}\n")
+    with pytest.raises(ConfigError, match="codex: API documentation backend not supported") as exc:
+        store.load_secrets(tmp_path)
+    assert _KEY not in str(exc.value)
+
+
+def test_save_secrets_rejects_bad_key_before_writing(tmp_path):
+    with pytest.raises(ConfigError):
+        store.save_secrets(tmp_path, SecretsConfig(api_keys={"claude": "op://x/y/z"}))
+    assert not (tmp_path / "secrets.yaml").exists()

@@ -46,6 +46,13 @@ def require_token(provider: str) -> None:
         )
 
 
+def require_env(var: str, guidance: str) -> None:
+    """A specific variable, not "any auth for the provider": the API-backend
+    E2E talks to Anthropic directly, so CLAUDE_CODE_OAUTH_TOKEN cannot stand in."""
+    if not os.environ.get(var):
+        pytest.fail(f"live E2E needs ${var} — {guidance}; then re-run.")
+
+
 # Auth failures surface INSIDE the container, printed by a provider CLI that omc
 # spawns itself — run_in's argv is usually ["omc", ...], so the failing provider
 # cannot be read off the command. These signatures are provider-specific strings,

@@ -15,8 +15,7 @@ Run the `gitnexus-ensure` skill.
 omc internal gitnexus refresh --enable-documentation
 ```
 
-Python owns the LLM choice (omc's configured default and that provider's docs
-model, never the session model); the wiki runs supervised (no deadline, killed
+Python owns the LLM choice — the configured documentation provider, backend (CLI or API key) and model (`omc configure`), never the session model; the wiki runs supervised (no deadline, killed
 only on a stall) and, when the verdict is fresh afterwards, is mirrored into
 `.omc/docs/gitnexus/docs/` in the primary root (`.omc/docs/` is generated
 output — keep it gitignored). This is LLM-driven and can take a while on a

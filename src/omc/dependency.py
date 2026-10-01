@@ -24,10 +24,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .config import store
+from .config import resolve
 from .errors import OmcError
 from .gitnexus import gitnexus_argv, gitnexus_cli, redact_userinfo
 from .mirror import mirror_dir
+from .providers.registry import docs_llm_for
 from .toolctx import ToolContext
 from .wikirun import _WIKI_POLL_SECONDS, _WIKI_STALL_SECONDS, PageCountTracker  # noqa: F401
 
@@ -340,18 +341,18 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
         )
         return 1
     dest = Path(checkout)
-    cfg = store.load_global(ctx.home)
+    cfg = resolve.load_effective(ctx)  # may itself raise ConfigError (malformed
+    # config.yaml / secrets.yaml): run_internal's OmcError boundary prints it as
+    # `error: …` rc 1, exactly as store.load_global did — do not widen the try.
     if cfg is None:
         print("error: omc is not configured — run `omc configure` first.", file=sys.stderr)
         return 1
-    name = cfg.llm.default
-    wiki_args = ["wiki", "--provider", name]
-    # Docs model, never the session model (see gitnexus._run_wiki rationale).
-    from .providers.registry import docs_model_for
-
-    docs_model = docs_model_for(cfg, name)
-    if docs_model:
-        wiki_args += ["--model", docs_model]
+    try:
+        run = docs_llm_for(cfg)
+    except OmcError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"· via {run.label}", file=sys.stderr, flush=True)
     wiki = dest / ".gitnexus" / "wiki"
     tracker = PageCountTracker(wiki)
     tracker.refresh()
@@ -374,11 +375,12 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
         return token
 
     cp, stalled = ctx.run_supervised(
-        gitnexus_argv(ctx, *wiki_args),
+        gitnexus_argv(ctx, *run.wiki_args),
         cwd=dest,
         heartbeat=_beat,
         stall_after=_WIKI_STALL_SECONDS,
         poll=_WIKI_POLL_SECONDS,
+        extra_env=run.extra_env,
     )
     if stalled:
         print(
@@ -387,8 +389,12 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
         )
         return 1
     if cp.returncode != 0 or not wiki.is_dir():
+        # Exact-key redaction FIRST, the userinfo heuristic second (a key containing
+        # '@' would otherwise be mangled by _redact and escape run.redact), and
+        # truncation last.
         print(
-            f"error: gitnexus wiki failed: {_redact((cp.stderr or cp.stdout or '').strip())[:400]}",
+            "error: gitnexus wiki failed: "
+            f"{_redact(run.redact((cp.stderr or cp.stdout or '').strip()))[:400]}",
             file=sys.stderr,
         )
         return 1

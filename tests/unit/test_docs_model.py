@@ -1,46 +1,98 @@
-"""Docs-model resolution: wiki runs use the standard-coding-tier floor,
-never the session model (spec 2026-07-23-per-user-docs-model-config)."""
+"""Documentation run resolution (spec 2026-10-01 §4): one helper feeds both
+wiki call sites. cli = today's argv byte for byte; api = GitNexus's custom
+provider with the key ONLY in the child env."""
 
 import pytest
 
-from omc.config.schema import GlobalConfig, LLMConfig, ProviderConfig
+from omc.config.schema import (
+    Config,
+    DocsConfig,
+    LLMConfig,
+    ProviderConfig,
+    SecretsConfig,
+)
 from omc.config.store import set_key
 from omc.errors import ConfigError
-from omc.providers.registry import docs_model_for, get_provider
+from omc.providers.registry import GITNEXUS_API_KEY_ENV, docs_llm_for, get_provider
+
+KEY = "sk-ant-test-0123456789abcdef"
 
 
-def _cfg(**provider_kwargs):
-    return GlobalConfig(
-        llm=LLMConfig(default="claude", providers={"claude": ProviderConfig(**provider_kwargs)})
+def _cfg(*, backend="cli", docs_provider="", default="claude", key=KEY, **provider_kwargs):
+    return Config(
+        llm=LLMConfig(
+            default=default,
+            docs=DocsConfig(provider=docs_provider, backend=backend),
+            providers={default: ProviderConfig(**provider_kwargs)},
+        ),
+        secrets=SecretsConfig(api_keys={"claude": key} if key else {}),
     )
 
 
 def test_provider_docs_defaults():
     assert get_provider("claude").docs_model_default() == "sonnet"
-    # Codex ids are deliberately free-text -> CLI default coding model.
     assert get_provider("codex").docs_model_default() == ""
 
 
-def test_docs_model_for_falls_back_to_provider_default():
-    assert docs_model_for(_cfg(), "claude") == "sonnet"
-    # the SESSION model must never leak into docs resolution
-    assert docs_model_for(_cfg(model="claude-fable-5"), "claude") == "sonnet"
+def test_cli_backend_is_byte_identical_to_today_and_ignores_the_key():
+    run = docs_llm_for(_cfg(model="claude-fable-5"))  # session model must never leak
+    assert run.wiki_args == ("wiki", "--provider", "claude", "--model", "sonnet")
+    assert run.extra_env == {} and run.backend == "cli" and run.label == "claude cli (sonnet)"
+    assert run.redact(f"x {KEY} y") == f"x {KEY} y"  # no-op on cli: nothing to hide
+    run = docs_llm_for(_cfg(docs_model="opus"))
+    assert run.wiki_args == ("wiki", "--provider", "claude", "--model", "opus")
 
 
-def test_docs_model_for_configured_value_wins():
-    assert docs_model_for(_cfg(docs_model="claude-opus-4-8"), "claude") == "claude-opus-4-8"
+def test_cli_backend_codex_without_model_passes_no_model_flag():
+    cfg = Config(llm=LLMConfig(default="codex", providers={}))
+    run = docs_llm_for(cfg)
+    assert run.wiki_args == ("wiki", "--provider", "codex") and run.label == "codex cli"
 
 
-def test_docs_model_for_unknown_provider_entry():
-    cfg = GlobalConfig(llm=LLMConfig(default="codex", providers={}))
-    assert docs_model_for(cfg, "codex") == ""
+def test_docs_provider_overrides_default():
+    cfg = Config(
+        llm=LLMConfig(
+            default="codex",
+            docs=DocsConfig(provider="claude"),
+            providers={"codex": ProviderConfig(), "claude": ProviderConfig(docs_model="opus")},
+        )
+    )
+    assert docs_llm_for(cfg).wiki_args == ("wiki", "--provider", "claude", "--model", "opus")
+
+
+def test_api_backend_argv_env_label_and_redact():
+    run = docs_llm_for(_cfg(backend="api", docs_model="claude-sonnet-5-5"))
+    assert run.wiki_args == (
+        "wiki",
+        "--provider",
+        "custom",
+        "--base-url",
+        "https://api.anthropic.com/v1/",
+        "--model",
+        "claude-sonnet-5-5",
+        "--reasoning-model",
+    )
+    assert run.extra_env == {GITNEXUS_API_KEY_ENV: KEY}
+    assert KEY not in " ".join(run.wiki_args)
+    assert run.label == "claude api (claude-sonnet-5-5)"
+    assert run.redact(f"LLM API error: {KEY} rejected") == "LLM API error: ****** rejected"
+    assert KEY not in repr(run)
+
+
+@pytest.mark.parametrize("docs_model", ["", "sonnet", "opus"])
+def test_api_backend_requires_a_full_model_id(docs_model):
+    with pytest.raises(ConfigError, match="run omc configure"):
+        docs_llm_for(_cfg(backend="api", docs_model=docs_model))
+
+
+def test_api_backend_requires_a_stored_key():
+    with pytest.raises(ConfigError, match="no key is stored.*run omc configure"):
+        docs_llm_for(_cfg(backend="api", docs_model="claude-sonnet-5-5", key=""))
 
 
 def test_set_key_accepts_docs_model():
     cfg = LLMConfig()
     set_key(cfg, "providers.claude.docs_model", "claude-opus-4-8")
     assert cfg.providers["claude"].docs_model == "claude-opus-4-8"
-    set_key(cfg, "providers.codex.model", "o-something")  # existing leaf still works
-    assert cfg.providers["codex"].model == "o-something"
     with pytest.raises(ConfigError):
         set_key(cfg, "providers.claude.nope", "x")

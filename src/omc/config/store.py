@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 
 import yaml
 
 from ..errors import ConfigError
-from ..providers.registry import provider_names
+from ..providers.registry import get_provider, provider_names
 from .schema import (
     Config,
     GlobalConfig,
@@ -15,6 +18,7 @@ from .schema import (
     NotificationsConfig,
     ProjectConfig,
     ProviderConfig,
+    SecretsConfig,
     WorktreeConfig,
 )
 
@@ -29,6 +33,10 @@ def project_config_path(root: Path) -> Path:
 
 def legacy_config_path(home: Path) -> Path:
     return home / "config.json"
+
+
+def secrets_path(home: Path) -> Path:
+    return home / "secrets.yaml"
 
 
 def _load_yaml(path: Path, cls: type):
@@ -53,7 +61,7 @@ def load_global(home: Path) -> GlobalConfig | None:
 
 
 def save_global(home: Path, cfg: GlobalConfig) -> None:
-    _validate_llm_providers(cfg.llm)
+    validate_llm(cfg.llm)
     _save_yaml(global_config_path(home), cfg)
 
 
@@ -77,6 +85,10 @@ def load_legacy(home: Path) -> tuple[GlobalConfig, ProjectConfig] | None:
         raise ConfigError(f"invalid JSON in {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ConfigError(f"invalid config in {path}: expected an object")
+    if "secrets" in data:
+        # Config is also the legacy hydration shape; a secrets key would hydrate
+        # and then be silently dropped by the split below. Refuse instead.
+        raise ConfigError(f"unexpected 'secrets' in {path}: API keys live in secrets.yaml")
     combined = _hydrate(Config, data, str(path))
     return (
         GlobalConfig(llm=combined.llm, notifications=combined.notifications),
@@ -103,10 +115,34 @@ def _validate_provider(name: object, location: str) -> None:
         )
 
 
-def _validate_llm_providers(cfg: LLMConfig) -> None:
+DOCS_BACKENDS = ("cli", "api")
+
+
+def _validate_docs_leaf(name: str, value: object) -> str:
+    """Type + closed-set checks for one llm.docs leaf; shared by load and set."""
+    if not isinstance(value, str):
+        raise ConfigError(f"invalid llm.docs.{name} {value!r}: expected a string")
+    if name == "backend" and value not in DOCS_BACKENDS:
+        raise ConfigError(f"invalid llm.docs.backend {value!r}: use 'cli' or 'api'")
+    if name == "provider" and value:  # blank = follow llm.default
+        _validate_provider(value, "llm.docs.provider")
+    return value
+
+
+def validate_llm(cfg: LLMConfig) -> None:
+    """Provider names + the docs cross-field check. Runs on LOAD (_hydrate),
+    SET-then-SAVE (save_global) — the save path matters because `--set` pairs
+    apply in arbitrary order, so `backend=api` then `default=codex` passes every
+    per-leaf check and must be refused before it reaches disk."""
     _validate_provider(cfg.default, "llm.default")
     for name in cfg.providers:
         _validate_provider(name, "llm.providers")
+    _validate_docs_leaf("provider", cfg.docs.provider)
+    _validate_docs_leaf("backend", cfg.docs.backend)
+    if cfg.docs.backend == "api":
+        name = cfg.docs.provider or cfg.default
+        if not get_provider(name).api_base_url():
+            raise ConfigError(f"{name}: API documentation backend not supported yet, use cli")
 
 
 def validate_worktree_value(name: str, value: object) -> str:
@@ -133,6 +169,95 @@ def validate_worktree_value(name: str, value: object) -> str:
     return value
 
 
+def validate_api_key(value: object, location: str) -> str:
+    """Key rules shared by load, set and save. The message NEVER contains the
+    value: it may be a real key with a typo in it."""
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"invalid {location}: expected a non-empty string")
+    if value.startswith("op://"):
+        raise ConfigError(
+            f"invalid {location}: paste the key itself — omc does not resolve 1Password references"
+        )
+    if any(c.isspace() or not c.isprintable() or ord(c) > 126 for c in value):
+        raise ConfigError(f"invalid {location}: must be printable ASCII without whitespace")
+    return value
+
+
+def _require_api_backend(name: str) -> None:
+    """A key is only ever probed/used through an API backend; a provider without
+    one (codex) has nothing to probe, so a stored key would be dead and unchecked."""
+    if not get_provider(name).api_base_url():
+        raise ConfigError(f"{name}: API documentation backend not supported yet, use cli")
+
+
+def set_api_key(cfg: SecretsConfig, name: str, value: str) -> None:
+    _validate_provider(name, "llm.providers")
+    _require_api_backend(name)
+    cfg.api_keys[name] = validate_api_key(value, f"llm.providers.{name}.api_key")
+
+
+def load_secrets(home: Path) -> SecretsConfig:
+    """Missing file → empty. Strict otherwise. Plain leaves are hydrated TYPED
+    here (unlike _hydrate) because a hand-edited `claude: 0x1F` reads as int."""
+    path = secrets_path(home)
+    if not path.exists():
+        return SecretsConfig()
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        # Deliberately NOT `{exc}`: PyYAML quotes a snippet of the offending line,
+        # which for a short key is the whole key. The chained __cause__ still holds
+        # it; that is acceptable only because cli.main prints str(exc), never the
+        # traceback — keep it that way.
+        raise ConfigError(f"invalid YAML in {path}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"invalid config in {path}: expected a mapping")
+    # Never echo a NAME from this file: a hand-edit can transpose a key into one.
+    if set(data) - {"schema_version", "api_keys"}:
+        raise ConfigError(
+            f"unknown config key in {path}: only schema_version and api_keys are allowed"
+        )
+    keys = data.get("api_keys", {})
+    if not isinstance(keys, dict):
+        raise ConfigError(f"invalid value for 'api_keys' in {path}: expected a mapping")
+    out: dict[str, str] = {}
+    names = provider_names()
+    for name, value in keys.items():
+        if not isinstance(name, str) or name not in names:
+            raise ConfigError(
+                f"unsupported provider name in api_keys in {path}; choose {' or '.join(names)}"
+            )
+        if not get_provider(name).api_base_url():
+            # Names the provider (a closed-set, validated name), never the value.
+            raise ConfigError(
+                f"api_keys in {path}: {name}: API documentation backend not supported yet, use cli"
+            )
+        out[name] = validate_api_key(value, f"api_keys.{name} in {path}")
+    return SecretsConfig(schema_version=data.get("schema_version", 1), api_keys=out)
+
+
+def save_secrets(home: Path, cfg: SecretsConfig) -> None:
+    """Atomic 0600 write (the awscreds._store pattern): mkstemp in the
+    destination dir, explicit fchmod, write, os.replace. The inode swap is why a
+    pre-existing 0644 file ends 0600. The PARENT is not chmodded — <home> hosts
+    the managed GitNexus clone and manifests."""
+    for name, value in cfg.api_keys.items():
+        _validate_provider(name, "api_keys")
+        validate_api_key(value, f"api_keys.{name}")
+    path = secrets_path(home)
+    home.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=home, prefix="secrets.yaml.", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(yaml.safe_dump(asdict(cfg), sort_keys=False))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def set_key(cfg: object, dotted: str, value: str) -> None:
     """Set a dotted leaf key. `llm.providers.<name>.model` creates the provider entry."""
     head, _, tail = dotted.partition(".")
@@ -142,6 +267,18 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
             raise ConfigError(f"unknown config key: providers.{tail}")
         _validate_provider(name, "llm.providers")
         setattr(cfg.providers.setdefault(name, ProviderConfig()), leaf, value)
+        return
+    if isinstance(cfg, LLMConfig) and head == "docs":
+        if not tail:
+            # The generic "is a section" message below would lose the "llm."
+            # prefix (set_key recurses with the tail), so say it here in full.
+            raise ConfigError("llm.docs is a section, not a settable key")
+        leaf, _, rest = tail.partition(".")
+        if rest or leaf not in ("provider", "backend"):
+            raise ConfigError(f"unknown config key: docs.{tail}")
+        setattr(cfg.docs, leaf, _validate_docs_leaf(leaf, value))
+        # The backend/provider consistency check is the save path's job
+        # (validate_llm): --set order is arbitrary, see that docstring.
         return
     if isinstance(cfg, NotificationsConfig):
         # set_key values arrive as strings; enabled is a bool ("true" would be
@@ -215,7 +352,7 @@ def _hydrate(cls: type, data: dict, path: str):
             kwargs[name] = value
     obj = cls(**kwargs)
     if cls is LLMConfig:
-        _validate_llm_providers(obj)
+        validate_llm(obj)
     if cls is NotificationsConfig:
         if not isinstance(obj.enabled, bool):
             raise ConfigError(
