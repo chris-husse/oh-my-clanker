@@ -132,7 +132,7 @@ def test_bare_codex_skill_mention_inserts_then_submits(monkeypatch):
 
 
 def test_codex_skill_read_requires_successful_installed_file_result():
-    from tests.e2e.test_e2e_lifecycle import _assert_skill_reads
+    from tests.e2e.lifecycle_helpers import _assert_skill_reads
 
     path = "/root/.codex/plugins/cache/oh-my-clanker/omc/0.1.7/skills/start/SKILL.md"
     tracker = _module.SkillReadTracker({"omc:start": path})
@@ -232,7 +232,7 @@ def test_installed_skill_access_observer_records_only_read_access():
 
 def test_claude_skill_read_requires_matching_read_tool_result():
     from tests.e2e.conversation import parse_claude_stream
-    from tests.e2e.test_e2e_lifecycle import _assert_skill_reads
+    from tests.e2e.lifecycle_helpers import _assert_skill_reads
 
     path = "/root/.claude/plugins/cache/oh-my-clanker/omc/0.1.7/skills/start/SKILL.md"
     records = [
@@ -460,8 +460,17 @@ def test_pty_close_kills_child_after_leader_exits(tmp_path):
         child_pid = int(child_pid_file.read_text())
         os.kill(child_pid, 0)
         session.close()
-        with pytest.raises(ProcessLookupError):
-            os.kill(child_pid, 0)
+        # The kill is delivered asynchronously; under load (16 xdist workers
+        # plus a Docker run) the child can still be reaped a moment later.
+        # Wait for it instead of asserting the instant after close().
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, "child survived session.close()"
+            time.sleep(0.05)
     finally:
         session.close()
         if child_pid_file.exists():
@@ -633,6 +642,9 @@ def test_e2e_image_default_builds_checkout(monkeypatch):
 
     from tests.e2e.conftest import e2e_image
 
+    # the unit suite itself runs under xdist; the fixture's parallel guard is
+    # about E2E workers building images, which this test does not simulate
+    monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     seen = {}
 
     class FakeImage:
@@ -662,6 +674,9 @@ def test_e2e_image_custom_tag_still_builds_checkout(monkeypatch):
 
     from tests.e2e.conftest import REPO_ROOT, e2e_image
 
+    # the unit suite itself runs under xdist; the fixture's parallel guard is
+    # about E2E workers building images, which this test does not simulate
+    monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     seen = {}
 
     class FakeImage:
@@ -687,7 +702,7 @@ def test_e2e_image_custom_tag_still_builds_checkout(monkeypatch):
 
 
 def test_codex_actor_policy_is_top_level_even_with_plugin_tables(tmp_path, monkeypatch):
-    from tests.e2e import test_e2e_lifecycle
+    from tests.e2e import lifecycle_helpers as test_e2e_lifecycle
 
     config = tmp_path / "config.toml"
     config.write_text('[plugins."omc@oh-my-clanker"]\nenabled = true\n')
@@ -711,7 +726,7 @@ def test_codex_actor_policy_is_top_level_even_with_plugin_tables(tmp_path, monke
 
 
 def test_codex_capability_trust_override_is_scoped_to_owned_fixture():
-    from tests.e2e.test_e2e_lifecycle import _codex_fixture_trust_override
+    from tests.e2e.lifecycle_helpers import _codex_fixture_trust_override
 
     override = _codex_fixture_trust_override("/work/capability")
     assert tomllib.loads(override) == {"projects": {"/work/capability": {"trust_level": "trusted"}}}
@@ -720,7 +735,7 @@ def test_codex_capability_trust_override_is_scoped_to_owned_fixture():
 
 
 def test_codex_actor_policy_uses_default_home_without_codex_home(tmp_path, monkeypatch):
-    from tests.e2e import test_e2e_lifecycle
+    from tests.e2e import lifecycle_helpers as test_e2e_lifecycle
 
     home = tmp_path / "disposable-home"
     codex_home = home / ".codex"
@@ -921,7 +936,7 @@ def test_claude_stream_rejects_truncated_or_missing_result():
 def test_published_tree_requires_committed_fix_and_mutation_sensitive_unittest(
     tmp_path, monkeypatch
 ):
-    from tests.e2e import test_e2e_lifecycle as lifecycle
+    from tests.e2e import lifecycle_helpers as lifecycle
 
     bare = tmp_path / "origin.git"
     repo = tmp_path / "repo"
@@ -988,7 +1003,7 @@ def test_published_tree_requires_committed_fix_and_mutation_sensitive_unittest(
 
 
 def test_worktree_branch_is_normalized_for_remote_checkout(monkeypatch):
-    from tests.e2e import test_e2e_lifecycle as lifecycle
+    from tests.e2e import lifecycle_helpers as lifecycle
 
     listing = (
         "worktree /work/lifecycle\nbranch refs/heads/main\n\n"

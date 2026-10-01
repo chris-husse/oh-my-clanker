@@ -1,3 +1,89 @@
+## Parallel E2E, golden path and stage snapshots (2026-10-01)
+
+The live lifecycle matrix (ten cases in `test_e2e_lifecycle.py`) took over an
+hour serially and was a mandatory verify gate for most changes. Measured on
+2026-10-01: cases ran 5 to 15 minutes each; 7 of 10 completed in about 70
+minutes before the run was stopped. The causes, in order of weight:
+
+- Each of the three parametrized scenarios replayed the same preamble
+  (`omc start`, primer, seed → design, detail, "ok": four agent turns and two
+  judge calls) before its one distinctive turn, six times per run.
+- The implement turn was budgeted at 1800 s and needed most of it: omc's own
+  `/omc:implement` runs spec hardening with an explain pass per section, a
+  plan with an explain pass per section, a subagent plus a reviewer per task,
+  a final review, then finish with four stages.
+- Actors and judges defaulted to the top tier; every Claude turn is a fresh
+  `claude --resume -p` process.
+- Nothing ran in parallel: the Codex account volume takes an exclusive lock
+  and `codex_auth.py` hard-failed under pytest-xdist; the session-scoped image
+  fixture would have built and deleted one image per worker.
+- The unit suite could not run in parallel either: it inherited the host's
+  global git config, whose `commit.gpgsign` exhausted gpg-agent under sixteen
+  workers ("Cannot allocate memory", `git commit` exit 128).
+
+What replaced it:
+
+- `scripts/e2e.sh` builds the image once per source id (short sha, `-dirty`
+  when the tree is dirty), runs the **golden path**
+  (`tests/e2e/golden/test_golden_claude.py`) sequentially with `-n 0`, then
+  everything else with `-n auto --dist loadgroup`. Codex items share one
+  `xdist_group`; the account lock waits (`OMC_E2E_AUTH_LOCK_TIMEOUT`) instead
+  of failing.
+- The golden path runs the lifecycle once in stages (`start` = `omc start`
+  plus the primer turn, `design`, `agreed`), snapshots the container after
+  each with `docker commit` (`omc-e2e-stage:<provider>-<stage>-<source>`, a
+  manifest at `/tmp/omc-stage.json`), and **variations**
+  (`tests/e2e/variations/`) fork a fresh container from a stage image, bind
+  the conversation driver to the named session (`ClaudeConversation.bind`)
+  and run one or two turns from there.
+- `pytest-timeout` caps every test at 300 s (signal method); the `expensive`
+  tier overrides per test. `just check` runs `-n auto` behind a hermetic
+  `GIT_CONFIG_GLOBAL` (`tests/conftest.py`).
+- Test actors and judges default to the standard coding tier
+  (`claude-sonnet-5-5`); the top tier is available through
+  `CLAUDE_E2E_MODEL` / `CLAUDE_E2E_JUDGE_MODEL`.
+
+Measured on 2026-10-01 (Claude Code 2.1.286, standard tier, host with 16
+CPUs):
+
+| what | before | after |
+| --- | --- | --- |
+| unit suite (`just check`) | 4 min 15 s serial | 18 s (`-n auto`, 962 tests) |
+| smoke + marketplace E2E (8 tests) | ~6 min serial | 21 s after a one-time image build |
+| golden path to `agreed` | n/a (replayed six times inside the matrix) | 1 min 44 s: setup 9 s, start 52 s, design 26 s, agreed 16 s |
+| default E2E run (`just e2e-tests`: golden + 50 tests in parallel on 16 workers) | over an hour (lifecycle matrix alone) | 5 min 56 s end to end including the image build; golden ~1.5 min; slowest single test under 190 s |
+| variations from snapshots (`resume`, `critical question`) | n/a | pass inside the rest phase; a clone resumes the named session |
+| `/omc:implement` on the one-line fixture | up to 1800 s budget | **exceeds the 300 s ceiling** |
+
+Evidence commands for the expensive tier: `just golden-full` runs the golden
+path including the `implemented` stage (and writes its snapshot);
+`just e2e-rest -m "e2e and expensive and variation" tests/e2e/variations`
+runs the implement-triggering variations against existing snapshots. Images
+are keyed by the working tree's content hash (`git write-tree` on a temporary
+index), so an identical tree reuses its image and snapshots exactly, and any
+edit gets a new id; `just e2e-prune` is the only thing that deletes images.
+
+Ryuk and snapshots: testcontainers' reaper prunes images when its session
+ends, and the stage snapshots went with it even after overriding the
+`org.testcontainers.session-id` label on commit; under xdist each worker runs
+its own Ryuk, so snapshots disappeared mid-run. `scripts/e2e.sh` therefore
+sets `TESTCONTAINERS_RYUK_DISABLED=true`: fixtures remove their containers on
+teardown, and the runner sweeps leftovers from crashed runs at start.
+The golden container itself is started through docker-py, not testcontainers,
+so committed snapshots carry no `org.testcontainers.*` labels at all; another
+project's reaper on the same host can no longer match them. Verified with a
+live `docker events` capture across a full run: no image delete events, all
+three snapshots present afterwards.
+
+The last row is a product finding, not a test one: omc's implement flow
+cannot finish a one-line change in five minutes. Until it can, the
+`implemented` golden stage and the variations that trigger implement
+(`test_implement_publishes`, `test_failing_build_blocks_publication`) live in
+the `expensive` tier with a 1800 s override and are evidence runs, never a
+gate. The Codex integration cases (`codex_gate`) stay serial on the account
+volume and are required only for changes touching Codex code; the old
+monolithic cases survive as `just lifecycle-full` (expensive).
+
 ## Claude `--available` excludes installed plugins (2026-10-01)
 
 Observed on the host with Claude 2.1.286: `claude plugin list --available

@@ -29,16 +29,46 @@ PY
     return 1
 }
 
+
+# Idempotency: each registration/installation is skipped when the CLI already
+# reports it done, so the image build does the work once and the test-time
+# call is a verification pass with no network.
+have_marketplace() {
+    "$1" plugin marketplace list --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if any(isinstance(m, dict) and m.get("name") == sys.argv[1] for m in entries) else 1)
+' "$2"
+}
+have_plugin() {
+    "$1" plugin list --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+plugins = data if isinstance(data, list) else data.get("installed", [])
+ok = any(
+    isinstance(p, dict) and p.get("id") == sys.argv[1]
+    and p.get("enabled", True) is not False and not p.get("errors")
+    for p in plugins
+)
+sys.exit(0 if ok else 1)
+' "$2"
+}
 setup_claude() {
     # Re-adding an already registered marketplace exits successfully on the
     # tested Claude CLI. A nonzero exit is a real setup failure and is reported.
-    run_step 'Claude marketplace registration' "$scratch/claude-marketplace" \
+    have_marketplace claude oh-my-clanker || run_step 'Claude marketplace registration' "$scratch/claude-marketplace" \
         claude plugin marketplace add /repo
-    run_step 'Claude OMC installation' "$scratch/claude-omc" \
+    have_plugin claude omc@oh-my-clanker || run_step 'Claude OMC installation' "$scratch/claude-omc" \
         claude plugin install omc@oh-my-clanker --scope user
-    run_step 'Claude Superpowers marketplace registration' "$scratch/claude-super-marketplace" \
+    have_marketplace claude superpowers-marketplace || run_step 'Claude Superpowers marketplace registration' "$scratch/claude-super-marketplace" \
         claude plugin marketplace add obra/superpowers-marketplace
-    run_step 'Claude Superpowers installation' "$scratch/claude-super" \
+    have_plugin claude superpowers@superpowers-marketplace || run_step 'Claude Superpowers installation' "$scratch/claude-super" \
         claude plugin install superpowers@superpowers-marketplace --scope user
     run_step 'Claude plugin listing' "$scratch/claude-list" claude plugin list --json
     python3 - "$scratch/claude-list" <<'PY'
@@ -56,11 +86,11 @@ PY
 setup_codex() {
     # Codex 0.156.1 plugin add --json returns the installedPath. Keep that
     # metadata for pure readiness checks later in this container.
-    run_step 'Codex marketplace registration' "$scratch/codex-marketplace" \
+    have_marketplace codex oh-my-clanker || run_step 'Codex marketplace registration' "$scratch/codex-marketplace" \
         codex plugin marketplace add /repo
     run_step 'Codex OMC installation' "$scratch/codex-omc.json" \
         codex plugin add omc@oh-my-clanker --json
-    run_step 'Codex Superpowers marketplace registration' "$scratch/codex-super-marketplace" \
+    have_marketplace codex superpowers-marketplace || run_step 'Codex Superpowers marketplace registration' "$scratch/codex-super-marketplace" \
         codex plugin marketplace add obra/superpowers-marketplace
     run_step 'Codex Superpowers installation' "$scratch/codex-super.json" \
         codex plugin add superpowers@superpowers-marketplace --json

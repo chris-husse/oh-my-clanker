@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.e2e.test_e2e_lifecycle import _assert_finish_stage_order
+from tests.e2e.lifecycle_helpers import _assert_finish_stage_order
 
 
 @pytest.mark.parametrize(

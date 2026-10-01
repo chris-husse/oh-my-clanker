@@ -108,6 +108,12 @@ class Conversation:
     def snapshot(self, repo: str):
         return self._request("snapshot", repo=repo)
 
+    def bind(self, slug: str, worktree: str, repo: str) -> None:
+        """Resuming a Codex session inside a forked snapshot needs the TUI
+        server relaunched with `codex resume`; there is no Codex golden path
+        yet, so this stays unimplemented rather than pretending."""
+        raise NotImplementedError("Codex variations need a Codex golden path first")
+
     def close(self):
         if self.process and self.process.poll() is None:
             try:
@@ -279,6 +285,9 @@ class ClaudeConversation:
                 "-i",
                 "-e",
                 "IS_SANDBOX=1",
+                # A bound (snapshot-resumed) session sees the prepared-path slug
+                # exactly as a live `omc start` session does.
+                *(["-e", f"OMC_SLUG={self.slug}"] if self.slug else []),
                 "-w",
                 cwd,
                 self.container_id,
@@ -331,6 +340,11 @@ class ClaudeConversation:
             raise ValueError("Claude start requires the real omc start --headless launch")
         self.repo = cwd
         self._launch(argv, cwd)
+
+    def bind(self, slug: str, worktree: str, repo: str) -> None:
+        """Attach to a named session created in a stage snapshot: later
+        `send` turns resume it by name, like any turn after the first."""
+        self.slug, self.worktree, self.repo, self.first = slug, worktree, repo, False
 
     def _discover_worktree(self):
         assert self.container_id and self.repo

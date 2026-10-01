@@ -86,9 +86,11 @@ COPY . /repo
 ENV UV_TOOL_BIN_DIR=/usr/local/bin
 RUN uv tool install /repo
 
-# plugins for Claude Code (omc from the local repo-marketplace + superpowers);
-# best-effort at build time, finished by docker/setup-plugins.sh at test time.
-RUN bash /repo/docker/setup-plugins.sh || echo "plugin setup deferred to test time"
+# plugins for Claude Code and Codex (omc from the local repo-marketplace +
+# superpowers), baked at build time. The Claude half is idempotent, so its
+# test-time call is a verification with no network; the Codex half re-adds
+# (its payload check needs the add output).
+RUN bash /repo/docker/setup-plugins.sh
 
 # git identity for worktree/commit operations inside scenarios
 RUN git config --global user.email "e2e@omc.invalid" && \

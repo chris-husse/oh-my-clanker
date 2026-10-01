@@ -129,11 +129,14 @@ def test_account_lifecycle_mounts_volume_and_copies_without_artifacts(monkeypatc
 def test_account_lock_rejects_concurrent_use(monkeypatch, tmp_path):
     from tests.e2e.codex_auth import codex_account
 
+    # The lock WAITS (xdist may misroute a Codex item) and fails loud only when
+    # the holder never lets go within the timeout.
     monkeypatch.setenv("CODEX_AUTH_VOLUME", "omc-e2e-codex-auth")
     monkeypatch.setenv("OMC_E2E_AUTH_LOCK_DIR", str(tmp_path))
+    monkeypatch.setenv("OMC_E2E_AUTH_LOCK_TIMEOUT", "0.2")
     first, second = FakeContainer(), FakeContainer()
     with codex_account(first, lambda _: None):
-        with pytest.raises(pytest.fail.Exception, match="already in use"):
+        with pytest.raises(pytest.fail.Exception, match="still in use after"):
             with codex_account(second, lambda _: None):
                 pass
     assert second.events == []
@@ -211,6 +214,7 @@ def test_codex_fixture_keeps_account_failures_loud(monkeypatch, tmp_path, failur
 
     monkeypatch.setenv("CODEX_AUTH_VOLUME", "omc-e2e-codex-auth")
     monkeypatch.setenv("OMC_E2E_AUTH_LOCK_DIR", str(tmp_path))
+    monkeypatch.setenv("OMC_E2E_AUTH_LOCK_TIMEOUT", "0.2")
     c = FakeContainer()
 
     def missing_auth(argv, **kwargs):
@@ -225,7 +229,7 @@ def test_codex_fixture_keeps_account_failures_loud(monkeypatch, tmp_path, failur
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
         instance = conftest.container.__wrapped__("disposable-image", "codex")
-        with pytest.raises(pytest.fail.Exception, match="missing|already in use"):
+        with pytest.raises(pytest.fail.Exception, match="missing|still in use after"):
             next(instance)
     finally:
         if lock_file is not None:
