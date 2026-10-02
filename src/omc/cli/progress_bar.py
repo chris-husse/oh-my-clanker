@@ -51,6 +51,12 @@ class BarThread:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
+    @property
+    def enabled(self) -> bool:
+        """True when the output stream is a TTY and redraws will happen.
+        Callers that narrate instead of drawing off a TTY key off this."""
+        return self._enabled
+
     def start(self) -> None:
         if not self._enabled:
             return

@@ -206,6 +206,11 @@ def test_document_api_backend_generates_wiki_docs(container):
     )
     assert rc == 0, _redacted(out)
     assert "→ regenerating documentation via claude api (claude-sonnet-" in _redacted(out)
+    # GitNexus's progress lines flowed through run_supervised's on_line into
+    # omc's narration: off a TTY the refresh narrates each GitNexus phase change
+    # as a `·` line (spec 2026-10-01 fix-doc-false-stall §4.2.5). The final
+    # phase is deterministic, so assert on it rather than on a module name.
+    assert "· Wiki generation complete" in _redacted(out), _redacted(out)[:2000]
     _assert_no_key(out, "command output")
 
     rc, listing = run_in(

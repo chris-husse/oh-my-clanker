@@ -47,8 +47,10 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} @openai/codex@${C
 ARG WORKTRUNK_VERSION=0.68.0
 ARG TARGETARCH
 # The fork commit the E2E image indexes with — must carry the wiki-regroup and
-# copied-index fixes (chris-husse/GitNexus PR #4) this suite relies on.
-ARG GITNEXUS_REF=8de99dc966f22eef3de74eeeb446b0bed695f3c7
+# copied-index fixes (chris-husse/GitNexus PR #4) and the piped progress lines
+# + LLM heartbeat (PR #5, fix-doc-false-stall-gitnexus-progress) this suite
+# relies on.
+ARG GITNEXUS_REF=f858d50ba8594e71de9a0fd27c4866417c406932
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) WT_TARGET=x86_64-unknown-linux-musl; \

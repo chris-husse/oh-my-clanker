@@ -30,7 +30,12 @@ from .gitnexus import gitnexus_argv, gitnexus_cli, redact_userinfo
 from .mirror import mirror_dir
 from .providers.registry import docs_llm_for
 from .toolctx import ToolContext
-from .wikirun import _WIKI_POLL_SECONDS, _WIKI_STALL_SECONDS, PageCountTracker  # noqa: F401
+from .wikirun import (  # noqa: F401
+    _WIKI_POLL_SECONDS,
+    _WIKI_STALL_SECONDS,
+    GitNexusProgress,
+    PageCountTracker,
+)
 
 PIN_BRANCH = "omc-pin"
 
@@ -359,16 +364,25 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
     total, done = tracker.state()
     if total and done:
         print(f"· resuming — {done}/{total} pages already on disk", file=sys.stderr, flush=True)
-    last_pct = tracker.percent
+    gn = GitNexusProgress()
+
+    def _percent() -> int | None:
+        # GitNexus's whole-run percent once it has spoken (fork prints
+        # GITNEXUS_PROGRESS lines when piped); the disk page count until then —
+        # and for an older GitNexus that never speaks, exactly today's behavior.
+        return gn.percent if gn.percent is not None else tracker.percent
+
+    last_pct = _percent()
     if last_pct is not None:
         _progress(last_pct)
 
     def _beat() -> object:
         # Heartbeat AND reporter: the same disk poll feeds the stall guard's
-        # token and emits OMC_PROGRESS whenever the integer percent moves.
+        # token and emits OMC_PROGRESS whenever the integer percent moves. The
+        # supervising thread is the only one that prints to stdout.
         nonlocal last_pct
         token = tracker.beat()
-        pct = tracker.percent
+        pct = _percent()
         if pct is not None and pct != last_pct:
             last_pct = pct
             _progress(pct)
@@ -381,6 +395,7 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
         stall_after=_WIKI_STALL_SECONDS,
         poll=_WIKI_POLL_SECONDS,
         extra_env=run.extra_env,
+        on_line=gn.feed,  # GitNexus's stderr lines, parsed on the reader thread
     )
     if stalled:
         print(
@@ -391,10 +406,11 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
     if cp.returncode != 0 or not wiki.is_dir():
         # Exact-key redaction FIRST, the userinfo heuristic second (a key containing
         # '@' would otherwise be mangled by _redact and escape run.redact), and
-        # truncation last.
+        # truncation last — from the TAIL: GitNexus prints the error after its
+        # pino records and progress lines, so the head is noise.
         print(
             "error: gitnexus wiki failed: "
-            f"{_redact(run.redact((cp.stderr or cp.stdout or '').strip()))[:400]}",
+            f"{_redact(run.redact((cp.stderr or cp.stdout or '').strip()))[-400:]}",
             file=sys.stderr,
         )
         return 1
