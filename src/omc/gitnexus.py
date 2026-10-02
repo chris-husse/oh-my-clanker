@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from .errors import OmcError
 from .mirror import DOCS_MIRROR_REL, clear_docs_mirror, mirror_dir
 from .toolctx import ToolContext
-from .wikirun import _WIKI_POLL_SECONDS, _WIKI_STALL_SECONDS, PageCountTracker
+from .wikirun import _WIKI_POLL_SECONDS, _WIKI_STALL_SECONDS, GitNexusProgress, PageCountTracker
 
 if TYPE_CHECKING:  # annotation-only; ToolContext stays the subprocess boundary
     import subprocess
@@ -336,6 +336,9 @@ def _destroy_and_rebuild(ctx: ToolContext, root: Path, base: str, say) -> tuple[
 
 
 def _run_wiki(ctx: ToolContext, cfg: Config, root: Path, say) -> bool:
+    # Lazy like docs_llm_for below: a module-level import of omc.cli.* from here
+    # is a cycle (omc.cli → start → gitnexus). wikirun.render() does the same.
+    from .cli.progress_bar import BarThread
     from .providers.registry import docs_llm_for
 
     try:
@@ -348,20 +351,43 @@ def _run_wiki(ctx: ToolContext, cfg: Config, root: Path, say) -> bool:
         return False
     say(f"→ regenerating documentation via {run.label}")
     tracker = PageCountTracker(root / ".gitnexus" / "wiki")
-    cp, stalled = ctx.run_supervised(
-        gitnexus_argv(ctx, *run.wiki_args),
-        cwd=str(root),
-        heartbeat=tracker.beat,
-        stall_after=_WIKI_STALL_SECONDS,
-        poll=_WIKI_POLL_SECONDS,
-        extra_env=run.extra_env,  # the key reaches exactly this node child
-    )
+    gn = GitNexusProgress(fallback=tracker)
+    bar = BarThread(gn)  # TTY-gated: constructing on a piped stderr yields a no-op
+    narrated = ""
+
+    def on_line(line: str) -> None:
+        # Runs on run_supervised's reader thread. Off a TTY the bar is silent,
+        # so narrate GitNexus's phase changes instead (a silent minute is a
+        # bug; depwatch narrates headless runs the same way). Heartbeats repeat
+        # the phase and are not news; an unchanged detail is not either.
+        nonlocal narrated
+        gn.feed(line)
+        if bar.enabled or gn.phase in ("", "heartbeat") or gn.detail == narrated:
+            return
+        narrated = gn.detail
+        say(f"· {gn.detail}")
+
+    bar.start()
+    try:
+        cp, stalled = ctx.run_supervised(
+            gitnexus_argv(ctx, *run.wiki_args),
+            cwd=str(root),
+            heartbeat=tracker.beat,
+            stall_after=_WIKI_STALL_SECONDS,
+            poll=_WIKI_POLL_SECONDS,
+            extra_env=run.extra_env,  # the key reaches exactly this node child
+            on_line=on_line,
+        )
+    finally:
+        bar.stop()  # clear the bar line before any ✓/✗ narration
     if stalled:
         say(f"✗ wiki stalled — no progress for {int(_WIKI_STALL_SECONDS)}s; killed")
         return False
     if cp.returncode != 0:
-        # redact BEFORE truncating: a key cut in half still leaks its prefix
-        say(f"✗ wiki failed: {run.redact((cp.stderr or cp.stdout or '').strip())[:400]}")
+        # redact BEFORE truncating: a key cut in half still leaks its prefix.
+        # Tail, not head: GitNexus prints the error after its pino records and
+        # progress lines.
+        say(f"✗ wiki failed: {run.redact((cp.stderr or cp.stdout or '').strip())[-400:]}")
     return True  # the recomputed verdict, not the exit code, decides
 
 

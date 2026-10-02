@@ -284,3 +284,86 @@ def test_wiki_api_failure_tail_is_redacted_before_truncation(tmp_path):
     assert any(s.startswith("✗ wiki failed: ") for s in said)
     assert not any(key in s or key[:12] in s for s in said)
     assert any("******" in s for s in said)
+
+
+_GN_LINES = (
+    'echo \'GITNEXUS_PROGRESS {"phase":"grouping","percent":15,'
+    '"detail":"Grouping files into modules (LLM)..."}\' >&2; '
+    'echo \'GITNEXUS_PROGRESS {"phase":"heartbeat","percent":15,'
+    '"detail":"Grouping files into modules (LLM)... (30s)"}\' >&2; '
+    'echo \'GITNEXUS_PROGRESS {"phase":"grouping","percent":28,'
+    '"detail":"Created 3 modules"}\' >&2; '
+    'echo \'GITNEXUS_PROGRESS {"phase":"grouping","percent":28,'
+    '"detail":"Created 3 modules"}\' >&2; '
+)
+
+
+def _wiki_behind_with_speaking_stub(tmp_path, *, extra_shell=""):
+    """A wiki-behind repo whose fake GitNexus prints progress lines on stderr."""
+    _, repo = _repo_with_origin(tmp_path)
+    w = repo / ".gitnexus" / "wiki"
+    w.mkdir()
+    (w / "meta.json").write_text(json.dumps({"fromCommit": "b" * 40}))  # wiki-unknown
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    node = tmp_path / "bin" / "node"
+    arm = '*" wiki --provider"*) '
+    text = node.read_text()
+    assert arm in text
+    node.write_text(text.replace(arm, arm + _GN_LINES + extra_shell))
+    return ctx, repo
+
+
+def test_wiki_off_tty_narrates_gitnexus_phase_changes_but_not_heartbeats(tmp_path):
+    ctx, repo = _wiki_behind_with_speaking_stub(tmp_path)
+    v, said = _run(ctx, repo, documentation=True, reset=False)  # pytest: stderr is not a TTY
+    assert v.fresh
+    assert "· Grouping files into modules (LLM)..." in said
+    assert said.count("· Created 3 modules") == 1  # repeated identical line narrated once
+    assert not any("(30s)" in s for s in said)  # heartbeats are not news
+    # narration lands between the start line and the success line
+    assert said.index("· Created 3 modules") > said.index(
+        next(s for s in said if s.startswith("→ regenerating documentation via"))
+    )
+
+
+def test_wiki_on_tty_drives_the_bar_and_does_not_narrate(tmp_path, monkeypatch):
+    import io
+
+    import omc.cli.progress_bar as pb
+
+    class FakeTTY(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    out = FakeTTY()
+    real_bar = pb.BarThread
+    # Seam from tests/unit/test_progress_bar.py: a bar draws on the `out=` stream
+    # it is given. _run_wiki imports BarThread lazily from this module, so patching
+    # it here hands _run_wiki a bar bound to a fake TTY — no global sys.stderr touch.
+    monkeypatch.setattr(pb, "BarThread", lambda tracker: real_bar(tracker, out=out))
+    assert real_bar(object(), out=out).enabled is True
+    assert real_bar(object(), out=io.StringIO()).enabled is False
+    # linger so the 1 s redraw thread paints at least once before stop
+    ctx, repo = _wiki_behind_with_speaking_stub(tmp_path, extra_shell="sleep 1.3; ")
+    v, said = _run(ctx, repo, documentation=True, reset=False)
+    assert v.fresh
+    assert not any(s.startswith("· ") for s in said)
+    painted = out.getvalue()
+    assert "\r[" in painted and "%" in painted  # an in-place bar redraw
+    assert painted.endswith("\r\x1b[K")  # cleared before narration resumed
+
+
+def test_wiki_failure_excerpt_is_the_tail_where_the_error_is(tmp_path):
+    _, repo = _repo_with_origin(tmp_path)
+    w = repo / ".gitnexus" / "wiki"
+    w.mkdir()
+    (w / "meta.json").write_text(json.dumps({"fromCommit": "b" * 40}))
+    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    node = tmp_path / "bin" / "node"
+    arm = '*" wiki --provider"*) '
+    noise = "x" * 500 + " LLM API error: boom"
+    node.write_text(node.read_text().replace(arm, f"{arm}printf '%s' '{noise}' >&2; exit 1; "))
+    v, said = _run(ctx, repo, documentation=True, reset=False)
+    assert not v.fresh
+    failed = next(s for s in said if s.startswith("✗ wiki failed: "))
+    assert "LLM API error: boom" in failed

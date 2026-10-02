@@ -127,6 +127,7 @@ class ToolContext:
         poll: float = 1.0,
         cwd: str | os.PathLike[str] | None = None,
         extra_env: dict[str, str] | None = None,
+        on_line: Callable[[str], None] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], bool]:
         """Run argv captured like run(), supervised for LIVENESS, not deadline:
         the child (its whole process group — LLM grandchildren included) is
@@ -137,7 +138,14 @@ class ToolContext:
 
         heartbeat runs on the supervising thread once per ``poll``; its
         exceptions count as "no change" — a broken heartbeat must neither
-        kill a healthy child nor crash the supervisor."""
+        kill a healthy child nor crash the supervisor.
+
+        ``on_line``, when given, receives every stdout and stderr line (newline
+        stripped) from the reader threads, serialized under one lock like
+        ``stream()``. Unlike ``stream()``, a failing callback is CONTAINED, not
+        re-raised: this method's job is liveness, and a reporter bug must
+        neither kill a healthy child nor crash the supervisor — the same
+        doctrine as heartbeat exceptions. Capture is unaffected either way."""
         kwargs: dict[str, object] = {
             "env": {**self.child_env(), **(extra_env or {})},
             "stdout": subprocess.PIPE,
@@ -155,11 +163,16 @@ class ToolContext:
         # NOT atomic — but a lost update is harmless (add-only counter; at worst
         # one poll window sees "no change" and the stall clock keeps running).
 
+        lock = threading.Lock()  # serializes on_line, as stream() does
+
         def pump(pipe, key: str) -> None:
             try:
                 for raw in pipe:
                     chunks[key].append(raw)
                     activity[0] += len(raw)
+                    if on_line is not None:
+                        with lock, contextlib.suppress(Exception):
+                            on_line(raw.rstrip("\n"))
             finally:
                 pipe.close()
 

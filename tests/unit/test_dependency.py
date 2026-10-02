@@ -756,3 +756,50 @@ def test_document_api_without_key_is_a_clean_error(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "error:" in err and "run omc configure" in err
     assert not nodecalls.exists()  # resolution fails before any gitnexus call
+
+
+def test_document_reports_gitnexus_percent_over_the_page_count_once_it_speaks(
+    tmp_path, capsys, monkeypatch
+):
+    import omc.dependency as dep
+
+    ctx, _, _ = _ctx(tmp_path)
+    dest = _seed_indexed(ctx, with_wiki=False)
+    wiki = dest / ".gitnexus" / "wiki"
+    _tree(wiki, [{"slug": "a"}, {"slug": "b"}, {"slug": "c"}])  # 3 + overview = 4
+    (wiki / "a.md").write_text("x")  # page count says 25 at start
+    monkeypatch.setattr(dep, "_WIKI_POLL_SECONDS", 0.05)
+    # The fake GitNexus speaks on stderr (restricted PATH: builtins only), and a
+    # second page lands mid-run — once GitNexus has spoken, the disk count must
+    # no longer drive OMC_PROGRESS. Foreign and malformed lines are ignored.
+    node = tmp_path / "bin" / "node"
+    node.write_text(
+        "#!/bin/sh\n"
+        'echo \'GITNEXUS_PROGRESS {"phase":"grouping","percent":17,'
+        '"detail":"Grouping batch 1/3 (LLM)..."}\' >&2\n'
+        "sleep 0.3\n"
+        "printf x > .gitnexus/wiki/b.md\n"
+        'echo \'GITNEXUS_PROGRESS {"phase":"modules","percent":40,"detail":"b"}\' >&2\n'
+        "echo 'not a progress line' >&2\n"
+        'echo \'GITNEXUS_PROGRESS {"phase":"junk","percent":250}\' >&2\n'
+        "sleep 0.3\n"
+        "exit 0\n"
+    )
+    assert run_document(ctx, f"github.com/foo/bar@{H}") == 0
+    vals = _progress_values(capsys)
+    assert vals[0] == 25  # disk count before GitNexus spoke
+    assert 17 in vals and 40 in vals  # GitNexus's whole-run percent, in order
+    assert vals.index(17) < vals.index(40)
+    assert 50 not in vals  # b.md landing did not re-assert the disk count
+    assert vals[-1] == 100  # deterministic completion signal unchanged
+
+
+def test_document_failure_excerpt_is_the_tail_where_the_error_is(tmp_path, capsys):
+    ctx, _, nodecalls = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    # pino records and progress lines precede the error on stderr; a head cut
+    # would show 400 chars of noise and no error.
+    _env_echoing_node(tmp_path, nodecalls, rc=1, stderr="x" * 500 + " LLM API error: boom")
+    assert run_document(ctx, "github.com/foo/bar") == 1
+    err = capsys.readouterr().err
+    assert "LLM API error: boom" in err

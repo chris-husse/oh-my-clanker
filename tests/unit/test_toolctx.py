@@ -239,3 +239,54 @@ def test_supervised_kills_child_group_when_interrupted(tmp_path):
     else:
         os.kill(pid, 9)  # cleanup so the suite doesn't leak a sleeper
         raise AssertionError("child survived KeyboardInterrupt")
+
+
+def test_supervised_on_line_receives_whole_lines_from_both_pipes_serialized(tmp_path):
+    import threading
+
+    ctx = _ctx(tmp_path)
+    code = (
+        "import sys\n"
+        "for i in range(50):\n"
+        "    print(f'out{i}', flush=True)\n"
+        "    print(f'err{i}', file=sys.stderr, flush=True)\n"
+    )
+    seen: list[str] = []
+    depth = {"cur": 0, "max": 0}
+    guard = threading.Lock()
+
+    def on_line(line: str) -> None:
+        with guard:
+            depth["cur"] += 1
+            depth["max"] = max(depth["max"], depth["cur"])
+        time.sleep(0.001)  # widen the window so concurrent delivery would show
+        seen.append(line)
+        with guard:
+            depth["cur"] -= 1
+
+    cp, stalled = ctx.run_supervised(
+        [sys.executable, "-u", "-c", code],
+        heartbeat=lambda: 0,
+        stall_after=5,
+        poll=0.05,
+        on_line=on_line,
+    )
+    assert stalled is False and cp.returncode == 0
+    assert sorted(seen) == sorted([f"out{i}" for i in range(50)] + [f"err{i}" for i in range(50)])
+    assert depth["max"] == 1  # never reentered concurrently
+    assert cp.stdout.count("out") == 50 and cp.stderr.count("err") == 50  # capture unchanged
+
+
+def test_supervised_raising_on_line_never_kills_an_active_child(tmp_path):
+    ctx = _ctx(tmp_path)
+
+    def boom(line: str) -> None:
+        raise RuntimeError(f"callback failed on {line}")
+
+    script = "for i in 1 2 3 4 5 6; do echo tick; sleep 0.2; done"
+    cp, stalled = ctx.run_supervised(
+        ["sh", "-c", script], heartbeat=lambda: 0, stall_after=0.5, poll=0.05, on_line=boom
+    )
+    assert stalled is False  # a reporter bug is contained, unlike stream()'s contract
+    assert cp.returncode == 0
+    assert cp.stdout.count("tick") == 6  # every line still captured after the callback raised
