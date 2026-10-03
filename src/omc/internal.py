@@ -1,8 +1,9 @@
 """`omc internal …` — the skill↔CLI contract (hidden, machine-readable).
 
 Intercepted before argparse; stdout is for machines. Exit codes: 0 ok,
-1 error, 2 usage, 3 bail ("inconclusive — the calling skill falls back to its
-own judgment", chicken semantics; rebase conflicts bail rather than error).
+1 error, 2 usage or refusal (a definite `ok: false` verdict), 3 bail
+("inconclusive — the calling skill falls back to its own judgment", chicken
+semantics; rebase conflicts bail rather than error).
 """
 
 from __future__ import annotations
@@ -26,10 +27,16 @@ from .mirror import mirror_snapshot
 from .providers.registry import provider_names
 from .toolctx import ToolContext
 from .watchlock import acquire_busy_narrated, busy_lock
-from .wtconfig import WT_TEMPLATE, primary_root, repo_root
+from .wtconfig import (
+    WT_TEMPLATE,
+    current_branch,
+    primary_root,
+    repo_root,
+    resolve_design_record,
+)
 
 _USAGE = (
-    "usage: omc internal {rebase-main [--base BRANCH] | wt-template"
+    "usage: omc internal {rebase-main [--base BRANCH] | wt-template | design-record"
     " | notify --provider NAME [payload]"
     " | gitnexus [--git REF] <ensure|status|refresh [--enable-documentation]"
     "|query|context|impact|cypher> [args…]"
@@ -96,8 +103,7 @@ def _knowledge_refresh(ctx: ToolContext, rest: list[str]) -> int:
     if pb is None:
         return 2
     primary, base = pb
-    cp = ctx.run([ctx.git_bin, "rev-parse", "--abbrev-ref", "HEAD"], cwd=primary)
-    branch = (cp.stdout or "").strip()
+    branch = current_branch(ctx, primary) or ""
     if branch != base:
         # analyze off the base would stamp the store with THAT branch and
         # recreate the inversion — refuse before any node call and any lock.
@@ -109,7 +115,7 @@ def _knowledge_refresh(ctx: ToolContext, rest: list[str]) -> int:
     if ensure_gitnexus(ctx):
         return 1
     lock = busy_lock(ctx, cwd=primary)
-    # Held for the WHOLE repair so `omc start` never snapshots a half-written
+    # Held for the WHOLE repair so `omc design` never snapshots a half-written
     # index/wiki; the context manager releases it on exceptions too.
     with acquire_busy_narrated(lock, _say) if lock is not None else nullcontext():
         v = refresh_knowledge(
@@ -222,7 +228,7 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
         return 2
     if not gitnexus_cli(ctx).is_file():
         print(
-            "error: GitNexus is not installed — run `omc update` (or `omc start`/`omc watch`) "
+            "error: GitNexus is not installed — run `omc update` (or `omc design`/`omc watch`) "
             "to install it",
             file=sys.stderr,
         )
@@ -268,6 +274,23 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
     return cp.returncode
 
 
+def _design_record(ctx: ToolContext) -> int:
+    """The design-record gate as a machine contract (spec §3.4). Project config
+    alone decides the branch prefix, so the verb works where global config is
+    absent. `ok: false` is a definite refusal: verdict line, exit 2. Outside a
+    repo it prints the same error line and returns 2 as the other verbs; any
+    other OmcError (invalid project config) reaches main()'s shared rc-1
+    boundary, so the try stays narrow."""
+    cfg = resolve.project_config(ctx)
+    try:
+        verdict = resolve_design_record(ctx, cfg)
+    except OmcError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"OMC_DESIGN_RECORD {json.dumps(verdict.to_json())}", flush=True)
+    return 0 if verdict.ok else 2
+
+
 def run_internal(argv: list[str]) -> int:
     if not argv:
         print(_USAGE, file=sys.stderr)
@@ -276,6 +299,11 @@ def run_internal(argv: list[str]) -> int:
     if cmd == "wt-template":
         print(WT_TEMPLATE, end="")
         return 0
+    if cmd == "design-record":
+        if rest:
+            print(_USAGE, file=sys.stderr)
+            return 2
+        return _design_record(ToolContext.from_env())
     if cmd == "rebase-main":
         parser = argparse.ArgumentParser(prog="omc internal rebase-main", add_help=False)
         parser.add_argument("--base", default=None)

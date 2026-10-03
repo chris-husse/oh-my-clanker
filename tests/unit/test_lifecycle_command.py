@@ -20,6 +20,7 @@ FULL = {
     "test_critical_answer_resumes_authorized_implementation[claude]",
     "test_failing_build_blocks_publication[codex]",
     "test_failing_build_blocks_publication[claude]",
+    "test_codex_implement_handoff_from_claude_record",
 }
 
 

@@ -639,3 +639,88 @@ def test_rebase_main_payload_carries_knowledge_in_all_shapes(tmp_path, capsys):
     rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
     assert rc == 0 and "knowledge" in verdict
     assert verdict["knowledge"]["run_in"] == str(primary.resolve())
+
+
+def _feature_repo(tmp_path, branch="feature/proj-1-fix-login"):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _git("config", "user.email", "t@t", cwd=repo)
+    _git("config", "user.name", "t", cwd=repo)
+    (repo / "f").write_text("x\n")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-qm", "c1", cwd=repo)
+    _git("checkout", "-qb", branch, cwd=repo)
+    return repo
+
+
+def _design_record_line(out):
+    lines = [ln for ln in out.splitlines() if ln.startswith("OMC_DESIGN_RECORD ")]
+    assert len(lines) == 1, out
+    return json.loads(lines[0].split(" ", 1)[1])
+
+
+def test_design_record_ok_exits_zero(tmp_path, capsys, monkeypatch):
+    repo = _feature_repo(tmp_path)
+    rel = "docs/superpowers/specs/2026-10-02-proj-1-fix-login-design.md"
+    (repo / rel).parent.mkdir(parents=True)
+    (repo / rel).write_text("# d\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", "spec", cwd=repo)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert run_internal(["design-record"]) == 0
+    assert _design_record_line(capsys.readouterr().out) == {
+        "ok": True,
+        "slug": "proj-1-fix-login",
+        "path": rel,
+    }
+
+
+def test_design_record_missing_exits_two_with_verdict(tmp_path, capsys, monkeypatch):
+    repo = _feature_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert run_internal(["design-record"]) == 2
+    data = _design_record_line(capsys.readouterr().out)
+    assert data["ok"] is False and data["reason"] == "missing"
+    assert "/omc:design" in data["message"]
+
+
+def test_design_record_non_omc_branch(tmp_path, capsys, monkeypatch):
+    repo = _feature_repo(tmp_path, branch="main-ish")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert run_internal(["design-record"]) == 2
+    assert _design_record_line(capsys.readouterr().out)["reason"] == "no-prefix"
+
+
+def test_design_record_outside_repo_refuses_like_the_other_verbs(tmp_path, capsys, monkeypatch):
+    # Every internal verb prints this line and returns 2 when not in a repo
+    # (_primary_and_base, _rebase_main, _gitnexus); design-record matches them.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert run_internal(["design-record"]) == 2
+    captured = capsys.readouterr()
+    assert "error: not inside a git repository" in captured.err
+    assert "OMC_DESIGN_RECORD" not in captured.out
+
+
+def test_design_record_rejects_arguments(capsys):
+    assert run_internal(["design-record", "--bogus"]) == 2
+    assert "design-record" in capsys.readouterr().err  # usage names the verb
+
+
+def test_design_record_invalid_config_reaches_the_rc1_boundary(tmp_path, capsys, monkeypatch):
+    from omc.cli import main
+
+    repo = _feature_repo(tmp_path)
+    (repo / ".omc").mkdir()
+    (repo / ".omc" / "config.yaml").write_text("not: [valid\n")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "home"))
+    assert main(["internal", "design-record"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "OMC_DESIGN_RECORD" not in captured.out

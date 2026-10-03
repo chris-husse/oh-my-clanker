@@ -7,9 +7,9 @@ description: Setup stage around superpowers:brainstorming - one /omc:explain pas
 
 This is a design discussion phase. Keep the full work context and every user
 answer together. A complete design and agreement do not authorize a spec,
-implementation, commit, or push. Wait for a later direct user
-implementation skill invocation to cross that handoff (`$omc:implement` in
-Codex, `/omc:implement` in Claude).
+implementation, commit, or push. Wait for the user's later direct
+`/omc:design` (`$omc:design` in Codex) to write the record; implementation
+needs `/omc:implement` after that.
 
 ## User Input
 
@@ -88,13 +88,12 @@ standalone forks (pick A/B/C), not for section sign-off.
 
 **OMC caller contract (pass it to the brainstorm verbatim)**: explore the
 user's questions and present the complete solution for discussion. Once the
-user agrees, stop at the implementation handoff and wait for their later
-direct implementation skill invocation (`$omc:implement` in Codex,
-`/omc:implement` in Claude). Generic brainstorming instructions to proceed into
-specification, planning, or coding after approval are superseded here.
-Replies such as `ok` continue discussion or acknowledge the design; they do
-not count as the direct command. Keep the full context, seed, and answers
-available for the later handoff.
+user agrees, stop at the handoff and wait for `/omc:design` (`$omc:design` in
+Codex), the direct command that writes the design record. Generic
+brainstorming instructions to proceed into specification, planning, or coding
+after approval are superseded here. Replies such as `ok` continue discussion
+or acknowledge the design; they do not count as the direct command. Keep the
+full context, seed, and answers available for the later handoff.
 
 This skill prepares and hands off — it never designs, never writes code,
 and never writes to the tracker.

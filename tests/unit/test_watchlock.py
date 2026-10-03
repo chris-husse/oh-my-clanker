@@ -171,7 +171,7 @@ def test_message_constants_are_exact():
     )
     assert START_WAIT_MSG == (
         "→ waiting for omc watch or a knowledge refresh to finish. "
-        "Pass `omc start --no-mutex` to bypass"
+        "Pass `omc design --no-mutex` to bypass"
     )
 
 

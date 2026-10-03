@@ -72,7 +72,7 @@ failing write more than once.
    - **Another user** → first decide whether you can actually ask. You may ask
      ONLY if a real interactive question tool (e.g. `AskUserQuestion`) is
      available to you in this session. Writing the options out as prose is NOT
-     asking: in a headless run (`omc start --headless`, any `-p`/`exec`
+     asking: in a headless run (`omc design --headless`, any `-p`/`exec`
      invocation) nobody will ever answer, so a prose "question" ends the turn
      with no verdict and the caller learns nothing. When in doubt, treat the
      session as non-interactive.

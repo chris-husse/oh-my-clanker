@@ -7,7 +7,7 @@ Two flock-based locks (via filelock) live in the repo's SHARED .git dir
   Forbids parallel watches on one primary; `--clear-mutex` bypasses.
 - omc-watch-busy.lock (BUSY): held while ANYONE mutates the primary's
   knowledge — a watch tick or `omc internal gitnexus refresh`. Free ⇔ nobody
-  is mutating. `omc start` probes it before cutting a worktree so it never
+  is mutating. `omc design` probes it before cutting a worktree so it never
   snapshots a half-updated primary.
 
 The kernel releases flock locks when their holder dies, so a crashed or
@@ -32,7 +32,7 @@ BUSY_LOCK = "omc-watch-busy.lock"
 WATCH_BAIL_MSG = "Another `omc watch` instance may be running. Pass `--clear-mutex` to bypass"
 START_WAIT_MSG = (
     "→ waiting for omc watch or a knowledge refresh to finish. "
-    "Pass `omc start --no-mutex` to bypass"
+    "Pass `omc design --no-mutex` to bypass"
 )
 
 
@@ -60,7 +60,7 @@ def watch_locks(ctx: ToolContext, cwd: str | None = None) -> tuple[FileLock, Fil
 
 
 def busy_lock(ctx: ToolContext, cwd: str | None = None) -> FileLock | None:
-    """The busy lock alone — all `omc start` ever probes; None outside a repo."""
+    """The busy lock alone — all `omc design` ever probes; None outside a repo."""
     d = locks_dir(ctx, cwd)
     return None if d is None else FileLock(str(d / BUSY_LOCK))
 

@@ -1,6 +1,6 @@
 ---
 name: grug
-description: Internal — used by /omc:spec and /omc:review; not meant for direct invocation. The grug complexity lens - judge a spec section, a whole design record, or the branch diff for complexity that does not pay for itself, cite the grugbrain.dev rule, name the simpler alternative.
+description: Internal — used by /omc:design and /omc:review; not meant for direct invocation. The grug complexity lens - judge a spec section, a whole design record, or the branch diff for complexity that does not pay for itself, cite the grugbrain.dev rule, name the simpler alternative.
 ---
 
 # omc grug (internal)

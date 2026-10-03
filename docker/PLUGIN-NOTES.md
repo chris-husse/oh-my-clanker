@@ -6,7 +6,7 @@ hour serially and was a mandatory verify gate for most changes. Measured on
 minutes before the run was stopped. The causes, in order of weight:
 
 - Each of the three parametrized scenarios replayed the same preamble
-  (`omc start`, primer, seed → design, detail, "ok": four agent turns and two
+  (`omc design`, primer, seed → design, detail, "ok": four agent turns and two
   judge calls) before its one distinctive turn, six times per run.
 - The implement turn was budgeted at 1800 s and needed most of it: omc's own
   `/omc:implement` runs spec hardening with an explain pass per section, a
@@ -29,7 +29,7 @@ What replaced it:
   everything else with `-n auto --dist loadgroup`. Codex items share one
   `xdist_group`; the account lock waits (`OMC_E2E_AUTH_LOCK_TIMEOUT`) instead
   of failing.
-- The golden path runs the lifecycle once in stages (`start` = `omc start`
+- The golden path runs the lifecycle once in stages (`start` = `omc design`
   plus the primer turn, `design`, `agreed`), snapshots the container after
   each with `docker commit` (`omc-e2e-stage:<provider>-<stage>-<source>`, a
   manifest at `/tmp/omc-stage.json`), and **variations**
@@ -117,7 +117,7 @@ marketplace stamped 0.0.1, rewrite it to the checkout version, run the update
 path, assert the registry reports the new version and the cached payload
 carries `skills/grug`. The E2E image pins Claude 2.1.286 for this behaviour.
 
-Because `omc start` now stops when the installed version still differs from
+Because `omc design` now stops when the installed version still differs from
 the offered one after a heal, the release invariant that `pyproject.toml`,
 `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` carry the
 same version (`scripts/stamp_version.py`,
@@ -211,10 +211,10 @@ its isolated rerun and the final full unit suite passed. That intermittent
 cleanup behavior and the one folder-trust stall were not claimed fixed here.
 
 > **Conversational lifecycle E2E (2026-09-24):**
-> `tests/e2e/test_e2e_lifecycle.py` exercises the real `omc start` launch and
+> `tests/e2e/test_e2e_lifecycle.py` exercises the real `omc design` launch and
 > persistent provider conversations. Codex uses a container-local PTY server
 > (`docker/conversation.py`) and persisted TUI JSONL task boundaries; Claude
-> uses `omc start --headless` followed by the named `claude --resume` session
+> uses `omc design --headless` followed by the named `claude --resume` session
 > and stream-JSON result boundaries. Both paths snapshot source, Git index,
 > HEAD, bare-origin refs, and spec/plan files after each scenario turn. The
 > actor is writable; semantic claims are judged by a separate read-only
@@ -888,7 +888,7 @@ there the same failure came straight back:
 Claude Code matches a declared dependency by its exact `name@marketplace`
 id — a superpowers from any other marketplace does not count — and it never
 installs the dependency for you. Worse, omc's own probe (`"omc@" in claude
-plugin list`) read this state as "ok", so `omc start` launched a session
+plugin list`) read this state as "ok", so `omc design` launched a session
 whose seeded `/omc:start` was "Unknown command".
 
 Reproduced in an isolated `HOME` (claude 2.1.x): superpowers installed from
@@ -901,7 +901,7 @@ identically (the image still installs it from there).
 
 **Kept shape:** `.claude-plugin/plugin.json` declares no `dependencies`
 (locked in by `tests/unit/test_plugin_manifests.py::test_claude_plugin_manifest`).
-`src/omc/plugin.py::ensure_plugin` — run by `omc start`, `omc update` and
+`src/omc/plugin.py::ensure_plugin` — run by `omc design`, `omc update` and
 `omc configure` — now probes `claude plugin list --json` (an `errors` array
 per plugin is the contract), installs superpowers from the official
 marketplace when no `superpowers@*` plugin is present, installs omc when

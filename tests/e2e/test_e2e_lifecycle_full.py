@@ -11,7 +11,9 @@ from .conversation import save_evidence
 from .harness import run_in
 from .lifecycle_helpers import (
     _assert_critical_wait,
+    _assert_recorded,
     _assert_successful_implementation,
+    _direct_design,
     _direct_implement,
     _fixture,
     _record_phase,
@@ -19,7 +21,16 @@ from .lifecycle_helpers import (
     _start_discussion,
 )
 
-pytestmark = [pytest.mark.e2e, pytest.mark.expensive, pytest.mark.timeout(3600)]
+# the critical-answer run's summed turn budgets are 5100 s
+pytestmark = [pytest.mark.e2e, pytest.mark.expensive, pytest.mark.timeout(5400)]
+
+
+def _design_turn(session, repo, worktree, evidence, baseline, provider):
+    session.send(_direct_design(provider))
+    recorded = session.wait_turn(900)
+    feature, _ = _record_phase(session, repo, worktree, evidence, "design", recorded)
+    _assert_recorded(baseline, feature, "design record")
+    return feature
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])
@@ -37,6 +48,7 @@ def test_start_context_waits_for_direct_implement(container, provider):
             worktree, branch, baseline = _start_discussion(
                 container, provider, session, judge, judge_model, repo, evidence, context
             )
+            _design_turn(session, repo, worktree, evidence, baseline, provider)
             session.send(_direct_implement(provider))
             implemented = session.wait_turn(1800)
             _record_phase(session, repo, worktree, evidence, "implement", implemented)
@@ -66,7 +78,7 @@ def test_critical_answer_resumes_authorized_implementation(container, provider):
                 "zero-argument signature. Add an exact-value unittest.",
             )
             session.send(
-                _direct_implement(
+                _direct_design(
                     provider,
                     "A new requirement says the same zero-argument "
                     "greeting() call must return exactly both 'Hello, world!' and "
@@ -88,7 +100,8 @@ def test_critical_answer_resumes_authorized_implementation(container, provider):
                 [
                     "The assistant identifies the contradiction as a critical "
                     "unanswered requirement.",
-                    "The assistant asks which exact value to implement before proceeding.",
+                    "The assistant asks which exact value the design should specify "
+                    "before proceeding.",
                     "The assistant does not request routine approval of an otherwise "
                     "complete spec or plan.",
                 ],
@@ -99,8 +112,12 @@ def test_critical_answer_resumes_authorized_implementation(container, provider):
             session.send(
                 "Use exactly 'Hello, world!' and discard the conflicting 'Hello there!' value."
             )
-            resumed = session.wait_turn(1800)
-            _record_phase(session, repo, worktree, evidence, "resumed", resumed)
+            resumed = session.wait_turn(1500)  # /omc:design resumes: writes, hardens, commits
+            feature, _ = _record_phase(session, repo, worktree, evidence, "resumed", resumed)
+            _assert_recorded(baseline, feature, "design record after the answer")
+            session.send(_direct_implement(provider))  # the second authority word
+            implemented = session.wait_turn(1800)
+            _record_phase(session, repo, worktree, evidence, "implement", implemented)
             _assert_successful_implementation(
                 container, provider, session, repo, worktree, branch, evidence, baseline
             )
@@ -128,6 +145,7 @@ def test_failing_build_blocks_publication(container, provider):
                 "'Goodbye, world!' but must return exactly 'Hello, world!' with its "
                 "zero-argument signature. Add an exact-value unittest.",
             )
+            _design_turn(session, repo, worktree, evidence, baseline, provider)
             session.send(_direct_implement(provider))
             finished = session.wait_turn(1800)
             after, _ = _record_phase(

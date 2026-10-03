@@ -316,7 +316,7 @@ def _plugin_payload_fixture(tmp_path, *, omc_version="0.1.7", create_payloads=Tr
     (repo / ".codex-plugin" / "plugin.json").write_text(
         json.dumps({"name": "omc", "version": "0.1.7", "skills": "./skills/"})
     )
-    for skill in ("start", "plan", "implement"):
+    for skill in ("start", "plan", "design", "implement"):
         (repo / "skills" / skill).mkdir(parents=True)
         (repo / "skills" / skill / "SKILL.md").write_text(f"current {skill} skill")
     entries = [
@@ -339,7 +339,7 @@ def _plugin_payload_fixture(tmp_path, *, omc_version="0.1.7", create_payloads=Tr
                 f"current {skill} skill" if name == "omc" else "installed skill"
             )
             if name == "omc":
-                for extra in ("plan", "implement"):
+                for extra in ("plan", "design", "implement"):
                     (installed / "skills" / extra).mkdir(parents=True)
                     (installed / "skills" / extra / "SKILL.md").write_text(f"current {extra} skill")
                 (installed / ".codex-plugin").mkdir()

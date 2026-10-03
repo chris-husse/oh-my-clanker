@@ -57,6 +57,7 @@ USER_FACING_SKILLS = (
     "slug",
     "start",
     "plan",
+    "design",
     "implement",
     "finish",
     "check",
@@ -76,7 +77,6 @@ INTERNAL_SKILLS = (
     "create-mr",
     "get-mr-description",
     "squash",
-    "spec",
     "gitnexus-ensure",
     "gitnexus-index",
     "gitnexus-document",
@@ -208,7 +208,9 @@ def test_start_skill_contract():
     for needle in (
         "OMC_SLUG",
         "omc:plan",
-        "omc start",
+        "omc design",
+        "alias",
+        "/omc:design",
         "$ARGUMENTS",
         "merge-base",
         "OMC_KNOWLEDGE",
@@ -278,6 +280,7 @@ def test_machine_contract_listings_include_knowledge():
         ".omc/skills/explain-context/SKILL.md",
     ):
         assert "OMC_KNOWLEDGE" in (ROOT / rel).read_text(), rel
+        assert "OMC_DESIGN_RECORD" in (ROOT / rel).read_text(), rel
 
 
 def test_investigate_skill_contract():
@@ -317,10 +320,13 @@ def test_plan_skill_contract():
         "non-fatal",
         "model-tier",
         "OMC_KNOWLEDGE",
+        "/omc:design",
     ):
         assert needle in text, f"plan skill missing {needle!r}"
     # composition rule: explain is called as a command, never unpacked
     assert "never reach into" in text
+    # the brainstorm's handoff is the design record command, not implementation
+    assert "wait for `/omc:design`" in text
 
 
 def test_implement_skill_contract():
@@ -328,26 +334,29 @@ def test_implement_skill_contract():
     # Lifecycle tests cover direct implementation authority and continuation;
     # this manifest check must not require the old existing-spec approval gate.
     for needle in (
-        "`spec`",
+        "omc internal design-record",
+        "OMC_DESIGN_RECORD",
+        "/omc:design",
         "writing-plans",
         "subagent-driven-development",
-        "finish",
+        "`finish`",
         "/omc:explain",
         "model-tier policy",
         "`Model:`",
         "top tier",
         "/omc:check",
         "before dispatching the next task",
+        "plan already exists",
     ):
         assert needle in text, f"implement skill missing {needle!r}"
-    # phases run strictly spec -> plan -> build -> ship
+    assert "Invoke the internal `spec` skill" not in text
     order = [
-        text.index("`spec`"),
+        text.index("omc internal design-record"),
         text.index("writing-plans"),
         text.index("subagent-driven-development"),
         text.index("`finish`"),
     ]
-    assert order == sorted(order), "implement must order spec -> plan -> build -> ship"
+    assert order == sorted(order), "implement must order record gate -> plan -> build -> ship"
 
 
 def test_index_and_document_delegate():
@@ -472,12 +481,12 @@ def test_explain_delegates_to_explain_dependency():
     assert "never auto" in text  # names the dependency; never auto-ensures
 
 
-def test_spec_skill_contract():
-    text = (ROOT / "skills" / "spec" / "SKILL.md").read_text()
+def test_design_skill_contract():
+    text = (ROOT / "skills" / "design" / "SKILL.md").read_text()
     for needle in (
         "/omc:explain",
         "EACH section",
-        "whole-spec",
+        "whole-record",
         "architectural",
         "follow-up",
         "review",
@@ -488,9 +497,17 @@ def test_spec_skill_contract():
         "grug skill unavailable — plugin stale? run omc update",
         "Fix, by the top tier",
         "Ask, batched",
+        "$ARGUMENTS",
+        "omc internal design-record",
+        "OMC_DESIGN_RECORD",
+        "missing",
+        "unclean",
+        "ambiguous",
+        "omc implement",
+        "valid stop",
     ):
-        assert needle in text, f"spec skill missing {needle!r}"
-    # spec-phase emphasis is architecture; implementation choices are plan-phase
+        assert needle in text, f"design skill missing {needle!r}"
+    # design-phase emphasis is architecture; implementation choices are plan-phase
     assert "plan phase" in text
     # grug judges each section AFTER explain has answered, with that answer as context
     # (anchor on Step 2: the frontmatter already mentions /omc:explain)
@@ -501,10 +518,20 @@ def test_spec_skill_contract():
     assert text.index("Waive by record", step4) < text.index("Ask, batched", step4)
     # grug unavailable is a hard stop: Step 5 must not commit or continue past it
     step5 = text.index("## Step 5")
-    assert "grug skill unavailable" in text[step5:]
-    assert "hard stop" in text[step5:]
+    assert "grug skill unavailable" in text[step5:] and "hard stop" in text[step5:]
+    assert "under /omc:implement" not in text  # the continue-branch is gone
+    assert "Completion contract" in text
     # the waiver section is unconditional so review can rely on it
     assert text.index("Deliberate complexity") < text.index("## Step 2")
+
+
+def test_design_is_user_facing_and_owns_the_record():
+    text = (ROOT / "skills" / "design" / "SKILL.md").read_text()
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert "name: design" in m.group(1)
+    assert "Internal" not in m.group(1) and "not meant for direct invocation" not in m.group(1)
+    assert "/omc:implement" in text and "omc implement" in text  # the two continuations
+    assert not (ROOT / "skills" / "spec").exists()
 
 
 GRUG_RULE_IDS = (
@@ -560,18 +587,19 @@ def test_grug_skill_contract():
     assert "/omc:explain" not in text
     # the two owners are named in the frontmatter description
     m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
-    assert "/omc:spec" in m.group(1) and "/omc:review" in m.group(1)
+    assert "/omc:design" in m.group(1) and "/omc:review" in m.group(1)
 
 
 # --- Anti-stall contract -----------------------------------------------------
 # Composed omc flows nest 3-4 deep (start -> ticket-sync; finish -> squash/
-# stages/create-mr -> get-mr-description; implement -> spec/plan/finish). Each
-# sub-skill arrives as a fresh instruction block and ends in a verdict line or a
-# polished artifact, both of which read as "done". Runs repeatedly died on the
-# OMC_TICKET verdict, leaving the caller's remaining steps silently unrun.
+# stages/create-mr -> get-mr-description; design -> explain/grug; implement ->
+# plan/finish). Each sub-skill arrives as a fresh instruction block and ends in
+# a verdict line or a polished artifact, both of which read as "done". Runs
+# repeatedly died on the OMC_TICKET verdict, leaving the caller's remaining
+# steps silently unrun.
 # Prose disclaimers alone did not hold; these tests pin the structural rules.
 
-CONDUCTORS = ("start", "finish", "implement")
+CONDUCTORS = ("start", "design", "finish", "implement")
 
 
 def test_conductors_externalize_their_steps_first():
@@ -626,3 +654,12 @@ def test_behavior_layer_carries_the_anti_stall_doctrine():
     text = (ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text()
     for needle in ("argument, not a destination", "Externalize a composed flow", "OMC_TICKET"):
         assert needle in text, f"behavior layer missing {needle!r}"
+
+
+def test_behavior_layer_names_two_authority_words():
+    text = (ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text()
+    assert "`/omc:design`" in text and "`$omc:design`" in text
+    assert "`/omc:implement`" in text and "`$omc:implement`" in text
+    assert "requires a committed design record" in text
+    # the conductor list in the "Externalize a composed flow" bullet names design too
+    assert "/omc:design" in text.split("Externalize a composed flow")[1]

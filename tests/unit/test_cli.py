@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from omc.cli import main
 
 from ._stubs import make_stub
@@ -228,7 +230,7 @@ def test_readme_documents_every_user_facing_title_surface():
         "the next time the decision changes (branch, repository, or leaving Git)",
         "inside tmux or screen are deliberately inert",
         "waits out the cooldown and then applies",
-        "Outside iTerm2, or with `OMC_FISH_TITLE_DISABLE=1`, `omc start` keeps today's behavior",
+        "Outside iTerm2, or with `OMC_FISH_TITLE_DISABLE=1`, `omc design` keeps today's behavior",
     ):
         assert needle in readme, needle
     assert "(or with an unauthorized API) `omc start` warns" not in readme
@@ -236,3 +238,101 @@ def test_readme_documents_every_user_facing_title_surface():
     assert "retried on the next branch or directory change" not in readme
     assert "if that lands inside the cooldown it is dropped" not in readme
     assert "omc title reconcile" not in readme  # the dropped first attempt's command
+
+
+def test_design_is_canonical_and_start_is_an_alias():
+    from omc.cli import build_parser
+
+    design = build_parser().parse_args(["design", "PROJ-1"])
+    start = build_parser().parse_args(["start", "PROJ-1"])
+    assert design.command == "design" and design.context == "PROJ-1"
+    # argparse stores the TYPED token; dispatch must accept both spellings
+    assert start.command == "start" and start.context == "PROJ-1"
+
+
+def test_start_alias_dispatches_to_run_start(monkeypatch):
+    import omc.cli as cli
+
+    seen = {}
+    monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: object())
+    monkeypatch.setattr(
+        cli, "run_start", lambda ctx, cfg, context, **kw: seen.setdefault("ctx", context) and 0
+    )
+    assert cli.main(["start", "PROJ-9"]) == 0
+    assert cli.main(["design", "PROJ-8"]) == 0
+    assert seen["ctx"] == "PROJ-9"
+
+
+def test_design_help_lists_both_spellings():
+    from omc.cli import build_parser
+
+    help_text = build_parser().format_help()
+    assert "design" in help_text and "start" in help_text
+
+
+def test_provider_flags_come_from_the_registry_and_exclude_each_other(capsys):
+    from omc.cli import build_parser
+    from omc.providers.registry import provider_names
+
+    for name in provider_names():
+        args = build_parser().parse_args(["design", "ctx", f"--{name}"])
+        assert args.provider_override == name
+    assert build_parser().parse_args(["design", "ctx"]).provider_override is None
+    assert build_parser().parse_args(["start", "ctx", "--codex"]).provider_override == "codex"
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["design", "ctx", "--claude", "--codex"])
+    assert exc.value.code == 2
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_with_provider_is_a_process_local_copy():
+    from omc.cli import _with_provider
+    from omc.config.schema import Config, SecretsConfig
+
+    cfg = Config(secrets=SecretsConfig(api_keys={"claude": "k"}))
+    same = _with_provider(cfg, None)
+    assert same is cfg
+    over = _with_provider(cfg, "codex")
+    assert over.llm.default == "codex" and cfg.llm.default == "claude"
+    assert over.llm.providers is cfg.llm.providers  # shallow: nothing on this path mutates it
+    assert over.secrets.api_keys == {"claude": "k"}
+    assert "api_keys" not in repr(over)  # SecretsConfig repr=False survives the copy
+
+
+def test_design_dispatch_applies_the_override(monkeypatch):
+    import omc.cli as cli
+    from omc.config.schema import Config
+
+    seen = {}
+    monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: Config())
+    monkeypatch.setattr(
+        cli, "run_start", lambda ctx, cfg, context, **kw: seen.setdefault("cfg", cfg) and 0
+    )
+    assert cli.main(["design", "PROJ-1", "--codex"]) == 0
+    assert seen["cfg"].llm.default == "codex"
+
+
+def test_implement_parser_and_dispatch(monkeypatch):
+    import omc.cli as cli
+    from omc.config.schema import Config
+
+    args = cli.build_parser().parse_args(["implement", "--codex", "--dry-run"])
+    assert args.command == "implement" and args.provider_override == "codex"
+    assert args.dry_run is True and args.headless is False
+    seen = {}
+    monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: Config())
+
+    def fake_run_implement(ctx, cfg, *, dry_run, headless):
+        seen.update(provider=cfg.llm.default, dry_run=dry_run, headless=headless)
+        return 0
+
+    monkeypatch.setattr("omc.implement.run_implement", fake_run_implement)
+    assert cli.main(["implement", "--codex", "--dry-run"]) == 0
+    assert seen == {"provider": "codex", "dry_run": True, "headless": False}
+
+
+def test_implement_without_config_bails(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "empty"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["implement"]) == 2
+    assert "omc configure" in capsys.readouterr().err

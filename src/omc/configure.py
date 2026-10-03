@@ -19,7 +19,7 @@ from .wtconfig import repo_root
 _PLUGIN_HINTS = """\
 omc's in-session skills install as a plugin — once per harness you use:
 
-  Claude Code:  installed for you above (also by `omc start` / `omc update`);
+  Claude Code:  installed for you above (also by `omc design` / `omc update`);
                 by hand: /plugin marketplace add chris-husse/oh-my-clanker
                          /plugin install omc@oh-my-clanker
   Codex:        codex plugin marketplace add chris-husse/oh-my-clanker
@@ -295,7 +295,7 @@ def _walkthrough_global(
     else:
         cfg.llm.default = (
             questionary.select(
-                "Default provider for `omc start`",
+                "Default provider for `omc design`",
                 choices=selected,
                 default=cfg.llm.default if cfg.llm.default in selected else selected[0],
             ).ask()

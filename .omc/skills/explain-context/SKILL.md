@@ -24,7 +24,7 @@ Where this project keeps its truth, most-authoritative first:
 
 Conventions worth knowing: machine contracts are single-line JSON verdicts
 prefixed `OMC_SLUG` / `OMC_STAGE` / `OMC_SQUASH` / `OMC_REBASE_MAIN` /
-`OMC_KNOWLEDGE`; "the chicken" in docs means
+`OMC_KNOWLEDGE` / `OMC_DESIGN_RECORD`; "the chicken" in docs means
 the internal predecessor tool this project descends from; provider quirks are
 documented as comments at the exact code site that depends on them
 (`src/omc/providers/*.py`).
