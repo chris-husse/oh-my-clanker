@@ -2,14 +2,42 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 
 from .. import __version__
 from ..config import resolve, store
 from ..errors import OmcError
+from ..providers.registry import provider_names
 from ..start import run_start
 from ..toolctx import ToolContext
 
 _CONFIGURE_HINT = "run `omc configure` first"
+
+
+def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
+    """One boolean flag per registered provider (--claude, --codex, ...), mutually
+    exclusive: use that provider for THIS run. Registry-generated so a new
+    provider gets its flag for free; the set is validated by construction."""
+    group = parser.add_mutually_exclusive_group()
+    for name in provider_names():
+        group.add_argument(
+            f"--{name}",
+            dest="provider_override",
+            action="store_const",
+            const=name,
+            help=f"Use {name} for this run only (the saved default is untouched)",
+        )
+    parser.set_defaults(provider_override=None)
+
+
+def _with_provider(cfg, override: str | None):
+    """The effective config with llm.default swapped for this process. A
+    dataclasses.replace copy: it SHARES llm.providers and secrets with the
+    original (nothing on the design/implement path mutates them) and is never
+    persisted - Config is a runtime composite that no save path accepts."""
+    if not override:
+        return cfg
+    return replace(cfg, llm=replace(cfg.llm, default=override))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,19 +64,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Set a dotted key non-interactively (repeatable)",
     )
 
-    p_start = sub.add_parser("start", help="Begin work on a ticket / task description")
-    p_start.add_argument("context", help="Ticket key, ticket URL, or quoted task description")
-    p_start.add_argument(
+    p_design = sub.add_parser(
+        "design",
+        aliases=["start"],
+        help="Begin work on a ticket / task description (alias: start)",
+    )
+    p_design.add_argument("context", help="Ticket key, ticket URL, or quoted task description")
+    p_design.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the plan; no worktree/session created (still ensures the agents chain)",
     )
-    p_start.add_argument("--headless", action="store_true", help="Print-mode session (no exec)")
-    p_start.add_argument(
+    p_design.add_argument("--headless", action="store_true", help="Print-mode session (no exec)")
+    p_design.add_argument(
         "--no-mutex",
         action="store_true",
         help="Do not wait for an in-flight `omc watch` update before creating the worktree",
     )
+    _add_provider_flags(p_design)
+
+    p_impl = sub.add_parser(
+        "implement",
+        help=(
+            "Hand this worktree's committed design record to a fresh session (plan, build, finish)"
+        ),
+    )
+    p_impl.add_argument(
+        "--dry-run", action="store_true", help="Print the plan; no session launched"
+    )
+    p_impl.add_argument("--headless", action="store_true", help="Print-mode session (no exec)")
+    _add_provider_flags(p_impl)
 
     p_watch = sub.add_parser(
         "watch", help="Keep the primary checkout's base branch + knowledge graph fresh"
@@ -225,10 +270,11 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
 
         print(package_root())
         return 0
-    if args.command == "start":
+    if args.command in ("design", "start"):  # argparse stores the typed token for an alias
         cfg = _load_cfg_or_bail(ctx)
         if cfg is None:
             return 2
+        cfg = _with_provider(cfg, args.provider_override)
         return run_start(
             ctx,
             cfg,
@@ -236,6 +282,18 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             headless=args.headless,
             no_mutex=args.no_mutex,
+        )
+    if args.command == "implement":
+        cfg = _load_cfg_or_bail(ctx)
+        if cfg is None:
+            return 2
+        from ..implement import run_implement  # lazy, like every newer command
+
+        return run_implement(
+            ctx,
+            _with_provider(cfg, args.provider_override),
+            dry_run=args.dry_run,
+            headless=args.headless,
         )
     if args.command == "watch":
         cfg = _load_cfg_or_bail(ctx)

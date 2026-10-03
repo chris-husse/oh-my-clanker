@@ -5,7 +5,7 @@ description: Finish the current feature branch - rebase onto the base, squash to
 
 # omc finish
 
-Finish the current feature branch. Normally run inside an `omc start` worktree,
+Finish the current feature branch. Normally run inside an `omc design` worktree,
 but any feature branch works.
 
 ## Step 0 — externalize the flow (before the gate, no exceptions)

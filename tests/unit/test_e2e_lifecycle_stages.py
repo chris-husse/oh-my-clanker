@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.e2e.lifecycle_helpers import _assert_finish_stage_order
+from tests.e2e.lifecycle_helpers import _assert_finish_stage_order, _assert_recorded
 
 
 @pytest.mark.parametrize(
@@ -52,3 +52,43 @@ def test_finish_stages_allow_validation_outside_finish(markers):
 def test_finish_stages_require_a_complete_ordered_block(markers):
     with pytest.raises(AssertionError):
         _assert_finish_stage_order(markers)
+
+
+BEFORE = {
+    "source": {"greeting.py": "a", "test_greeting.py": "b"},
+    "index": "i1",
+    "head": "h1",
+    "remote_refs": ["refs/heads/main x"],
+    "spec_plan": {},
+}
+
+
+def test_recorded_requires_a_new_committed_spec_and_untouched_product():
+    after = {
+        **BEFORE,
+        "index": "i2",
+        "head": "h2",
+        "spec_plan": {"docs/superpowers/specs/2026-10-02-s-design.md": "d"},
+    }
+    assert _assert_recorded(BEFORE, after, "x") == "docs/superpowers/specs/2026-10-02-s-design.md"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"head": "h1"},  # nothing committed
+        {"remote_refs": ["refs/heads/main y"]},  # something pushed
+        {"source": {"greeting.py": "CHANGED", "test_greeting.py": "b"}},  # product edited
+        {"spec_plan": {}},  # no record
+        {"spec_plan": {"docs/superpowers/plans/2026-10-02-s-plan.md": "p"}},  # a plan, not a record
+    ],
+)
+def test_recorded_rejects(mutation):
+    after = {
+        **BEFORE,
+        "head": "h2",
+        "spec_plan": {"docs/superpowers/specs/2026-10-02-s-design.md": "d"},
+        **mutation,
+    }
+    with pytest.raises(AssertionError):
+        _assert_recorded(BEFORE, after, "x")

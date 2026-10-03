@@ -36,7 +36,7 @@ from .providers.registry import get_provider
 from .skills_source import skill_prompt
 from .toolctx import ToolContext
 from .watchlock import WATCH_BAIL_MSG, acquire_busy_narrated, acquire_instance, watch_locks
-from .wtconfig import ensure_wt_config, primary_root, repo_root
+from .wtconfig import current_branch, ensure_wt_config, primary_root, repo_root
 
 
 def _say(msg: str) -> None:
@@ -293,7 +293,7 @@ def _tick(
             _say(msg)
         return token
 
-    branch = _out(ctx, [ctx.git_bin, "rev-parse", "--abbrev-ref", "HEAD"], root)
+    branch = current_branch(ctx, root) or ""
     if branch != base:
         return quiet(
             f"off-branch:{branch}",
@@ -413,7 +413,7 @@ def run_watch(
     if reset_gitnexus:
         # A rebuild anywhere else would stamp the store with THAT branch and
         # recreate the inversion — refuse before any node call and any lock.
-        branch = _out(ctx, [ctx.git_bin, "rev-parse", "--abbrev-ref", "HEAD"], root)
+        branch = current_branch(ctx, root) or ""
         if branch != base:
             print(
                 f"error: --reset-gitnexus requires the primary checkout to be on {base} "

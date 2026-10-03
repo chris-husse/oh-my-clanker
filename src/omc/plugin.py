@@ -1,6 +1,6 @@
 """Plugin self-heal: the seeded /omc:* commands must actually resolve.
 
-`omc start` seeds the session with `/omc:start`; if the omc plugin is missing
+`omc design` seeds the session with `/omc:start`; if the omc plugin is missing
 — or installed but refused by Claude ("failed to load") — the session opens on
 "Unknown command", the worst possible first-run. So start/update/configure
 ensure the plugin is installed AND healthy, installing or reinstalling it
@@ -330,13 +330,13 @@ def ensure_plugin(
 
     if check_only:
         if omc is None:
-            return "missing (omc start will install it)"
+            return "missing (omc design will install it)"
         if omc_problems:
-            return f"failed to load: {omc_problems[0]} (omc start will reinstall it)"
+            return f"failed to load: {omc_problems[0]} (omc design will reinstall it)"
         if skew is not None:
-            return f"stale ({skew[0]} → {skew[1]} offered; omc start will update it)"
+            return f"stale ({skew[0]} → {skew[1]} offered; omc design will update it)"
         if superpowers is None:
-            return "ok; superpowers missing (omc start will install it)"
+            return "ok; superpowers missing (omc design will install it)"
         return "ok"
 
     source = marketplace_source(ctx.env)

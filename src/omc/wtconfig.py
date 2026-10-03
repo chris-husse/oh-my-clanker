@@ -8,11 +8,21 @@ later by /omc:rebase-main.
 
 from __future__ import annotations
 
+import re
 import sys
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from .errors import OmcError
 from .toolctx import ToolContext
+
+if TYPE_CHECKING:  # no runtime import: wtconfig is a leaf below config/
+    from .config.schema import Config, ProjectConfig
+
+_NON_SLUG_RE = re.compile(r"[^a-z0-9]+")
+_SLUG_MAX = 50
 
 WT_TEMPLATE = """\
 # Worktrunk project config, seeded by omc — faithful worktrees out of the box.
@@ -26,6 +36,31 @@ pre-start = "{ ! test -f .gitmodules || git submodule update --init --recursive;
 [post-start]
 copy-ignored = "wt step copy-ignored"
 """
+
+
+def sanitize_slug(s: str) -> str:
+    out = _NON_SLUG_RE.sub("-", s.replace("\n", " ").lower()).strip("-")
+    return out[:_SLUG_MAX].rstrip("-")
+
+
+def branch_for(cfg: Config | ProjectConfig, slug: str) -> str:
+    """The branch `omc design` creates for a slug; the ONE place the prefix is applied."""
+    return f"{cfg.worktree.branch_prefix}{slug}"
+
+
+def slug_for(cfg: Config | ProjectConfig, branch: str) -> str | None:
+    """Inverse of branch_for. None when the branch is not an omc branch: wrong
+    (or missing) prefix, or a remainder that is not a sanitized slug. An empty
+    configured prefix (allowed by the store) is always present — so then every
+    sanitized name (even "main") is a slug, and a non-None result does NOT prove
+    omc created the branch; the design-record lookup is what decides."""
+    prefix = cfg.worktree.branch_prefix
+    if not branch.startswith(prefix):
+        return None
+    rest = branch[len(prefix) :]
+    if not rest or sanitize_slug(rest) != rest:
+        return None
+    return rest
 
 
 def repo_root(ctx: ToolContext) -> str | None:
@@ -91,3 +126,100 @@ def ensure_wt_config(ctx: ToolContext, root: str | Path) -> str:
         flush=True,
     )
     return "suspicious"
+
+
+SPECS_DIR = "docs/superpowers/specs"
+
+
+@dataclass(frozen=True)
+class RecordVerdict:
+    """The design-record gate's answer — one rule for the CLI launcher, the
+    internal verb and the in-session skill (spec §3.4)."""
+
+    ok: bool
+    slug: str = ""
+    path: str = ""  # worktree-relative
+    reason: str = ""  # one of no-prefix | missing | ambiguous | unclean when not ok
+    message: str = ""
+
+    def to_json(self) -> dict:
+        if self.ok:
+            return {"ok": True, "slug": self.slug, "path": self.path}
+        return {"ok": False, "slug": self.slug, "reason": self.reason, "message": self.message}
+
+
+def current_branch(ctx: ToolContext, root: str) -> str | None:
+    try:
+        cp = ctx.run([ctx.git_bin, "rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
+    except OSError:
+        return None
+    if cp.returncode != 0:
+        return None
+    return (cp.stdout or "").strip() or None
+
+
+def _record_name_re(slug: str) -> re.Pattern[str]:
+    # Anchored: a loose `*-<slug>-design.md` glob also matches a slug that
+    # merely ENDS with this one (…-bar-<slug>-design.md). The date is fixed-width.
+    return re.compile(rf"^\d{{4}}-\d{{2}}-\d{{2}}-{re.escape(slug)}-design\.md$")
+
+
+def find_design_record(ctx: ToolContext, root: str, slug: str) -> RecordVerdict:
+    """Exactly one `<date>-<slug>-design.md`, committed in HEAD and clean."""
+    specs = Path(root) / SPECS_DIR
+    pattern = _record_name_re(slug)
+    names = sorted(p.name for p in specs.glob("*-design.md") if pattern.match(p.name))
+    if not names:
+        return RecordVerdict(
+            False,
+            slug,
+            "",
+            "missing",
+            f"no design record for {slug} under {SPECS_DIR}/ — type /omc:design in a "
+            "design session first",
+        )
+    if len(names) > 1:
+        return RecordVerdict(
+            False,
+            slug,
+            "",
+            "ambiguous",
+            f"{len(names)} design records for {slug}: {', '.join(names)} — keep exactly one",
+        )
+    rel = f"{SPECS_DIR}/{names[0]}"
+    in_head = ctx.run([ctx.git_bin, "cat-file", "-e", f"HEAD:{rel}"], cwd=root)
+    status = ctx.run([ctx.git_bin, "status", "--porcelain", "--", rel], cwd=root)
+    if in_head.returncode != 0 or (status.stdout or "").strip():
+        why = "is not committed in HEAD" if in_head.returncode != 0 else "has uncommitted changes"
+        return RecordVerdict(
+            False,
+            slug,
+            rel,
+            "unclean",
+            f"design record {rel} {why} — finish /omc:design "
+            "(it commits the record) before implementing",
+        )
+    return RecordVerdict(True, slug, rel)
+
+
+def resolve_design_record(ctx: ToolContext, cfg: Config | ProjectConfig) -> RecordVerdict:
+    """Branch -> slug -> record, from the checkout containing cwd (never the
+    primary: the record is committed on the feature branch)."""
+    root = repo_root(ctx)
+    if root is None:
+        raise OmcError("not inside a git repository")
+    branch = current_branch(ctx, root) or "HEAD"
+    slug = slug_for(cfg, branch)
+    if slug is None:
+        if branch == "HEAD":
+            message = (
+                "detached HEAD (mid-rebase?) is not an omc branch — "
+                "check out the feature branch and retry"
+            )
+        else:
+            message = (
+                f"branch {branch!r} is not an omc branch (expected "
+                f"{cfg.worktree.branch_prefix}<slug>) — run this inside an omc worktree"
+            )
+        return RecordVerdict(False, "", "", "no-prefix", message)
+    return find_design_record(ctx, root, slug)

@@ -4,7 +4,6 @@ parse the OMC_SLUG verdict, sanitize. All tracker intelligence lives in the skil
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 
 from .config.schema import Config
@@ -12,9 +11,17 @@ from .errors import OmcError, Refusal
 from .providers.registry import get_provider
 from .skills_source import skill_prompt
 from .toolctx import ToolContext
+from .wtconfig import sanitize_slug
 
-_NON_SLUG_RE = re.compile(r"[^a-z0-9]+")
-_SLUG_MAX = 50
+__all__ = [
+    "MCP_TOOL_PATTERNS",
+    "Verdict",
+    "build_prompt",
+    "fetch_slug",
+    "parse_verdict",
+    "sanitize_slug",
+]
+
 _VERDICT_PREFIX = "OMC_SLUG "
 
 # Server-scoped MCP grants for the headless call (claude only; other providers
@@ -35,11 +42,6 @@ class Verdict:
     slug: str = ""
     reason: str = ""
     message: str = ""
-
-
-def sanitize_slug(s: str) -> str:
-    out = _NON_SLUG_RE.sub("-", s.replace("\n", " ").lower()).strip("-")
-    return out[:_SLUG_MAX].rstrip("-")
 
 
 def parse_verdict(text: str) -> Verdict | None:

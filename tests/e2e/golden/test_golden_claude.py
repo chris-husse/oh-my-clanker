@@ -8,15 +8,20 @@ failed stage fails every later one loudly instead of skipping.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from ..conversation import ClaudeConversation
+from ..harness import run_in
 from ..lifecycle_helpers import (
     IMPLEMENT_TURN_BUDGET,
     _assert_discussion_boundary,
-    _assert_successful_implementation,
+    _assert_implemented_artifacts,
+    _assert_primary_boundary,
+    _assert_recorded,
     _configure_claude_conversation,
-    _direct_implement,
+    _direct_design,
     _fixture,
     _judge_claude,
     _launch_start,
@@ -44,6 +49,8 @@ class Flow:
         self.evidence = {"provider": "claude", "model_requested": self.model, "turns": []}
         self.reached = None
         self.worktree = self.branch = self.baseline = self.primary_start = None
+        self.recorded = None
+        self.implement_session = None
 
     def manifest(self, stage: str) -> dict:
         return {
@@ -55,6 +62,7 @@ class Flow:
             "branch": self.branch,
             "model": self.model,
             "judge_model": self.judge_model,
+            "implement_session": self.implement_session,
         }
 
     def done(self, stage: str) -> str:
@@ -157,26 +165,58 @@ def test_stage_agreed(flow):
     flow.done("agreed")
 
 
-# omc's own /omc:implement (spec hardening with explain passes, plan, subagent
-# build, finish) exceeded the 300 s ceiling on a one-line fixture (measured
-# 2026-10-01: start 53 s, design 30 s, agreement 13 s, implement >300 s on the
-# standard tier). Until omc's implement flow is faster, this stage is evidence
-# only: expensive tier, never a gate. The default golden path ends at `agreed`.
-@pytest.mark.expensive
-@pytest.mark.timeout(1800)
-def test_stage_implemented(flow):
+def test_stage_recorded(flow):
     _require(flow, "agreed")
-    flow.session.send(_direct_implement("claude"))
-    implemented = flow.session.wait_turn(IMPLEMENT_TURN_BUDGET)
-    _record_phase(flow.session, flow.repo, flow.worktree, flow.evidence, "implement", implemented)
-    _assert_successful_implementation(
+    started = time.monotonic()
+    flow.session.send(_direct_design("claude"))
+    # 240, not 300: the driver's own cancellation path must fire before
+    # pytest's alarm (timeout_func_only covers the body; the judge needs time too).
+    recorded = flow.session.wait_turn(240)
+    flow.evidence["design_turn_seconds"] = round(time.monotonic() - started, 1)
+    print(f"\n/omc:design turn: {flow.evidence['design_turn_seconds']} s")  # tier placement
+    feature, primary = _record_phase(
+        flow.session, flow.repo, flow.worktree, flow.evidence, "design", recorded
+    )
+    _assert_recorded(flow.baseline, feature, "design record")
+    _assert_primary_boundary(flow.primary_start, primary, "design record")
+    rc, dirty = run_in(flow.container, ["git", "-C", flow.worktree, "status", "--porcelain"])
+    assert rc == 0 and not dirty.strip(), f"design left the worktree dirty: {dirty}"
+    verdict = _judge_claude(
         flow.container,
-        "claude",
-        flow.session,
-        flow.repo,
-        flow.worktree,
-        flow.branch,
-        flow.evidence,
-        flow.baseline,
+        flow.judge_model,
+        "OMC design committed the design record",
+        [
+            "The answer states that the design record was committed.",
+            "The answer names both ways to continue: the implement command in this "
+            "session, or `omc implement` with a provider flag from the shell.",
+            "The answer does not ask for approval or permission to continue.",
+        ],
+        recorded["text"],
+    )
+    flow.evidence["recorded_judge"] = verdict
+    assert verdict["passed"], verdict
+    flow.recorded = feature
+    flow.done("recorded")
+
+
+# The implement turn exceeds the 300 s ceiling on a one-line fixture (measured
+# 2026-10-01): evidence only, expensive tier, never a gate. It runs the CLI
+# handoff on Claude so the shared launch path is exercised live; the in-session
+# /omc:implement path is covered by variations/test_from_recorded.py.
+@pytest.mark.expensive
+@pytest.mark.timeout(1900)  # above the 1800 s run_in budget, so `timeout` fires first
+def test_stage_implemented(flow):
+    _require(flow, "recorded")
+    flow.implement_session = f"{flow.session.slug}-implement"
+    rc, out = run_in(
+        flow.container,
+        ["omc", "implement", "--claude", "--headless"],
+        cwd=flow.worktree,
+        timeout=IMPLEMENT_TURN_BUDGET,
+    )
+    assert rc == 0, out
+    _record_phase(flow.session, flow.repo, flow.worktree, flow.evidence, "implement", {"text": out})
+    _assert_implemented_artifacts(
+        flow.container, flow.repo, flow.worktree, flow.branch, flow.evidence, flow.recorded
     )
     flow.done("implemented")

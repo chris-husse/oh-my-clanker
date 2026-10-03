@@ -467,6 +467,30 @@ def _direct_implement(provider: str, detail: str = "") -> str:
     return command + (f" {detail}" if detail else "")
 
 
+def _direct_design(provider: str, detail: str = "") -> str:
+    # Same TUI rule as _direct_implement: Codex accepts only the $omc: mention.
+    command = "$omc:design" if provider == "codex" else "/omc:design"
+    return command + (f" {detail}" if detail else "")
+
+
+def _assert_recorded(before, after, label) -> str:
+    """The design turn's artifact facts: product and remote untouched, HEAD
+    advanced, exactly one new record under specs/. Returns its key."""
+    for product_file in ("greeting.py", "test_greeting.py"):
+        assert before["source"][product_file] == after["source"][product_file], (
+            f"{label} changed {product_file}"
+        )
+    assert before["remote_refs"] == after["remote_refs"], f"{label} published something"
+    assert before["head"] != after["head"], f"{label} committed nothing"
+    new_specs = [
+        key
+        for key in after["spec_plan"]
+        if key.startswith("docs/superpowers/specs/") and key not in before["spec_plan"]
+    ]
+    assert len(new_specs) == 1, f"{label} produced {len(new_specs)} design records: {new_specs}"
+    return new_specs[0]
+
+
 def _record_phase(session, repo, worktree, evidence, phase, turn):
     feature = session.snapshot(worktree)
     primary = session.snapshot(repo)
@@ -588,4 +612,23 @@ def _assert_successful_implementation(
         worktree,
         branch,
         "def greeting():\n    return 'Goodbye, world!'\n",
+    )
+
+
+def _assert_implemented_artifacts(container, repo, worktree, branch, evidence, recorded):
+    """Artifact-only success checks for a harness-launched implement (no driver
+    events): product changed, a plan is new, the record is unchanged, the
+    finish stages ran in order, the fix is published."""
+    final = evidence["turns"][-1]["snapshot"]
+    assert final["source"]["greeting.py"] != recorded["source"]["greeting.py"]
+    plans = [k for k in final["spec_plan"] if "/plans/" in k]
+    assert plans and not any("/plans/" in k for k in recorded["spec_plan"]), "no new plan"
+    before_specs = {k: v for k, v in recorded["spec_plan"].items() if "/specs/" in k}
+    after_specs = {k: v for k, v in final["spec_plan"].items() if "/specs/" in k}
+    assert after_specs == before_specs, "implementation rewrote the design record"
+    rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
+    assert rc == 0, "project stages never executed"
+    _assert_finish_stage_order(markers)
+    _assert_published_fix(
+        container, repo, worktree, branch, "def greeting():\n    return 'Goodbye, world!'\n"
     )

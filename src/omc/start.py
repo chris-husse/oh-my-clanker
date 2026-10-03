@@ -1,4 +1,4 @@
-"""`omc start <context>`: probe -> slug -> worktree -> seeded handoff."""
+"""`omc design <context>` (alias: `omc start`): probe -> slug -> worktree -> seeded handoff."""
 
 from __future__ import annotations
 
@@ -16,13 +16,13 @@ from .gitnexus import ensure_gitnexus, snapshot_freshness
 from .plugin import ensure_plugin
 from .probe import require_tools
 from .providers.registry import get_provider
+from .session import run_headless as _run_headless
+from .session import session_plan
 from .shells.registry import detect_shell
-from .slug import MCP_TOOL_PATTERNS, fetch_slug
-from .terminal_title import terminal_title_argv
-from .terminals import detect_terminal
+from .slug import fetch_slug
 from .toolctx import ToolContext
 from .watchlock import busy_lock, wait_until_idle
-from .wtconfig import primary_root, repo_root
+from .wtconfig import branch_for, primary_root, repo_root
 
 
 def _print_plan(
@@ -36,7 +36,7 @@ def _print_plan(
     notify_desc,
     knowledge_desc,
 ):
-    print("omc start — plan (dry run, no changes made):")
+    print("omc design — plan (dry run, no changes made):")
     print(f"  branch:       {branch}")
     print(f"  fetch:        git fetch origin {base}")
     print(f"  worktree cmd: {shlex.join(wt_argv)}")
@@ -46,31 +46,6 @@ def _print_plan(
     print(f"  shell argv:   {shell_argv}")
     print(f"  notify:       {notify_desc}")
     print(f"  knowledge:    {knowledge_desc}")
-
-
-def _run_headless(ctx: ToolContext, cfg: Config, seed: str, cwd: str, slug: str) -> int:
-    name = cfg.llm.default
-    provider = get_provider(name)
-    pcfg = cfg.llm.providers.get(name)
-    model = pcfg.model if pcfg else ""
-    # Name the headless session after the slug too (where the CLI supports it),
-    # so seeded sessions are resumable by name exactly like interactive ones.
-    argv = provider.headless_argv(
-        seed,
-        model=model,
-        session_name=slug,
-        allowed_tools=[*MCP_TOOL_PATTERNS, "Bash", "Read", "Glob", "Grep"],
-    )
-    try:
-        cp = ctx.run(argv, cwd=cwd, extra_env={**provider.title_env(), "OMC_SLUG": slug})
-    except OSError as exc:
-        print(f"error: headless session failed to launch: {exc}", file=sys.stderr)
-        return 1
-    if cp.stdout:
-        print(cp.stdout, end="" if cp.stdout.endswith("\n") else "\n")
-    if cp.returncode != 0 and cp.stderr:
-        print(cp.stderr, file=sys.stderr, end="")
-    return cp.returncode
 
 
 def _say(msg: str) -> None:
@@ -140,7 +115,7 @@ def run_start(
     _say(f"→ generating slug via {name} (LLM call, typically 15–60s)…")
     slug = fetch_slug(ctx, cfg, context)  # raises Refusal with the skill's message
     _say(f"✓ slug: {slug}")
-    branch = f"{cfg.worktree.branch_prefix}{slug}"
+    branch = branch_for(cfg, slug)
     base = cfg.worktree.base_branch
 
     # The knowledge verdict is computed BEFORE the seed so one verdict serves
@@ -165,25 +140,18 @@ def run_start(
             knowledge = snapshot_freshness(ctx, Path(primary), base)
 
     provider = get_provider(name)
-    pcfg = cfg.llm.providers.get(name)
-    model = pcfg.model if pcfg else ""
     seed = build_start_seed(context, knowledge=knowledge.to_json() if knowledge else None)
-    notify_argv = notify.sink_argv(name) if cfg.notifications.enabled else None
-    session_argv = provider.session_argv(
-        session_name=slug, model=model, seed=seed, notify_sink_argv=notify_argv
+    plan = session_plan(
+        ctx,
+        cfg,
+        seed=seed,
+        slug=slug,
+        session_name=slug,
+        title=branch,
+        cwd="<worktree>",  # the real path does not exist yet; dry-run prints this
     )
-    title_seq = detect_terminal(ctx.env).title_sequence(branch)
-    title_argv = terminal_title_argv()
 
     if dry_run:
-        shell = detect_shell(ctx.env)
-        shell_argv, _ = shell.build_invocation(
-            cwd="<worktree>",
-            title=branch,
-            startup_argv=session_argv,
-            title_seq=title_seq,
-            title_argv=title_argv,
-        )
         wt_argv = [
             ctx.wt_bin, "switch", "--create", branch,
             "--base", f"origin/{base}", "--no-cd", "--yes", "--format=json",
@@ -204,10 +172,10 @@ def run_start(
             branch,
             base,
             wt_argv,
-            title_seq,
-            title_argv,
-            session_argv,
-            shell_argv,
+            plan.title_seq,
+            plan.title_argv,
+            plan.session_argv,
+            plan.shell_argv,
             notify_desc,
             knowledge_desc,
         )
@@ -235,13 +203,13 @@ def run_start(
         return _run_headless(ctx, cfg, seed, path, slug)
     _say(f'→ launching {name} session "{slug}" seeded with /omc:start')
 
-    os.environ.update({**provider.title_env(), "OMC_SLUG": slug})  # pragma: no cover
+    os.environ.update(plan.env)  # pragma: no cover
     shell = detect_shell(ctx.env)  # pragma: no cover
     shell.exec_interactive(  # pragma: no cover
         cwd=path,
         title=branch,
-        startup_argv=session_argv,
-        title_seq=title_seq,
-        title_argv=title_argv,
+        startup_argv=plan.session_argv,
+        title_seq=plan.title_seq,
+        title_argv=plan.title_argv,
     )
     return 0  # pragma: no cover - unreachable after execvp

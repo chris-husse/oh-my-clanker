@@ -1,68 +1,60 @@
 ---
 name: implement
-description: Lifecycle conductor from converged design to pushed branch - spec (hardened via explain), plan, subagent build, finish. Type it during brainstorming once the design is ready to become a spec.
+description: Lifecycle conductor from a committed design record to pushed branch - plan (pressure-tested via explain), subagent build, finish. Type it after /omc:design has committed the record, in the design session or in a fresh one launched by `omc implement`.
 ---
 
 # omc implement (conductor)
 
-Invoked directly during/after brainstorming (`$omc:implement` in Codex,
-`/omc:implement` in Claude), when the design has converged and is
-ready to become a spec. Four phases, strictly in order; each phase is a
-black-box command call. /omc:implement IS the user's approval to carry the
-converged design all the way to a pushed branch: do not ask permission
-between phases. The only interactive stops are CRITICAL spec findings
-(see Phase 1) and genuine blockers.
-The user's authorization persists through a required answer: once a critical
-question is resolved, resume the remaining phases without a new command.
-Subagents assigned implementation tasks inherit this authorization; they do
-not ask the user to invoke `/omc:implement` again. Generic sub-skill requests
-for routine spec, plan, execution-mode, task, or stage approval are satisfied
-by this direct command. Only a genuinely unresolved critical choice or blocker
-needs a user answer.
+Invoked directly (`$omc:implement` in Codex, `/omc:implement` in Claude) once
+`/omc:design` has committed the design record — in the same session, or in a
+fresh session that `omc implement [--claude|--codex]` seeded in this worktree.
+Three phases, strictly in order; each phase is a black-box command call.
+/omc:implement IS the user's approval to carry the committed record all the
+way to a pushed branch: do not ask permission between phases. The only
+interactive stops are genuine blockers and CRITICAL questions a plan cannot
+answer. The user's authorization persists through a required answer: once a
+critical question is resolved, resume the remaining phases without a new
+command. Subagents assigned implementation tasks inherit this authorization;
+they do not ask the user to invoke `/omc:implement` again. Generic sub-skill
+requests for routine plan, execution-mode, task, or stage approval are
+satisfied by this direct command.
 
 ## Phase -1 — externalize the flow (first action, no exceptions)
 
-**Write the four phases into the task list now**, before the resume check:
-spec → plan → subagent build → ship. Mark each completed as you pass it.
+**Write the three phases into the task list now**, before the record gate:
+plan → subagent build → ship. Mark each completed as you pass it.
 
-This is omc's deepest nesting (`implement → spec → explain`,
-`implement → finish → create-mr → get-mr-description`), and every phase ends in
-a large, polished artifact — a spec, a 1,200-line plan, an MR description.
-**The bigger the artifact, the more it reads as a destination**, when it is only
-an argument to the next phase. The task list is what keeps the outer frames
-alive; without it this flow reliably stops after the spec or the plan, and a
-half-run conductor is indistinguishable from a broken one from the user's side.
+This is omc's deepest nesting (`implement → finish → create-mr →
+get-mr-description`), and every phase ends in a large, polished artifact — a
+1,200-line plan, an MR description. **The bigger the artifact, the more it
+reads as a destination**, when it is only an argument to the next phase. The
+task list is what keeps the outer frames alive; without it this flow reliably
+stops after the plan, and a half-run conductor is indistinguishable from a
+broken one from the user's side.
 
-## Phase 0 — resume check
+## Phase 0 — the record gate
 
-If a spec for the current work already exists
-(`docs/superpowers/specs/*-$OMC_SLUG-design.md` when `OMC_SLUG` is set, or
-the topic's equivalent), inspect its state and continue the needed hardening
-or next phase. Ask only if a genuinely critical unresolved choice prevents
-continuation; the existing spec does not create a routine approval gate.
+Run `omc internal design-record` and read its single `OMC_DESIGN_RECORD {…}`
+line. `"ok": true` names the record at `path`: read it in full; it is the
+design truth for every phase below. `"ok": false` → refuse with the verdict's
+`message` and stop: a missing record means `/omc:design` has not run (point
+the user at it); an unclean record means the design session died before its
+commit step; an ambiguous one is a human decision. Never write a design
+record from here.
 
-## Phase 1 — spec
+If a plan already exists for this slug
+(`docs/superpowers/plans/*-$OMC_SLUG-plan.md`), an earlier implement run was
+interrupted: inspect it and continue from the next unfinished task instead of
+writing a second plan.
 
-Invoke the internal `spec` skill. It writes the design doc, hardens it
-section by section with /omc:explain, and commits it.
+## Phase 1 — plan
 
-Phase 1 → 2 is NOT a gate. After the spec is committed, post a short
-summary of what hardening found and continue straight into the plan
-phase. Stop for the user ONLY if hardening surfaced a CRITICAL issue —
-something that invalidates part of the converged design or forces an
-architectural decision the brainstorm never settled. Cosmetic findings,
-small fixes folded into the spec, and verification notes are not
-critical; mention them in the summary and keep going. The user can always
-interrupt and review the committed spec file at any time.
-
-## Phase 2 — plan
-
-Invoke `superpowers:writing-plans`. Then, for each MAJOR section of the
-plan, invoke `/omc:explain` once to pressure-test the implementation
-choices — emphasis here is implementation-level design, not architecture:
-should this be an enum? add a parameter here, or reuse an existing
-mechanism? does this fit what the codebase already has? Refine the section
-with the answers; surface real alternatives to the user.
+Invoke `superpowers:writing-plans` on the committed record. Then, for each
+MAJOR section of the plan, invoke `/omc:explain` once to pressure-test the
+implementation choices — emphasis here is implementation-level design, not
+architecture: should this be an enum? add a parameter here, or reuse an
+existing mechanism? does this fit what the codebase already has? Refine the
+section with the answers; surface real alternatives to the user.
 
 Pass this directive to writing-plans verbatim: "Per the behavior layer's
 model-tier policy (AGENTS.md, Model selection), every task in the plan
@@ -71,7 +63,7 @@ judging tasks; `standard coding tier` as the floor for coding tasks;
 `heavy coding tier` for bigger coding tasks (multi-file, architecturally
 tricky, or ambiguous). Tier names only, never pinned model ids."
 
-## Phase 3 — build
+## Phase 2 — build
 
 Execute the plan via `superpowers:subagent-driven-development` — a fresh
 subagent per task; its own checkpoints and reviews apply.
@@ -91,14 +83,14 @@ commands for the stage; an unconfigured check is a pass, so this costs
 nothing on projects without one. Full E2E (`/omc:verify`) is NOT part of
 the per-task loop — it belongs to major milestones (finish runs it).
 
-Phase 2 → 3 is NOT a gate: once the plan is written and pressure-tested,
+Phase 1 → 2 is NOT a gate: once the plan is written and pressure-tested,
 start the subagent build immediately. Do not ask which execution approach
 to use (writing-plans offers a choice; this conductor has already made it)
 and do not ask permission to begin — the user typed /omc:implement, that
-IS the instruction to build. The only stops are critical spec findings
-(Phase 1) and genuine blockers.
+IS the instruction to build. The only stops are CRITICAL questions a plan
+cannot answer and genuine blockers.
 
-## Phase 4 — ship
+## Phase 3 — ship
 
 Invoke the `finish` skill (`/omc:finish`): rebase, squash with the MR
 description as the commit message, check/build/verify/review stages, push.

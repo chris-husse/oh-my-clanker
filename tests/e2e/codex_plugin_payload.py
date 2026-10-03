@@ -15,7 +15,7 @@ REQUIRED = {
         "brainstorming",
     ),
 }
-OMC_SKILLS = ("start", "plan", "implement")
+OMC_SKILLS = ("start", "plan", "design", "implement")
 STATE_NAME = "omc-e2e-plugin-state.json"
 
 
