@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from omc import agentsmd
+from omc import agentsmd, configure
 from omc.cli import main
 from omc.config import store
-from omc.config.schema import GlobalConfig, ProviderConfig
+from omc.config.schema import GlobalConfig, ProjectConfig, ProviderConfig, SecretsConfig
 from omc.toolctx import ToolContext
 
 from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub
@@ -32,6 +32,74 @@ def _home(tmp_path, monkeypatch, *, plugins=HEALTHY_PLUGINS, install_rc=0):
 
 
 _CLAUDE_CALLS: dict[str, object] = {}
+
+
+def test_apply_settings_routes_three_files_and_returns_write_flags(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    root = tmp_path / "repo"
+    root.mkdir()
+    _fake_http(monkeypatch)
+    ctx = ToolContext(home=home, env={})
+    gcfg, pcfg, scfg = GlobalConfig(), ProjectConfig(), SecretsConfig()
+    flags = configure._apply_settings(
+        ctx,
+        root,
+        gcfg,
+        pcfg,
+        scfg,
+        [
+            "llm.providers.claude.notifications=false",
+            "worktree.base_branch=develop",
+            f"llm.providers.claude.api_key={KEY}",
+        ],
+    )
+    assert flags == (True, True, True)
+    assert store.load_global(home).llm.providers["claude"].notifications is False
+    assert store.load_project(root).worktree.base_branch == "develop"
+    assert store.load_secrets(home).api_keys == {"claude": KEY}
+    assert not (home / "config.json").exists()
+    assert not (root / "AGENTS.md").exists()  # post-steps belong to the caller
+
+
+def test_apply_settings_removes_provider_through_shared_write_path(tmp_path):
+    home = tmp_path / "home"
+    ctx = ToolContext(home=home, env={})
+    gcfg = GlobalConfig()
+    gcfg.llm.providers["codex"] = ProviderConfig(model="gpt-6")
+    assert configure._apply_settings(
+        ctx, None, gcfg, ProjectConfig(), SecretsConfig(), [], remove_provider="codex"
+    ) == (True, False, False)
+    assert "codex" not in store.load_global(home).llm.providers
+
+
+def test_apply_settings_removal_keeps_active_docs_provider_absent(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    ctx = ToolContext(home=home, env=dict(os.environ))
+    gcfg = GlobalConfig()
+    gcfg.llm.providers["claude"].docs_model = "opus"
+    assert configure._apply_settings(
+        ctx, None, gcfg, ProjectConfig(), SecretsConfig(), [], remove_provider="claude"
+    ) == (True, False, False)
+    assert "claude" not in store.load_global(home).llm.providers
+
+
+def test_apply_settings_defaults_seeds_missing_project_without_clobbering_it(tmp_path):
+    home = tmp_path / "home"
+    root = tmp_path / "repo"
+    ctx = ToolContext(home=home, env={})
+    gcfg, pcfg = GlobalConfig(), ProjectConfig()
+    assert configure._apply_settings(ctx, root, gcfg, pcfg, SecretsConfig(), [], defaults=True) == (
+        True,
+        True,
+        False,
+    )
+    pcfg.worktree.base_branch = "develop"
+    assert configure._apply_settings(ctx, root, gcfg, pcfg, SecretsConfig(), [], defaults=True) == (
+        True,
+        False,
+        False,
+    )
+    assert store.load_project(root).worktree.base_branch == "main"
 
 
 def _repo(tmp_path, monkeypatch):
@@ -269,10 +337,12 @@ def test_configure_interactive_mode_writes_global_sections(tmp_path, monkeypatch
     _home(tmp_path, monkeypatch)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
-    def choose_providers(ctx, gcfg, scfg):
+    def choose_providers(ctx, root, gcfg, pcfg, scfg, *, legacy=False, plain_menu=False):
         gcfg.llm.providers["codex"] = ProviderConfig()
+        store.save_global(ctx.home, gcfg)
+        return True, False, False
 
-    monkeypatch.setattr(configure, "_walkthrough_global", choose_providers)
+    monkeypatch.setattr(configure, "_run_menu", choose_providers)
     monkeypatch.setattr(configure, "_ensure_plugins", lambda ctx, cfg: None)
     assert main(["configure"]) == 0
     assert agentsmd.BEGIN_MARKER in (tmp_path / ".claude/CLAUDE.md").read_bytes()
@@ -553,55 +623,16 @@ def test_malformed_api_key_routing_key_is_unknown(tmp_path, monkeypatch, capsys)
     assert "unknown config key" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    "initial,answer,want",
-    [(True, False, False), (False, True, True), (True, None, True), (False, None, False)],
-)
-def test_walkthrough_native_notifications_follow_model_and_preserve_dismissal(
-    tmp_path, monkeypatch, initial, answer, want
-):
-    import questionary
-
-    from omc import configure, docsllm
-    from omc.config.schema import ProviderConfig, SecretsConfig
-    from omc.toolctx import ToolContext
-
-    calls = []
-
-    class Prompt:
-        def __init__(self, value):
-            self.value = value
-
-        def ask(self):
-            return self.value
-
-    def checkbox(label, **kwargs):
-        calls.append(label)
-        return Prompt(["claude"])
-
-    def select(label, **kwargs):
-        calls.append(label)
-        if label == "Documentation backend":
-            return Prompt("cli")
-        return Prompt("sonnet")
-
-    def confirm(label, **kwargs):
-        calls.append((label, kwargs["default"]))
-        return Prompt(answer)
-
-    monkeypatch.setattr(questionary, "checkbox", checkbox)
-    monkeypatch.setattr(questionary, "select", select)
-    monkeypatch.setattr(questionary, "confirm", confirm)
-    monkeypatch.setattr(docsllm, "cli_connection_probe", lambda *a: (True, "ok"))
-    monkeypatch.setattr(docsllm, "cli_model_probe", lambda *a: (True, "ok"))
+@pytest.mark.parametrize("initial,answer", [(True, False), (False, True)])
+def test_menu_native_notifications_follow_model_and_save(tmp_path, initial, answer):
     cfg = GlobalConfig()
     cfg.llm.providers["claude"] = ProviderConfig(notifications=initial)
-    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "omc")})
-    configure._walkthrough_global(ctx, cfg, SecretsConfig())
-    assert cfg.llm.providers["claude"].notifications is want
-    assert calls.index("claude model") + 1 == calls.index(
-        ("Enable native notifications for claude?", initial)
-    )
-    assert not any(
-        "backend" in str(call).lower() and "notification" in str(call).lower() for call in calls
-    )
+    ctx = ToolContext(home=tmp_path / "omc", env={})
+    session = configure._compose_menu(ctx, None, cfg, ProjectConfig(), SecretsConfig())
+    provider = session.root["LLM"]["claude"]
+    assert list(provider).index("Session model") + 1 == list(provider).index("Native notifications")
+    tag = provider["Native notifications"]
+    assert tag.val is initial
+    assert tag.update(answer)
+    assert store.load_global(ctx.home).llm.providers["claude"].notifications is answer
+    assert "Notifications" not in session.root

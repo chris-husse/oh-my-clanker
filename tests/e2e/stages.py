@@ -74,7 +74,42 @@ def snapshot(container, manifest: dict) -> str:
         capture_output=True,
         text=True,
     )
+    hold_image(tag, f"omc-e2e-holder-{manifest['provider']}-{manifest['stage']}-{source_id()}")
     return tag
+
+
+def hold_image(tag: str, name: str) -> None:
+    """Pin an image with an idle container so an external image GC cannot
+    remove it. Observed 2026-10-06: Docker Desktop's kubelet, under disk
+    pressure, deleted every image without a container every ~10 s — the base
+    image and the stage snapshots vanished mid-run with no Docker event left
+    in the (256-entry) buffer. The daemon refuses to remove an image that a
+    container references, so one `sleep infinity` per image is the whole
+    defence. Holders live until `scripts/e2e.sh prune`, like the images; a
+    holder that already exists (same source id, earlier run) is kept."""
+    try:
+        subprocess.run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                name,
+                "--label",
+                "omc.e2e=holder",
+                "--label",
+                f"omc.e2e.source={source_id()}",
+                tag,
+                "sleep",
+                "infinity",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        if "already in use" not in (exc.stderr or ""):
+            raise
 
 
 def read_manifest(container) -> dict:

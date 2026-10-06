@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import sys
+from dataclasses import dataclass, field, fields
 from pathlib import Path
+from typing import Any
 
 from . import docsllm
 from .agentsmd import ensure_global_section, seed_project_agents_md
@@ -73,6 +75,7 @@ def _probe_docs(
     *,
     before: GlobalConfig,
     before_keys: dict[str, str],
+    removed_provider: str | None = None,
 ) -> bool:
     """Refuse api-without-key, then run exactly the probes the change calls
     for. Returns True when docs_model was rewritten (api: the resolved full
@@ -94,14 +97,102 @@ def _probe_docs(
     # runs the selected backend's probes, even when a key probe just ran.
     # setdefault may add a provider entry (e.g. docs.provider=codex with no codex
     # section) — the same thing `--set llm.providers.codex.model=` does today.
-    pcfg = gcfg.llm.providers.setdefault(name, ProviderConfig())
+    # A configured toggle may remove the selected provider. Probe its fallback
+    # model without recreating the entry that the user just removed.
+    removed_selected = name == removed_provider and name not in gcfg.llm.providers
+    pcfg = (
+        ProviderConfig()
+        if removed_selected
+        else gcfg.llm.providers.setdefault(name, ProviderConfig())
+    )
     model = docsllm.validate_selection(
         ctx, docsllm.DocsSelection(name, backend, pcfg.docs_model, key), say=_say
     )
-    if model != pcfg.docs_model:
+    if model != pcfg.docs_model and not removed_selected:
         pcfg.docs_model = model
         return True
     return False
+
+
+def _apply_settings(
+    ctx: ToolContext,
+    root: Path | None,
+    gcfg: GlobalConfig,
+    pcfg: ProjectConfig,
+    scfg: SecretsConfig,
+    sets: list[str],
+    *,
+    defaults: bool = False,
+    legacy: bool = False,
+    remove_provider: str | None = None,
+) -> tuple[bool, bool, bool]:
+    """Validate, probe, and persist candidates; return global/project/secrets write flags.
+
+    Callers that need rollback after a failed edit supply copies. Migration and
+    other post-steps remain with the caller.
+    """
+    before, before_keys = copy.deepcopy(gcfg), dict(scfg.api_keys)
+    write_global = defaults
+    # --defaults seeds a missing project file but never clobbers an
+    # existing one: it is committed team truth, not personal state.
+    write_project = bool(
+        defaults and root is not None and not store.project_config_path(root).exists()
+    )
+    write_secrets = False
+    for i, pair in enumerate(sets, 1):
+        key, sep, value = pair.partition("=")
+        if not sep:
+            # Never echo the argument: a ':' typo on an api_key pair would
+            # print the secret to stderr.
+            raise Refusal(f"--set expects KEY=VALUE (argument {i} has no '=')")
+        parts = key.split(".")
+        if parts[0] == "worktree":
+            if root is None:
+                raise Refusal("worktree.* is project config — run inside a git repository")
+            store.set_key(pcfg, key, value)
+            write_project = True
+        elif len(parts) == 4 and parts[:2] == ["llm", "providers"] and parts[3] == "api_key":
+            # Routing key, not a ProviderConfig field: secrets.yaml only.
+            store.set_api_key(scfg, parts[2], value)
+            write_secrets = True
+        else:
+            store.set_key(gcfg, key, value)
+            write_global = True
+    if remove_provider is not None:
+        store.remove_provider(gcfg, remove_provider)
+        write_global = True
+    # Order (spec §3.2): consistency → refuse api-without-key → probes → write.
+    store.validate_llm(gcfg.llm)
+    if _probe_docs(
+        ctx, gcfg, scfg, before=before, before_keys=before_keys, removed_provider=remove_provider
+    ):
+        write_global = True  # the resolved full model id was written into docs_model
+    # Migration must not lose the legacy worktree section: when this run
+    # writes the global YAML (which deletes the JSON afterwards) and the
+    # repo has no project file yet, seed it from the legacy content.
+    if (
+        write_global
+        and legacy
+        and root is not None
+        and not store.project_config_path(root).exists()
+    ):
+        write_project = True
+    # Secrets FIRST: if this write fails, config.yaml must not already say `api`
+    # (that state trips the unconditional api-without-key refusal on every run).
+    if write_secrets:
+        store.save_secrets(ctx.home, scfg)
+        print(f"Updated {store.secrets_path(ctx.home)} (mode 0600)")
+        for name, k in scfg.api_keys.items():
+            if before_keys.get(name) != k:
+                _say(f"✓ {name} API key stored ({docsllm.mask_key(k)})")
+    if write_global:
+        store.save_global(ctx.home, gcfg)
+        label = "Wrote defaults to" if defaults and not sets else "Updated"
+        print(f"{label} {store.global_config_path(ctx.home)}")
+    if write_project and root is not None:
+        store.save_project(root, pcfg)
+        print(f"Updated {store.project_config_path(root)}")
+    return write_global, write_project, write_secrets
 
 
 def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
@@ -121,62 +212,9 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
         )
         pcfg = (store.load_project(root) if root else None) or legacy_project or ProjectConfig()
         scfg = store.load_secrets(ctx.home)
-        before, before_keys = copy.deepcopy(gcfg), dict(scfg.api_keys)
-        write_global = defaults
-        # --defaults seeds a missing project file but never clobbers an
-        # existing one: it is committed team truth, not personal state.
-        write_project = bool(
-            defaults and root is not None and not store.project_config_path(root).exists()
+        write_global, write_project, _ = _apply_settings(
+            ctx, root, gcfg, pcfg, scfg, sets, defaults=defaults, legacy=legacy is not None
         )
-        write_secrets = False
-        for i, pair in enumerate(sets, 1):
-            key, sep, value = pair.partition("=")
-            if not sep:
-                # Never echo the argument: a ':' typo on an api_key pair would
-                # print the secret to stderr.
-                raise Refusal(f"--set expects KEY=VALUE (argument {i} has no '=')")
-            parts = key.split(".")
-            if parts[0] == "worktree":
-                if root is None:
-                    raise Refusal("worktree.* is project config — run inside a git repository")
-                store.set_key(pcfg, key, value)
-                write_project = True
-            elif len(parts) == 4 and parts[:2] == ["llm", "providers"] and parts[3] == "api_key":
-                # Routing key, not a ProviderConfig field: secrets.yaml only.
-                store.set_api_key(scfg, parts[2], value)
-                write_secrets = True
-            else:
-                store.set_key(gcfg, key, value)
-                write_global = True
-        # Order (spec §3.2): consistency → refuse api-without-key → probes → write.
-        store.validate_llm(gcfg.llm)
-        if _probe_docs(ctx, gcfg, scfg, before=before, before_keys=before_keys):
-            write_global = True  # the resolved full model id was written into docs_model
-        # Migration must not lose the legacy worktree section: when this run
-        # writes the global YAML (which deletes the JSON afterwards) and the
-        # repo has no project file yet, seed it from the legacy content.
-        if (
-            write_global
-            and legacy is not None
-            and root is not None
-            and not store.project_config_path(root).exists()
-        ):
-            write_project = True
-        # Secrets FIRST: if this write fails, config.yaml must not already say `api`
-        # (that state trips the unconditional api-without-key refusal on every run).
-        if write_secrets:
-            store.save_secrets(ctx.home, scfg)
-            print(f"Updated {store.secrets_path(ctx.home)} (mode 0600)")
-            for name, k in scfg.api_keys.items():
-                if before_keys.get(name) != k:
-                    _say(f"✓ {name} API key stored ({docsllm.mask_key(k)})")
-        if write_global:
-            store.save_global(ctx.home, gcfg)
-            label = "Wrote defaults to" if defaults and not sets else "Updated"
-            print(f"{label} {store.global_config_path(ctx.home)}")
-        if write_project and root is not None:
-            store.save_project(root, pcfg)
-            print(f"Updated {store.project_config_path(root)}")
         _migrate_legacy(ctx, migrated=write_global, carried=write_project)
         _ensure_instructions(ctx, gcfg, root)
         _ensure_plugins(ctx, gcfg)
@@ -187,25 +225,11 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
         raise Refusal("interactive configure needs a TTY (use --defaults or --set KEY=VALUE)")
     gcfg = store.load_global(ctx.home) or legacy_global or GlobalConfig()
     scfg = store.load_secrets(ctx.home)
-    before_keys = dict(scfg.api_keys)
-    _walkthrough_global(ctx, gcfg, scfg)  # probes inside; raises before any write
-    pcfg = None
-    if root is not None:
-        pcfg = store.load_project(root) or legacy_project or ProjectConfig()
-        _walkthrough_project(pcfg)
-    # Secrets FIRST: if this write fails, config.yaml must not already say `api`
-    # (that state trips the unconditional api-without-key refusal on every run).
-    if scfg.api_keys != before_keys:
-        store.save_secrets(ctx.home, scfg)
-        print(f"Saved {store.secrets_path(ctx.home)} (mode 0600)")
-    store.save_global(ctx.home, gcfg)
-    print(f"Saved {store.global_config_path(ctx.home)}")
-    if root is not None and pcfg is not None:
-        store.save_project(root, pcfg)
-        print(f"Saved {store.project_config_path(root)}")
-    else:
-        print("(not inside a git repository — worktree.* settings are configured per-repo)")
-    _migrate_legacy(ctx, migrated=True, carried=root is not None)
+    pcfg = (store.load_project(root) if root else None) or legacy_project or ProjectConfig()
+    write_global, write_project, _ = _run_menu(
+        ctx, root, gcfg, pcfg, scfg, legacy=legacy is not None
+    )
+    _migrate_legacy(ctx, migrated=write_global, carried=write_project)
     _ensure_instructions(ctx, gcfg, root)
     _ensure_plugins(ctx, gcfg)
     print(_PLUGIN_HINTS)
@@ -261,180 +285,405 @@ def _ensure_instructions(ctx: ToolContext, cfg: GlobalConfig, root: Path | None)
             _say(f"✗ project instructions: {exc}")
 
 
-def _walkthrough_global(
-    ctx: ToolContext, cfg: GlobalConfig, scfg: SecretsConfig
-) -> None:  # pragma: no cover - PTY-driven, E2E territory
-    import questionary
-    from questionary import Choice
+@dataclass
+class _MenuSession:
+    """Stable menu tree and the write state shared by its field callbacks."""
 
-    names = provider_names()
-    selected = questionary.checkbox(
-        "Which LLMs do you use?",
-        choices=[Choice(n, checked=(n in cfg.llm.providers)) for n in names],
-    ).ask()
-    if not selected:
-        selected = list(cfg.llm.providers) or ["claude"]
-    cfg.llm.providers = {n: cfg.llm.providers.get(n, ProviderConfig()) for n in selected}
+    root: dict[str, Any] = field(default_factory=dict)
+    flags: tuple[bool, bool, bool] = (False, False, False)
+    interface: Any = None
 
-    for name in selected:
-        pcfg = cfg.llm.providers[name]
-        known = get_provider(name).models()
-        if known:
-            other = "Other (type a model id)…"
-            default = pcfg.model if pcfg.model in known else known[0]
-            picked = questionary.select(
-                f"{name} model", choices=[*known, other], default=default
-            ).ask()
-            model = (
-                questionary.text(f"{name} model id", default=pcfg.model).ask()
-                if picked == other
-                else picked
-            )
-        else:
-            model = questionary.text(
-                f"{name} model (blank = provider default)", default=pcfg.model
-            ).ask()
-        pcfg.model = model or ""
-        enabled = questionary.confirm(
-            f"Enable native notifications for {name}?", default=pcfg.notifications
-        ).ask()
-        if enabled is not None:
-            pcfg.notifications = enabled
 
-    if len(selected) == 1:
-        cfg.llm.default = selected[0]
-    else:
-        cfg.llm.default = (
-            questionary.select(
-                "Default provider for `omc design`",
-                choices=selected,
-                default=cfg.llm.default if cfg.llm.default in selected else selected[0],
-            ).ask()
-            or selected[0]
-        )
+def _compose_menu(
+    ctx: ToolContext,
+    root: Path | None,
+    gcfg: GlobalConfig,
+    pcfg: ProjectConfig,
+    scfg: SecretsConfig,
+    *,
+    legacy: bool = False,
+) -> _MenuSession:
+    """Compose schema leaves into mininterface's nested-dict form."""
+    from mininterface.exceptions import Cancelled
+    from mininterface.tag import SecretTag, SelectTag, Tag
 
-    # Documentation generation (spec 2026-10-01 §3.3). Nothing below is saved
-    # unless BOTH probes pass; Ctrl-C/Esc (None) aborts with nothing written.
-    def aborted() -> Refusal:
-        return Refusal("configure aborted — nothing was saved")
-
-    docs_provider = cfg.llm.docs.provider if cfg.llm.docs.provider in selected else ""
-    if len(selected) > 1:
-        picked = questionary.select(
-            "Documentation provider",
-            choices=selected,
-            default=docs_provider or cfg.llm.default,
-        ).ask()
-        if picked is None:
-            raise aborted()
-        docs_provider = "" if picked == cfg.llm.default else picked
-    name = docs_provider or cfg.llm.default
-    provider = get_provider(name)
-    backend_choices = [Choice(f"CLI (uses your {name} login)", "cli")]
-    if provider.api_base_url():
-        backend_choices.append(Choice("API key", "api"))
-    current = next(
-        (c for c in backend_choices if c.value == cfg.llm.docs.backend), backend_choices[0]
-    )
-    backend = questionary.select(
-        "Documentation backend", choices=backend_choices, default=current
-    ).ask()
-    if backend is None:
-        raise aborted()
-    pcfg = cfg.llm.providers[name]
-    other = "Other (type a model id)…"
-    if backend == "api":
-        key = scfg.api_keys.get(name, "")
-        while True:
-            hint = f" (blank keeps {docsllm.mask_key(key)})" if key else ""
-            typed = questionary.password(f"{name} API key{hint}").ask()
-            if typed is None or (not typed and not key):
-                raise aborted()
-            candidate = typed or key
+    class SavedTag(Tag):
+        # TextAdaptor calls _on_change_trigger(ui_val), then update(ui_val)
+        # with the same original UI value. The first call already validates
+        # and persists it, possibly replacing it with a prompted/resolved id.
+        # Consume that one renderer replay without performing the edit again.
+        def _on_change_trigger(self, ui_val):
+            ran_update = self._last_ui_val != ui_val
+            self._renderer_edit = True
             try:
-                store.validate_api_key(candidate, f"llm.providers.{name}.api_key")
-            except ConfigError as exc:
-                print(exc)
-                continue
-            _say(f"→ checking the key against {provider.api_base_url().split('/')[2]}")
-            ok, detail, models = docsllm.api_connection_probe(ctx, name, candidate)
-            _say(("✓ " if ok else "✗ ") + detail)
-            if ok:
-                key = candidate
-                break
-            key = ""  # a failed probe never "keeps" the old key: retype or abort
-        choices = docsllm.model_choices(models)
+                super()._on_change_trigger(ui_val)
+            finally:
+                self._renderer_edit = False
+            # The library can skip its first update when _last_ui_val is stale
+            # after another field changed this tag's accepted value. In that
+            # case the renderer's next update is the actual edit, not a replay.
+            self._renderer_replay = (ui_val, self.val, self._error_text) if ran_update else None
+
+        def update(self, value):
+            if not getattr(self, "_renderer_edit", False):
+                replay = getattr(self, "_renderer_replay", None)
+                self._renderer_replay = None
+                if replay is not None and value == replay[0]:
+                    _, accepted, error = replay
+                    self.val = accepted
+                    self._last_ui_val = accepted
+                    if error:
+                        self.set_error_text(error)
+                        return False
+                    self.remove_error_text()
+                    return True
+            return super().update(value)
+
+    class SavedSelectTag(SavedTag, SelectTag):
+        # mininterface 1.4's SelectTag._validate checks membership but skips
+        # Tag._validate, including its persistence callback. Let the selected
+        # option through, then run that callback; it may return a resolved ID.
+        def _validate(self, value):
+            if value not in self._build_options().values() and value != self.val:
+                raise ValueError("Not one of the allowed values")
+            return Tag._validate(self, value)
+
+        def update(self, value):
+            if value == self.val and value not in self._build_options().values():
+                return Tag.update(self, value)
+            return super().update(value)
+
+        def _get_selected_key(self):
+            return super()._get_selected_key() or (str(self.val) if self.val else None)
+
+    class MaskedKeyTag(SavedTag, SecretTag):
+        def _get_masked_val(self):
+            return docsllm.mask_key(self.val) if self.val else ""
+
+    session = _MenuSession()
+    tags: list[tuple[Any, str, str | None]] = []
+
+    def guarded_commit(key: str, tag: Any, *, provider: str | None = None):
         try:
-            default = (
-                pcfg.docs_model
-                if pcfg.docs_model in choices
-                else docsllm.resolve_model(
-                    name, pcfg.docs_model or provider.docs_model_default(), models
+            return commit(key, tag, provider=provider)
+        except (KeyboardInterrupt, Cancelled):
+            # Tag._validate temporarily installs the candidate before calling
+            # us. mininterface catches the interruption and may later submit
+            # this whole level, so restore its last accepted value now.
+            tag.val = current(key, provider)
+            raise
+
+    def commit(key: str, tag: Any, *, provider: str | None = None):
+        value = tag.val
+        if value == "" and not isinstance(tag, SelectTag):
+            return True, current(key, provider)
+        if value == "__other_model__":
+            if session.interface is None:
+                return "Model input is unavailable"
+            try:
+                value = session.interface.ask("Model id")
+            except Cancelled:
+                return True, current(key, provider)
+            if not value:
+                return True, current(key, provider)
+        old = current(key, provider)
+        if value == old:
+            return True, old
+        candidate_g, candidate_p, candidate_s = (
+            copy.deepcopy(gcfg),
+            copy.deepcopy(pcfg),
+            copy.deepcopy(scfg),
+        )
+        try:
+            if key.endswith(".configured"):
+                if value:
+                    flags = _apply_settings(
+                        ctx,
+                        root,
+                        candidate_g,
+                        candidate_p,
+                        candidate_s,
+                        [f"llm.providers.{provider}.model="],
+                        legacy=legacy,
+                    )
+                else:
+                    flags = _apply_settings(
+                        ctx,
+                        root,
+                        candidate_g,
+                        candidate_p,
+                        candidate_s,
+                        [],
+                        legacy=legacy,
+                        remove_provider=provider,
+                    )
+            else:
+                sets = [f"{key}={str(value).lower() if isinstance(value, bool) else value}"]
+                if key.endswith(".api_key") and provider not in gcfg.llm.providers:
+                    # A key edit on a disabled provider configures it in the
+                    # same transaction. Existing provider key edits stay secrets-only.
+                    sets.append(f"llm.providers.{provider}.model=")
+                flags = _apply_settings(
+                    ctx, root, candidate_g, candidate_p, candidate_s, sets, legacy=legacy
                 )
-            )
-        except docsllm.ProbeFailed:
-            # A stored alias with no family member for this key, or an unsafe stored
-            # id: show the picker with no preselection instead of aborting configure.
-            default = None
-        if default not in choices:
-            # resolve_model returns its input unchanged for non-family ids (retired,
-            # non-claude-, or typed via "Other"); questionary raises on such a default.
-            default = None
-        picked = questionary.select(
-            "Documentation model", choices=[*choices, other], default=default
-        ).ask()
-        if picked is None:
-            raise aborted()
-        model = questionary.text("model id").ask() if picked == other else picked
-        if not model:
-            raise aborted()
-        _say(f"→ validating {model} via api")
-        ok, detail = docsllm.api_model_probe(ctx, name, key, model)
-        _say(("✓ " if ok else "✗ ") + detail)
-        if not ok:
-            raise docsllm.ProbeFailed(detail)
-        scfg.api_keys[name] = key
-    else:
-        known = provider.models()
-        if known:
-            default = pcfg.docs_model if pcfg.docs_model in known else provider.docs_model_default()
-            if default not in known:  # questionary raises on a default outside choices
-                default = known[0]
-            picked = questionary.select(
-                "Documentation model", choices=[*known, other], default=default
-            ).ask()
-            if picked is None:
-                raise aborted()
-            model = questionary.text("model id").ask() if picked == other else picked
+        except OmcError as exc:
+            message = str(exc)
+            if key == "llm.docs.backend" and "api_key is required" in message:
+                message += " — set the provider API key first"
+            return message
+        gcfg.llm = candidate_g.llm
+        pcfg.worktree = candidate_p.worktree
+        scfg.api_keys = candidate_s.api_keys
+        session.flags = tuple(a or b for a, b in zip(session.flags, flags, strict=True))
+        # mininterface revalidates every tag on level submit. A probe can
+        # resolve another leaf, and removing a provider changes both model
+        # leaves. Keep the stable tree aligned with the accepted config so a
+        # later validation cannot replay a stale value as a new edit.
+        for saved_tag, saved_key, saved_provider in tags:
+            saved_tag.val = current(saved_key, saved_provider)
+        return True, current(key, provider)
+
+    def current(key: str, provider: str | None):
+        parts = key.split(".")
+        if key.endswith(".configured"):
+            return provider in gcfg.llm.providers
+        if key.endswith(".api_key"):
+            return scfg.api_keys.get(provider, "")
+        if provider is not None:
+            return getattr(gcfg.llm.providers.get(provider, ProviderConfig()), parts[-1])
+        obj: Any = pcfg if parts[0] == "worktree" else gcfg
+        for part in parts:
+            obj = getattr(obj, part)
+        return obj
+
+    def leaf(
+        obj: Any,
+        name: str,
+        key: str,
+        *,
+        provider: str | None = None,
+        options: list[str] | dict[str, str] | None = None,
+        secret: bool = False,
+    ):
+        meta = next(f.metadata for f in fields(obj) if f.name == name)
+        value = current(key, provider)
+        kwargs = {
+            "val": value,
+            "label": meta["label"],
+            "description": meta.get("help", ""),
+            "validation": lambda tag: guarded_commit(key, tag, provider=provider),
+        }
+        if secret:
+            tag = MaskedKeyTag(**kwargs)
+        elif options is not None:
+            tag = SavedSelectTag(options=options, **kwargs)
         else:
-            model = questionary.text(
-                "Documentation model (blank = CLI default)", default=pcfg.docs_model
-            ).ask()
-        if model is None:
-            raise aborted()
-        _say(f"→ checking {name} login")
-        ok, detail = docsllm.cli_connection_probe(ctx, name)
-        _say(("✓ " if ok else "✗ ") + detail)
-        if not ok:
-            raise docsllm.ProbeFailed(detail)
-        _say(f"→ validating {model or 'default model'} via cli")
-        ok, detail = docsllm.cli_model_probe(ctx, name, model)
-        _say(("✓ " if ok else "✗ ") + detail)
-        if not ok:
-            raise docsllm.ProbeFailed(detail)
-    pcfg.docs_model = model
-    cfg.llm.docs.provider = docs_provider
-    cfg.llm.docs.backend = backend
+            tag = SavedTag(**kwargs)
+        tags.append((tag, key, provider))
+        return tag
+
+    configured = list(gcfg.llm.providers)
+    llm = {}
+    for config_field in fields(gcfg.llm):
+        if config_field.name in ("docs", "providers"):
+            continue  # nested sections, composed below
+        options = configured or [gcfg.llm.default] if config_field.name == "default" else None
+        llm[config_field.metadata["label"]] = leaf(
+            gcfg.llm, config_field.name, f"llm.{config_field.name}", options=options
+        )
+    other = "__other_model__"
+    for name in provider_names():
+        p = gcfg.llm.providers.get(name, ProviderConfig())
+        toggle = SavedTag(
+            val=name in gcfg.llm.providers,
+            label="Configured",
+            description="Enable this provider.",
+            validation=lambda tag, n=name: guarded_commit(
+                f"llm.providers.{n}.configured", tag, provider=n
+            ),
+        )
+        tags.append((toggle, f"llm.providers.{name}.configured", name))
+        models = list(get_provider(name).models())
+        submenu = {"Configured": toggle}
+        for config_field in fields(p):
+            attr = config_field.name
+            choices = None
+            if attr in ("model", "docs_model") and models:
+                value = getattr(p, attr)
+                choices = {m: m for m in models}
+                choices["Other (type a model id)"] = other
+                if value and value not in choices.values():
+                    choices = {value: value, **choices}
+            submenu[config_field.metadata["label"]] = leaf(
+                p,
+                attr,
+                f"llm.providers.{name}.{attr}",
+                provider=name,
+                options=choices,
+            )
+        if get_provider(name).api_base_url():
+            meta = next(f.metadata for f in fields(scfg) if f.name == "api_keys")
+            key_tag = MaskedKeyTag(
+                val=scfg.api_keys.get(name, ""),
+                label=meta["label"],
+                description=meta.get("help", ""),
+                validation=lambda tag, n=name: guarded_commit(
+                    f"llm.providers.{n}.api_key", tag, provider=n
+                ),
+            )
+            submenu[meta["label"]] = key_tag
+            tags.append((key_tag, f"llm.providers.{name}.api_key", name))
+        llm[name] = submenu
+    docs_name = _docs_provider(gcfg)
+    docs = {}
+    for config_field in fields(gcfg.llm.docs):
+        options = None
+        if config_field.name == "provider":
+            options = {"Follow default provider": "", **{n: n for n in configured}}
+        elif config_field.name == "backend":
+            options = ["cli", "api"] if get_provider(docs_name).api_base_url() else ["cli"]
+        docs[config_field.metadata["label"]] = leaf(
+            gcfg.llm.docs, config_field.name, f"llm.docs.{config_field.name}", options=options
+        )
+    session.root = {}
+    for config_field in fields(gcfg):
+        if config_field.name == "llm":
+            session.root[config_field.metadata["label"]] = llm
+            docs_field = next(f for f in fields(gcfg.llm) if f.name == "docs")
+            session.root[docs_field.metadata["label"]] = docs
+    if root is not None:
+        worktree_field = next(f for f in fields(pcfg) if f.name == "worktree")
+        session.root[f"{worktree_field.metadata['label']} (project)"] = {
+            f.metadata["label"]: leaf(pcfg.worktree, f.name, f"worktree.{f.name}")
+            for f in fields(pcfg.worktree)
+        }
+    return session
 
 
-def _walkthrough_project(cfg: ProjectConfig) -> None:  # pragma: no cover - PTY-driven E2E territory
-    import questionary
+def _text_interface(plain_menu: bool):
+    """Use mininterface's text renderer with a no-echo secret input adaptor."""
+    import getpass
 
-    cfg.worktree.branch_prefix = (
-        questionary.text("Branch prefix", default=cfg.worktree.branch_prefix).ask()
-        or cfg.worktree.branch_prefix
-    )
-    cfg.worktree.base_branch = (
-        questionary.text("Base branch", default=cfg.worktree.base_branch).ask()
-        or cfg.worktree.base_branch
-    )
+    from mininterface._text_interface import TextInterface
+    from mininterface._text_interface.adaptor import TextAdaptor
+    from mininterface.exceptions import InterfaceNotAvailable
+    from mininterface.interfaces import get_interface
+    from mininterface.settings import MininterfaceSettings, TextSettings
+    from mininterface.tag.secret_tag import SecretTag
+
+    class MaskedTextAdaptor(TextAdaptor):
+        def widgetize(self, tag, only_label=False):
+            if isinstance(tag, SecretTag):
+                if only_label:
+                    return tag._get_masked_val()
+                try:
+                    return getpass.getpass(f"{tag.label}: ")
+                except (EOFError, KeyboardInterrupt):
+                    # TextAdaptor catches KeyboardInterrupt at the leaf and
+                    # returns to its enclosing menu without losing saved edits.
+                    raise KeyboardInterrupt from None
+            return super().widgetize(tag, only_label=only_label)
+
+    text_settings = TextSettings(plain_menu=plain_menu)
+    interface = get_interface("text", settings=MininterfaceSettings(text=text_settings))
+    # get_interface falls back to its noninteractive base implementation when
+    # there is no controlling terminal, even with an explicit "text" request.
+    if not isinstance(interface, TextInterface):
+        raise InterfaceNotAvailable("configure needs a controlling terminal")
+    interface._adaptor = MaskedTextAdaptor(interface, text_settings)
+    return interface
+
+
+def _run_menu(
+    ctx: ToolContext,
+    root: Path | None,
+    gcfg: GlobalConfig,
+    pcfg: ProjectConfig,
+    scfg: SecretsConfig,
+    *,
+    legacy: bool = False,
+    plain_menu: bool = False,
+) -> tuple[bool, bool, bool]:
+    """Run one immediate-save menu session and return accumulated write flags."""
+    import codecs
+    import errno
+    import os
+
+    from mininterface.exceptions import Cancelled, InterfaceNotAvailable
+
+    class TerminalDisconnected(BaseException):
+        """Do not let the dependency treat a lost terminal as menu dismissal."""
+
+    class UnbufferedStdin:
+        """Keep mininterface's select/read loop on the same file descriptor."""
+
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+            self.decoder = codecs.getincrementaldecoder(wrapped.encoding or "utf-8")()
+
+        def fileno(self):
+            return self.wrapped.fileno()
+
+        def isatty(self):
+            return self.wrapped.isatty()
+
+        def read(self, size=1):
+            if size != 1:
+                return self.wrapped.read(size)
+            while True:
+                try:
+                    raw = os.read(self.fileno(), 1)
+                except OSError:
+                    raise TerminalDisconnected from None
+                if not raw:
+                    raise TerminalDisconnected
+                char = self.decoder.decode(raw)
+                if char:
+                    return char
+
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+
+    session = _compose_menu(ctx, root, gcfg, pcfg, scfg, legacy=legacy)
+    try:
+        session.interface = _text_interface(plain_menu)
+        original_stdin = sys.stdin
+        try:
+            sys.stdin = UnbufferedStdin(original_stdin)
+            session.interface.form(session.root)
+        finally:
+            sys.stdin = original_stdin
+    except InterfaceNotAvailable:
+        raise Refusal(
+            "interactive configure needs a TTY (use --defaults or --set KEY=VALUE)"
+        ) from None
+    except TerminalDisconnected:
+        raise Refusal("interactive configure lost its terminal") from None
+    except AssertionError as exc:
+        # simple_term_menu 1.6 can mask an EIO from its terminal with an
+        # assertion in _clear_menu during cleanup. Match that exact cleanup
+        # frame and underlying I/O error, leaving other assertions visible.
+        tb = exc.__traceback__
+        while tb is not None:
+            code = tb.tb_frame.f_code
+            if (
+                code.co_name == "_clear_menu"
+                and Path(code.co_filename).name == "simple_term_menu.py"
+                and isinstance(exc.__context__, OSError)
+                and exc.__context__.errno == errno.EIO
+            ):
+                raise Refusal("interactive configure lost its terminal") from None
+            tb = tb.tb_next
+        raise
+    except Cancelled:
+        pass
+    # First exit must establish usable defaults. Project config is seeded
+    # independently, even when a prior edit only touched a personal file.
+    if not store.global_config_path(ctx.home).exists():
+        flags = _apply_settings(ctx, root, gcfg, pcfg, scfg, [], defaults=True, legacy=legacy)
+        session.flags = tuple(a or b for a, b in zip(session.flags, flags, strict=True))
+    elif root is not None and not store.project_config_path(root).exists():
+        store.save_project(root, pcfg)
+        print(f"Updated {store.project_config_path(root)}")
+        session.flags = (session.flags[0], True, session.flags[2])
+    return session.flags

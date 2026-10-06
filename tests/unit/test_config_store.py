@@ -1,9 +1,18 @@
 import stat as _stat
+from dataclasses import asdict, fields
 
 import pytest
 
 from omc.config import store
-from omc.config.schema import GlobalConfig, ProjectConfig, ProviderConfig, SecretsConfig
+from omc.config.schema import (
+    DocsConfig,
+    GlobalConfig,
+    LLMConfig,
+    ProjectConfig,
+    ProviderConfig,
+    SecretsConfig,
+    WorktreeConfig,
+)
 from omc.errors import ConfigError
 
 
@@ -67,6 +76,56 @@ def test_provider_notifications_wrong_type(tmp_path, value):
     )
     with pytest.raises(ConfigError, match="llm.providers.codex.notifications"):
         store.load_global(tmp_path)
+
+
+def test_schema_menu_metadata_does_not_change_persisted_defaults():
+    assert asdict(GlobalConfig()) == {
+        "schema_version": 1,
+        "llm": {
+            "default": "claude",
+            "docs": {"provider": "", "backend": "cli"},
+            "providers": {"claude": {"model": "", "notifications": True, "docs_model": ""}},
+        },
+    }
+    assert asdict(ProjectConfig()) == {
+        "schema_version": 1,
+        "worktree": {"branch_prefix": "feature/", "base_branch": "main"},
+    }
+    for cls in (
+        GlobalConfig,
+        ProjectConfig,
+        LLMConfig,
+        DocsConfig,
+        ProviderConfig,
+        WorktreeConfig,
+        SecretsConfig,
+    ):
+        for item in fields(cls):
+            if item.name == "schema_version":
+                continue
+            assert set(item.metadata) == {"label", "help"}
+            assert item.metadata["label"]
+
+
+def test_remove_provider_persists_absence_even_when_default_and_docs_use_it(tmp_path):
+    cfg = GlobalConfig()
+    cfg.llm.providers["codex"] = ProviderConfig(model="gpt-6")
+    cfg.llm.default = "codex"
+    cfg.llm.docs.provider = "codex"
+    store.remove_provider(cfg, "codex")
+    store.remove_provider(cfg, "codex")  # an already-absent entry is harmless
+    store.save_global(tmp_path, cfg)
+    loaded = store.load_global(tmp_path)
+    assert loaded.llm.default == loaded.llm.docs.provider == "codex"
+    assert "codex" not in loaded.llm.providers
+    assert "codex:" not in (tmp_path / "config.yaml").read_text()
+
+
+def test_remove_provider_rejects_unknown_name_without_mutation():
+    cfg = GlobalConfig()
+    with pytest.raises(ConfigError, match="retired.*claude.*codex"):
+        store.remove_provider(cfg, "retired")
+    assert list(cfg.llm.providers) == ["claude"]
 
 
 @pytest.mark.parametrize("value", ["true", "false"])

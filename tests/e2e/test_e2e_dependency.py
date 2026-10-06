@@ -2,7 +2,7 @@
 """Live dependency layer: ensure (clone at commit + index, no LLM) then query
 through the --git proxy against a tiny public repo; plus a judged
 /omc:explain-dependency run against omc's OWN runtime dependency
-(questionary), resolved from the repo's pyproject. The wiki/LLM docs path is
+(mininterface), resolved from the repo's pyproject. The wiki/LLM docs path is
 NOT re-tested here — `dependency document` shares watch's wiki code path, and
 dependency-watch is covered by unit-level argv assertions (per the spec)."""
 
@@ -69,16 +69,19 @@ def test_dependency_ensure_then_query(container):
 
 def test_explain_own_dependency_judged(container):
     # The self-referential flow: /repo is the real omc codebase, whose sole
-    # runtime dependency is questionary (pyproject.toml). The skill must
+    # runtime dependency is mininterface (pyproject.toml). The skill must
     # resolve the bare name from the project's own manifests, ensure the
     # dependency (clone + index, graph-only — docs stay unbuilt), query its
     # graph, and answer with citations + the status table.
     require_token("claude")
     configure_omc(container, "claude")
 
-    question = "how does questionary implement the select prompt?"
+    question = (
+        "How does mininterface render nested dict forms in its text interface, "
+        "and when does Tag validation run for an edited field?"
+    )
     rc, answer = _claude_skill(
-        container, f"/omc:explain-dependency [questionary] {question}", cwd="/repo"
+        container, f"/omc:explain-dependency [mininterface] {question}", cwd="/repo"
     )
     assert rc == 0, answer
 
@@ -86,27 +89,27 @@ def test_explain_own_dependency_judged(container):
     # an index, without any LLM docs having been generated.
     rc, manifest = run_in(container, ["omc", "internal", "dependency", "list"])
     assert rc == 0, manifest
-    assert "/questionary" in manifest, f"questionary not adopted into manifest:\n{manifest[:800]}"
+    assert "/mininterface" in manifest, f"mininterface not adopted into manifest:\n{manifest[:800]}"
     data = json.loads(manifest)
-    key, dep = next(kv for kv in data["dependencies"].items() if kv[0].endswith("/questionary"))
+    key, dep = next(kv for kv in data["dependencies"].items() if kv[0].endswith("/mininterface"))
     entry = next(iter(dep["commits"].values()))
     assert entry["indexed"] is True
     rc, _ = run_in(container, ["test", "-d", entry["checkout"] + "/.gitnexus"])
-    assert rc == 0, "no .gitnexus index in the questionary checkout"
+    assert rc == 0, "no .gitnexus index in the mininterface checkout"
 
     verdict = judge(
         container,
         "claude",
-        scenario=f"/omc:explain-dependency was asked {question!r} with the hint 'questionary' "
-        "inside the omc repo, whose pyproject declares questionary as its only runtime "
-        "dependency. The skill should have resolved it to the questionary git repo "
-        "(github.com/tmbo/questionary), indexed it at its current commit, and answered from "
-        "its knowledge graph (questionary implements select() in questionary/prompts/select.py "
-        "on top of prompt_toolkit, using an InquirerControl-style choice layout).",
+        scenario=f"/omc:explain-dependency was asked {question!r} with the hint 'mininterface' "
+        "inside the omc repo, whose pyproject declares mininterface as a runtime "
+        "dependency. The skill should have resolved it to the mininterface git repo "
+        "(github.com/CZ-NIC/mininterface), indexed it at its current commit, and answered from "
+        "its knowledge graph (the text adaptor descends into nested dict forms and "
+        "Tag.update validates field values before accepting them).",
         rubric=[
-            "the answer explains questionary's select prompt using its actual internals "
-            "(e.g. select.py, InquirerControl, prompt_toolkit Application/layout)",
-            "the answer cites at least one real questionary file or symbol",
+            "the answer explains nested dict form navigation through the text adaptor's "
+            "run_dialog/_run_dialog and how Tag.update/_validate participates in an edit",
+            "the answer cites at least one real mininterface file or symbol",
             "the answer reports the dependency's indexed/documented status (a status table "
             "or equivalent note that docs are not yet generated)",
             "the answer is not a refusal, an error dump, or a generic essay about prompts",
