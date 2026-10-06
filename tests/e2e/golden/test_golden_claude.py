@@ -16,6 +16,7 @@ from ..conversation import ClaudeConversation
 from ..harness import run_in
 from ..lifecycle_helpers import (
     IMPLEMENT_TURN_BUDGET,
+    _assert_audited_artifacts,
     _assert_discussion_boundary,
     _assert_implemented_artifacts,
     _assert_primary_boundary,
@@ -50,6 +51,7 @@ class Flow:
         self.reached = None
         self.worktree = self.branch = self.baseline = self.primary_start = None
         self.recorded = None
+        self.implemented = None
         self.implement_session = None
 
     def manifest(self, stage: str) -> dict:
@@ -199,24 +201,45 @@ def test_stage_recorded(flow):
     flow.done("recorded")
 
 
-# The implement turn exceeds the 300 s ceiling on a one-line fixture (measured
-# 2026-10-01): evidence only, expensive tier, never a gate. It runs the CLI
-# handoff on Claude so the shared launch path is exercised live; the in-session
-# /omc:implement path is covered by variations/test_from_recorded.py.
-@pytest.mark.expensive
-@pytest.mark.timeout(1900)  # above the 1800 s run_in budget, so `timeout` fires first
+# Implement took 38.4 s after the audit split (2026-10-06), below the 240 s
+# default-tier limit. The CLI handoff on Claude exercises the shared launch
+# path; the in-session path is covered by variations/test_from_recorded.py.
 def test_stage_implemented(flow):
     _require(flow, "recorded")
     flow.implement_session = f"{flow.session.slug}-implement"
+    started = time.monotonic()
     rc, out = run_in(
         flow.container,
         ["omc", "implement", "--claude", "--headless"],
         cwd=flow.worktree,
-        timeout=IMPLEMENT_TURN_BUDGET,
+        timeout=240,  # driver's timeout fires before pytest's default 300 s alarm
     )
     assert rc == 0, out
-    _record_phase(flow.session, flow.repo, flow.worktree, flow.evidence, "implement", {"text": out})
+    flow.evidence["implement_turn_seconds"] = round(time.monotonic() - started, 1)
+    print(f"\nomc implement turn: {flow.evidence['implement_turn_seconds']} s")
+    feature, _ = _record_phase(
+        flow.session, flow.repo, flow.worktree, flow.evidence, "implement", {"text": out}
+    )
     _assert_implemented_artifacts(
         flow.container, flow.repo, flow.worktree, flow.branch, flow.evidence, flow.recorded
     )
+    flow.implemented = feature
     flow.done("implemented")
+
+
+@pytest.mark.expensive
+@pytest.mark.timeout(1900)
+def test_stage_audited(flow):
+    _require(flow, "implemented")
+    rc, out = run_in(
+        flow.container,
+        ["omc", "review", "--claude", "--headless"],
+        cwd=flow.worktree,
+        timeout=IMPLEMENT_TURN_BUDGET,
+    )
+    assert rc == 0, out
+    _record_phase(flow.session, flow.repo, flow.worktree, flow.evidence, "audit", {"text": out})
+    _assert_audited_artifacts(
+        flow.container, flow.repo, flow.worktree, flow.branch, flow.evidence, flow.implemented
+    )
+    flow.done("audited")

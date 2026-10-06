@@ -9,22 +9,26 @@ repo). In any other repository, ignore everything in this section.
   `/omc:design` or `/omc:implement`. Start may prepare the worktree, refresh
   the base, wire notifications, and follow its ticket-sync rule; it then
   investigates, presents a primer, waits for the user's seed and material
-  scope answers, and discusses the full design. Two direct user invocations
+  scope answers, and discusses the full design. Three direct user invocations
   carry authority, in order. `$omc:design` in Codex, `/omc:design` in Claude,
   authorizes writing, hardening and committing the design record — nothing
   else; the session then stays open. `$omc:implement` in Codex,
   `/omc:implement` in Claude, requires a committed design record (the gate is
   `omc internal design-record`) and authorizes plan, subagent build, and
-  finish through the described push; assigned implementation workers inherit
-  it. `omc implement [--claude|--codex]` launches a fresh seeded session in the
-  worktree for the second word. Agreement or `ok` is neither invocation. Stop
+  clean committed work on an unpublished branch; assigned implementation workers
+  inherit it. `$omc:audit` in Codex, `/omc:audit` in Claude, requires a committed
+  design record and authorizes conformance review, fixes, record amendments,
+  and publication through finish; assigned fix workers inherit it.
+  `omc implement [--claude|--codex]` and `omc review [--claude|--codex]`
+  launch fresh seeded sessions in the worktree for the second and third words.
+  Agreement or `ok` is none of these invocations. Stop
   for required answers or genuine blockers. A pending async question is not an
   answer.
 - **Worktrees are snapshots of main** — code AND knowledge (`.gitnexus/`,
   `.omc/docs/`). Refresh a worktree with `/omc:rebase-main` (it is also
   `/omc:finish`'s first step). Never hand-copy or hand-delete those dirs;
   the deterministic mirror lives in `omc internal rebase-main`.
-- **Finish authorized implementation through `/omc:finish`** — rebase, squash, project stage gates
+- **Publish through `/omc:finish`** — rebase, squash, project stage gates
   (`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review`), described
   push. Do not bypass a failing stage.
 - **Validation cadence**: `/omc:check` is the quick "am I on the right
@@ -66,14 +70,15 @@ repo). In any other repository, ignore everything in this section.
   next step in the same phase. Waiting for a required user answer or the later
   implementation handoff is a valid stop.
 - **Externalize a composed flow before entering it.** On `/omc:start`,
-  `/omc:design`, `/omc:finish`, `/omc:implement`: write every remaining step
+  `/omc:design`, `/omc:finish`, `/omc:implement`, `/omc:audit`: write every remaining step
   into the task list FIRST, then execute, marking each done as you pass it.
   These flows nest 3–4 deep and each sub-skill arrives looking like a fresh
   user request, so completing one *feels* like completing the job. The task
   list is the only thing that survives that — "am I done in this authorized
   phase?" is answered by reading it. Start/plan lists end at discussion and
   waiting for /omc:design; design lists end at the committed record and the
-  stated continuations; implementation lists run through finish. A
+  stated continuations; implementation lists end at the committed branch and
+  the three stated continuations; audit lists run through finish. A
   stale-task-list reminder mid-flow is the warning it appears to be.
 - Skills marked "not meant for direct invocation" are internal — compose
   them via their user-facing entry points.

@@ -115,10 +115,12 @@ _CLI = "/root/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js"
 
 def _fixture(container, *, failing_stage: str | None = None, path="/work/lifecycle") -> str:
     """A real, small Python repo with all four local stages and a bare origin."""
+    assert failing_stage in (None, "build")
     repo = make_work_repo(container, path)
     payload = r"""
 from pathlib import Path
 root = Path("/work/lifecycle")
+(root / ".gitignore").write_text("__pycache__/\n")
 (root / "greeting.py").write_text("def greeting():\n    return 'Goodbye, world!'\n")
 (root / "test_greeting.py").write_text(
     "import unittest\nfrom greeting import greeting\n\n"
@@ -142,7 +144,7 @@ for stage in ("check", "build", "verify", "review"):
     }[stage]
     fail = (
         "\ntest ! -e /tmp/omc-external-build-unavailable"
-        if stage == FAIL_STAGE else ""
+        if stage == "build" else ""
     )
     script = (
         f"#!/bin/sh\nset -eu\nprintf '{stage}\\n' >> /tmp/omc-lifecycle-stages\n"
@@ -158,10 +160,9 @@ for stage in ("check", "build", "verify", "review"):
         "Report the actual exit status.\n"
     )
 """
-    payload = payload.replace("FAIL_STAGE", repr(failing_stage))
     rc, out = run_in(container, ["python3", "-c", payload])
     assert rc == 0, out
-    if failing_stage:
+    if failing_stage == "build":
         rc, out = run_in(container, ["touch", "/tmp/omc-external-build-unavailable"])
         assert rc == 0, out
     rc, out = run_in(
@@ -203,6 +204,16 @@ def _configure_codex_conversation(container):
 def _assert_boundary(before, after, label):
     for key in ("source", "index", "head", "remote_refs", "spec_plan"):
         assert before[key] == after[key], f"{label} changed {key}: {before[key]} → {after[key]}"
+
+
+def _assert_audit_refusal(before: dict, after: dict, status: str, answer: str) -> None:
+    """A design-only audit must stop for the stated reason without changing work."""
+    for key in ("source", "spec_plan", "index", "head", "remote_refs"):
+        assert after[key] == before[key], f"design-only audit changed {key}"
+    assert not status.strip(), f"design-only audit left dirty status: {status}"
+    lower_answer = answer.lower()
+    assert "nothing to audit" in lower_answer, f"audit did not explain refusal: {answer}"
+    assert "/omc:implement" in answer, f"audit did not point to implement: {answer}"
 
 
 def _assert_primary_boundary(before, after, label):
@@ -467,6 +478,11 @@ def _direct_implement(provider: str, detail: str = "") -> str:
     return command + (f" {detail}" if detail else "")
 
 
+def _direct_audit(provider: str, detail: str = "") -> str:
+    command = "$omc:audit" if provider == "codex" else "/omc:audit"
+    return command + (f" {detail}" if detail else "")
+
+
 def _direct_design(provider: str, detail: str = "") -> str:
     # Same TUI rule as _direct_implement: Codex accepts only the $omc: mention.
     command = "$omc:design" if provider == "codex" else "/omc:design"
@@ -489,6 +505,20 @@ def _assert_recorded(before, after, label) -> str:
     ]
     assert len(new_specs) == 1, f"{label} produced {len(new_specs)} design records: {new_specs}"
     return new_specs[0]
+
+
+def _assert_reviewed_record(before: dict, after: dict, record: str) -> None:
+    """The audit changes exactly the named design record among specs."""
+
+    def specs(snapshot):
+        return {key: value for key, value in snapshot["spec_plan"].items() if "/specs/" in key}
+
+    old, new = specs(before), specs(after)
+    assert record in old and record in new, f"review record missing: {record}"
+    assert old[record] != new[record], f"review record unchanged: {record}"
+    assert {key: value for key, value in old.items() if key != record} == {
+        key: value for key, value in new.items() if key != record
+    }, "audit changed another design record"
 
 
 def _record_phase(session, repo, worktree, evidence, phase, turn):
@@ -597,12 +627,29 @@ def _assert_finish_stage_order(markers):
 def _assert_successful_implementation(
     container, provider, session, repo, worktree, branch, evidence, baseline
 ):
-    final = evidence["turns"][-1]["snapshot"]
-    assert final["source"]["greeting.py"] != baseline["source"]["greeting.py"]
-    assert any("specs/" in key for key in final["spec_plan"]), "implementation produced no spec"
-    assert any("plans/" in key for key in final["spec_plan"]), "implementation produced no plan"
+    recorded = next(
+        turn["snapshot"] for turn in evidence["turns"] if turn["phase"] in ("design", "resumed")
+    )
+    _assert_implemented_artifacts(container, repo, worktree, branch, evidence, recorded)
     evidence["events"] = session.events()
     _assert_child_event(provider, evidence["events"]["events"])
+    return recorded
+
+
+def _assert_audited_artifacts(container, repo, worktree, branch, evidence, implemented):
+    final = evidence["turns"][-1]["snapshot"]
+    records = [key for key in implemented["spec_plan"] if "/specs/" in key]
+    assert len(records) == 1, f"expected one design record: {records}"
+    record = records[0]
+    _assert_reviewed_record(implemented, final, record)
+    rc, content = run_in(container, ["git", "-C", worktree, "show", f"HEAD:{record}"])
+    assert rc == 0 and "## Implementation review" in content, "audit trace missing from record"
+    rc, dirty = run_in(container, ["git", "-C", worktree, "status", "--porcelain"])
+    assert rc == 0 and not dirty.strip(), f"audit left dirty tree: {dirty}"
+    rc, commits = run_in(
+        container, ["git", "-C", worktree, "rev-list", "--count", "origin/main..HEAD"]
+    )
+    assert rc == 0 and commits.strip() == "1", f"audit left {commits.strip()} commits"
     rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
     assert rc == 0, "project stages never executed"
     _assert_finish_stage_order(markers)
@@ -616,9 +663,7 @@ def _assert_successful_implementation(
 
 
 def _assert_implemented_artifacts(container, repo, worktree, branch, evidence, recorded):
-    """Artifact-only success checks for a harness-launched implement (no driver
-    events): product changed, a plan is new, the record is unchanged, the
-    finish stages ran in order, the fix is published."""
+    """Implementation commits changed product and a plan without publication."""
     final = evidence["turns"][-1]["snapshot"]
     assert final["source"]["greeting.py"] != recorded["source"]["greeting.py"]
     plans = [k for k in final["spec_plan"] if "/plans/" in k]
@@ -626,9 +671,12 @@ def _assert_implemented_artifacts(container, repo, worktree, branch, evidence, r
     before_specs = {k: v for k, v in recorded["spec_plan"].items() if "/specs/" in k}
     after_specs = {k: v for k, v in final["spec_plan"].items() if "/specs/" in k}
     assert after_specs == before_specs, "implementation rewrote the design record"
-    rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
-    assert rc == 0, "project stages never executed"
-    _assert_finish_stage_order(markers)
-    _assert_published_fix(
-        container, repo, worktree, branch, "def greeting():\n    return 'Goodbye, world!'\n"
+    assert not any(ref.startswith(f"refs/heads/{branch} ") for ref in final["remote_refs"]), (
+        "implementation published feature branch"
     )
+    rc, dirty = run_in(container, ["git", "-C", worktree, "status", "--porcelain"])
+    assert rc == 0 and not dirty.strip(), f"implementation left dirty tree: {dirty}"
+    rc, commits = run_in(
+        container, ["git", "-C", worktree, "rev-list", "--count", "origin/main..HEAD"]
+    )
+    assert rc == 0 and int(commits.strip()) >= 1, f"implementation left no task commits: {commits}"

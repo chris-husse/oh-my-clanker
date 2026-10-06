@@ -2,6 +2,8 @@
 session waits for the design command (`/omc:design`). Each test is one turn
 from there, with its own twist injected into the clone."""
 
+import ast
+
 import pytest
 
 from ..harness import run_in
@@ -110,6 +112,48 @@ def test_cli_handoff_dry_run_from_a_fixture_record(stage_session):
     assert "'/omc:implement'" in out and f"'-n', '{slug}-implement'" in out
     assert "generating slug" not in out  # the slug comes from the branch, never a model
 
+    rc, head_after = run_in(container, ["git", "rev-parse", "HEAD"], cwd=worktree)
+    assert rc == 0, head_after
+    rc, dirty = run_in(container, ["git", "status", "--porcelain"], cwd=worktree)
+    assert head_after == head_before and not dirty.strip(), "dry run changed the worktree"
+
+
+@pytest.mark.variation("agreed")
+def test_review_dry_run_from_a_fixture_record(stage_session):
+    """The review CLI refuses before design and plans an audit session from a record."""
+    container, _session, m = stage_session
+    worktree, slug = m["worktree"], m["slug"]
+    rc, out = run_in(container, ["omc", "review", "--claude", "--dry-run"], cwd=worktree)
+    assert rc == 2 and "no design record" in out and "/omc:design" in out, out
+
+    record = f"docs/superpowers/specs/2026-01-01-{slug}-design.md"
+    rc, out = run_in(
+        container,
+        [
+            "bash",
+            "-c",
+            f"mkdir -p docs/superpowers/specs && printf '# fixture record\\n' > {record} && "
+            f"git add {record} && git commit -qm fixture",
+        ],
+        cwd=worktree,
+    )
+    assert rc == 0, out
+    rc, head_before = run_in(container, ["git", "rev-parse", "HEAD"], cwd=worktree)
+    assert rc == 0, head_before
+
+    rc, out = run_in(container, ["omc", "review", "--claude", "--dry-run"], cwd=worktree)
+    assert rc == 0, out
+    assert f"record:       {record}" in out
+    assert f"session:      {slug}-audit" in out
+    argv_row = next(line for line in out.splitlines() if "session argv:" in line)
+    assert ast.literal_eval(argv_row.split("session argv:", 1)[1].strip()) == [
+        "claude",
+        "-n",
+        f"{slug}-audit",
+        "--model",
+        m["model"],
+        "/omc:audit",
+    ]
     rc, head_after = run_in(container, ["git", "rev-parse", "HEAD"], cwd=worktree)
     assert rc == 0, head_after
     rc, dirty = run_in(container, ["git", "status", "--porcelain"], cwd=worktree)

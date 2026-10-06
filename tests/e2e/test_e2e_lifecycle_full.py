@@ -1,4 +1,4 @@
-"""The monolithic lifecycle runs (start → discussion → implement) for both providers.
+"""The monolithic lifecycle runs (start → discussion → implement → audit) for both providers.
 
 Expensive tier: evidence runs only, never a stage gate. Each case replays the whole
 lifecycle and is budgeted far above the 300 s ceiling (@pytest.mark.timeout)."""
@@ -10,9 +10,12 @@ import pytest
 from .conversation import save_evidence
 from .harness import run_in
 from .lifecycle_helpers import (
+    _assert_audited_artifacts,
     _assert_critical_wait,
+    _assert_implemented_artifacts,
     _assert_recorded,
     _assert_successful_implementation,
+    _direct_audit,
     _direct_design,
     _direct_implement,
     _fixture,
@@ -21,8 +24,11 @@ from .lifecycle_helpers import (
     _start_discussion,
 )
 
-# the critical-answer run's summed turn budgets are 5100 s
-pytestmark = [pytest.mark.e2e, pytest.mark.expensive, pytest.mark.timeout(5400)]
+# Critical path: start/discussion 3000 + question 900 + answer 1500 +
+# implement 1800 + audit 1800 = 9000 actor seconds. An optional scope-answer
+# turn adds 300; five judges can use 1500; fixture indexing and setup reserve
+# 300 each, with 300 more for orchestration: 11700 seconds total.
+pytestmark = [pytest.mark.e2e, pytest.mark.expensive, pytest.mark.timeout(11700)]
 
 
 def _design_turn(session, repo, worktree, evidence, baseline, provider):
@@ -55,6 +61,11 @@ def test_start_context_waits_for_direct_implement(container, provider):
             _assert_successful_implementation(
                 container, provider, session, repo, worktree, branch, evidence, baseline
             )
+            implementation = evidence["turns"][-1]["snapshot"]
+            session.send(_direct_audit(provider))
+            audited = session.wait_turn(1800)
+            _record_phase(session, repo, worktree, evidence, "audit", audited)
+            _assert_audited_artifacts(container, repo, worktree, branch, evidence, implementation)
     finally:
         save_evidence(f"{provider}-lifecycle-green", evidence)
 
@@ -121,6 +132,11 @@ def test_critical_answer_resumes_authorized_implementation(container, provider):
             _assert_successful_implementation(
                 container, provider, session, repo, worktree, branch, evidence, baseline
             )
+            implementation = evidence["turns"][-1]["snapshot"]
+            session.send(_direct_audit(provider))
+            audited = session.wait_turn(1800)
+            _record_phase(session, repo, worktree, evidence, "audit", audited)
+            _assert_audited_artifacts(container, repo, worktree, branch, evidence, implementation)
     finally:
         save_evidence(f"{provider}-critical-continuation", evidence)
 
@@ -145,12 +161,14 @@ def test_failing_build_blocks_publication(container, provider):
                 "'Goodbye, world!' but must return exactly 'Hello, world!' with its "
                 "zero-argument signature. Add an exact-value unittest.",
             )
-            _design_turn(session, repo, worktree, evidence, baseline, provider)
+            recorded = _design_turn(session, repo, worktree, evidence, baseline, provider)
             session.send(_direct_implement(provider))
+            implemented = session.wait_turn(1800)
+            _record_phase(session, repo, worktree, evidence, "implement", implemented)
+            _assert_implemented_artifacts(container, repo, worktree, branch, evidence, recorded)
+            session.send(_direct_audit(provider))
             finished = session.wait_turn(1800)
-            after, _ = _record_phase(
-                session, repo, worktree, evidence, "failing_implement", finished
-            )
+            after, _ = _record_phase(session, repo, worktree, evidence, "failing_audit", finished)
             evidence["events"] = session.events()
             rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
             assert rc == 0 and "build" in markers.splitlines(), "failing build never executed"

@@ -2,7 +2,11 @@
 
 import pytest
 
-from tests.e2e.lifecycle_helpers import _assert_finish_stage_order, _assert_recorded
+from tests.e2e.lifecycle_helpers import (
+    _assert_finish_stage_order,
+    _assert_recorded,
+    _assert_reviewed_record,
+)
 
 
 @pytest.mark.parametrize(
@@ -92,3 +96,31 @@ def test_recorded_rejects(mutation):
     }
     with pytest.raises(AssertionError):
         _assert_recorded(BEFORE, after, "x")
+
+
+RECORD = "docs/superpowers/specs/2026-10-02-s-design.md"
+OTHER = "docs/superpowers/specs/2026-10-02-other-design.md"
+
+
+def test_reviewed_record_allows_only_named_spec_change_and_ignores_plans():
+    before = {RECORD: "old", OTHER: "same", "docs/superpowers/plans/p.md": "p1"}
+    after = {RECORD: "new", OTHER: "same", "docs/superpowers/plans/p.md": "p2"}
+    _assert_reviewed_record({"spec_plan": before}, {"spec_plan": after}, RECORD)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {RECORD: "old", OTHER: "same"},
+        {OTHER: "same"},
+        {RECORD: "new", OTHER: "same", "docs/superpowers/specs/new.md": "x"},
+        {RECORD: "new"},
+        {RECORD: "new", OTHER: "changed"},
+    ],
+    ids=["unchanged", "missing-record", "added-spec", "deleted-spec", "changed-other"],
+)
+def test_reviewed_record_rejects_other_spec_diffs(change):
+    with pytest.raises(AssertionError):
+        _assert_reviewed_record(
+            {"spec_plan": {RECORD: "old", OTHER: "same"}}, {"spec_plan": change}, RECORD
+        )

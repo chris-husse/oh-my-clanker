@@ -336,3 +336,45 @@ def test_implement_without_config_bails(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     assert main(["implement"]) == 2
     assert "omc configure" in capsys.readouterr().err
+
+
+def test_review_parser_flags_are_registry_generated_and_exclusive(capsys):
+    from omc.cli import build_parser
+    from omc.providers.registry import provider_names
+
+    for name in provider_names():
+        args = build_parser().parse_args(["review", f"--{name}"])
+        assert args.provider_override == name
+        assert args.dry_run is False and args.headless is False
+    args = build_parser().parse_args(["review", "--dry-run", "--headless"])
+    assert args.provider_override is None
+    assert args.dry_run is True and args.headless is True
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["review", "--claude", "--codex"])
+    assert exc.value.code == 2
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_review_dispatch_applies_run_only_provider_override(monkeypatch):
+    import omc.cli as cli
+    from omc.config.schema import Config
+
+    cfg = Config()
+    seen = {}
+    monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: cfg)
+
+    def fake_run_review(ctx, actual, *, dry_run, headless):
+        seen.update(provider=actual.llm.default, dry_run=dry_run, headless=headless)
+        return 7
+
+    monkeypatch.setattr("omc.review.run_review", fake_run_review)
+    assert cli.main(["review", "--codex", "--dry-run"]) == 7
+    assert seen == {"provider": "codex", "dry_run": True, "headless": False}
+    assert cfg.llm.default == "claude"
+
+
+def test_review_without_config_bails(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "empty"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["review"]) == 2
+    assert "omc configure" in capsys.readouterr().err

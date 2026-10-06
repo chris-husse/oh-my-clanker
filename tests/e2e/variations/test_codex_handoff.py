@@ -16,6 +16,7 @@ from ..conftest import _finish_container_setup, _forward_tokens
 from ..harness import configure_omc, run_in
 from ..lifecycle_helpers import (
     IMPLEMENT_TURN_BUDGET,
+    _assert_audited_artifacts,
     _assert_implemented_artifacts,
     _codex_model,
     _set_write_capability,
@@ -78,4 +79,65 @@ def test_codex_implement_handoff_from_claude_record():
         assert "→ probing tools (git, wt, codex)" in out, out
 
         evidence = {"turns": [{"snapshot": _snapshot(c, m["worktree"]), "text": out}]}
+        before_specs = {
+            path: digest for path, digest in recorded["spec_plan"].items() if "/specs/" in path
+        }
+        after_specs = {
+            path: digest
+            for path, digest in evidence["turns"][-1]["snapshot"]["spec_plan"].items()
+            if "/specs/" in path
+        }
+        if after_specs != before_specs:
+            rc, diff = run_in(
+                c,
+                [
+                    "git",
+                    "-C",
+                    m["worktree"],
+                    "diff",
+                    "--no-ext-diff",
+                    recorded["head"],
+                    "--",
+                    "docs/superpowers/specs/",
+                ],
+            )
+            print(f"record diff (rc={rc}):\n{diff}", flush=True)
+            changed = sorted(
+                path
+                for path in set(before_specs) | set(after_specs)
+                if before_specs.get(path) != after_specs.get(path)
+            )
+            print(f"changed spec paths: {changed}", flush=True)
+            print(f"implement actor output:\n{out}", flush=True)
         _assert_implemented_artifacts(c, m["repo"], m["worktree"], m["branch"], evidence, recorded)
+
+
+@pytest.mark.timeout(2100)
+def test_codex_review_handoff_from_claude_implementation():
+    image = stage_image("claude", "implemented")
+    c = _forward_tokens(
+        DockerContainer(image).with_command("sleep infinity"), use_codex_account=True
+    )
+    with codex_account(c, _finish_container_setup, use_account=True):
+        m = read_manifest(c)
+        configure_omc(c, "codex")
+        require_codex_ready(c)
+        rc, out = run_in(
+            c, ["omc", "configure", "--set", f"llm.providers.codex.model={_codex_model()}"]
+        )
+        assert rc == 0, out
+        rc, out = run_in(c, ["omc", "configure", "--set", "llm.default=claude"])
+        assert rc == 0, out
+        _set_write_capability(c)
+        implemented = _snapshot(c, m["worktree"])
+
+        rc, out = run_in(
+            c,
+            ["omc", "review", "--codex", "--headless"],
+            cwd=m["worktree"],
+            timeout=IMPLEMENT_TURN_BUDGET,
+        )
+        assert rc == 0, out
+        assert "→ probing tools (git, wt, codex)" in out, out
+        evidence = {"turns": [{"snapshot": _snapshot(c, m["worktree"]), "text": out}]}
+        _assert_audited_artifacts(c, m["repo"], m["worktree"], m["branch"], evidence, implemented)
