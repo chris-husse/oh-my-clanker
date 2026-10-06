@@ -649,17 +649,14 @@ def update_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN)
         return 0
     verb = "installing" if freshly_cloned else "updating"
     print(f"→ {verb} GitNexus…", file=sys.stderr)
-    for argv in (
-        [git, "-C", str(root), "checkout", "main"],
-        [git, "-C", str(root), "merge", "--ff-only", "origin/main"],
-    ):
-        cp = ctx.run(argv)
-        if cp.returncode != 0:
-            print(
-                f"error: GitNexus {' '.join(argv[3:])} failed: {(cp.stderr or '').strip()[:400]}",
-                file=sys.stderr,
-            )
-            return 1
+    argv = [git, "-C", str(root), "checkout", "-f", "-B", "main", "origin/main"]
+    cp = ctx.run(argv)
+    if cp.returncode != 0:
+        print(
+            f"error: GitNexus {' '.join(argv[3:])} failed: {(cp.stderr or '').strip()[:400]}",
+            file=sys.stderr,
+        )
+        return 1
     rc = _build(ctx, root)
     if rc:
         return rc

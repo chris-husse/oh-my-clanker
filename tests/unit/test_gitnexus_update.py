@@ -65,6 +65,14 @@ def _advance_origin(seed):
     _git("push", "-q", "origin", "main", cwd=seed)
 
 
+def _rewrite_origin(seed, dest):
+    _advance_origin(seed)
+    _git("fetch", "origin", cwd=dest)
+    _git("merge", "--ff-only", "origin/main", cwd=dest)
+    _git("commit", "--amend", "-qm", "rewritten c2", cwd=seed)
+    _git("push", "-q", "--force", "origin", "main", cwd=seed)
+
+
 def test_ensure_noops_silently_when_healthy(tmp_path, capsys):
     home = tmp_path / "home"
     ctx, calls = _make_ctx(tmp_path, home)
@@ -240,6 +248,29 @@ def test_moved_pulls_builds_and_verifies(tmp_path, capsys):
     assert lines[1].startswith("npm ci") and "gitnexus-shared" not in lines[1]
     assert "run build" in lines[2]
     assert "9.9.9" in capsys.readouterr().err  # new version reported
+
+
+def test_rewritten_origin_forces_main_and_rebuilds(tmp_path, capsys):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    origin, seed, dest = _seed_clone(tmp_path, home)
+    _rewrite_origin(seed, dest)
+
+    assert update_gitnexus(ctx, approved_origin=str(origin)) == 0
+    head = subprocess.run(
+        ["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    remote = subprocess.run(
+        ["git", "-C", str(dest), "rev-parse", "origin/main"], capture_output=True, text=True
+    ).stdout.strip()
+    assert head == remote
+    npm = [ln for ln in calls.read_text().splitlines() if ln.startswith("npm")]
+    assert len(npm) == 3
+    assert npm[0].startswith("npm install ")
+    assert f"[cwd={dest / 'gitnexus-shared'}]" in npm[0]
+    assert npm[1].startswith("npm ci ")
+    assert npm[2].startswith("npm run build ")
+    assert "updated" in capsys.readouterr().err
 
 
 def test_build_failure_is_nonzero(tmp_path, capsys):
