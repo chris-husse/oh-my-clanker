@@ -295,6 +295,11 @@ def _walkthrough_global(
                 f"{name} model (blank = provider default)", default=pcfg.model
             ).ask()
         pcfg.model = model or ""
+        enabled = questionary.confirm(
+            f"Enable native notifications for {name}?", default=pcfg.notifications
+        ).ask()
+        if enabled is not None:
+            pcfg.notifications = enabled
 
     if len(selected) == 1:
         cfg.llm.default = selected[0]
@@ -420,26 +425,6 @@ def _walkthrough_global(
     pcfg.docs_model = model
     cfg.llm.docs.provider = docs_provider
     cfg.llm.docs.backend = backend
-
-    enable = questionary.confirm(
-        "Notify when a session needs attention (macOS notification / log file)?",
-        default=cfg.notifications.enabled,
-    ).ask()
-    cfg.notifications.enabled = bool(enable)
-    if enable:
-        while True:
-            backend = (
-                questionary.text(
-                    "Notification backend: 'macos' or file:///absolute/path.log",
-                    default=cfg.notifications.backend,
-                ).ask()
-                or cfg.notifications.backend
-            )
-            try:
-                cfg.notifications.backend = store.validate_backend(backend)
-                break
-            except ConfigError as exc:
-                print(exc)
 
 
 def _walkthrough_project(cfg: ProjectConfig) -> None:  # pragma: no cover - PTY-driven E2E territory

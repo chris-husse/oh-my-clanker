@@ -1,4 +1,6 @@
-from omc.config.schema import Config, NotificationsConfig
+import pytest
+
+from omc.config.schema import Config
 from omc.session import session_plan
 from omc.toolctx import ToolContext
 
@@ -28,14 +30,14 @@ def test_session_plan_is_pure_and_names_the_session():
 
 
 def test_session_plan_wires_notifications_for_the_provider_that_takes_argv():
-    cfg = Config(notifications=NotificationsConfig(enabled=True))
+    cfg = Config()
     cfg.llm.default = "codex"
     plan = session_plan(
         _ctx(), cfg, seed="/omc:start", slug="s", session_name="s", title="t", cwd="."
     )
     assert plan.session_argv[0] == "codex"
     joined = " ".join(plan.session_argv)
-    assert "notify=" in joined and "omc" in joined and "internal" in joined
+    assert "tui.notifications=true" in joined and "notify=" not in joined
     assert plan.env == {"OMC_SLUG": "s"}  # codex suppresses titles via argv, not env
 
 
@@ -76,3 +78,22 @@ def test_run_headless_keeps_its_shape_and_defaults():
     assert argv[argv.index("-n") + 1] == "proj-1-implement"
     assert argv[argv.index("--allowed-tools") + 1 :] == ["Bash", "Edit"]
     assert captured["env"]["OMC_SLUG"] == "proj-1"
+
+
+@pytest.mark.parametrize("configured,expected", [(True, "true"), (False, "false"), (None, "true")])
+def test_codex_session_native_flag_for_each_config_state(configured, expected):
+    from omc.config.schema import ProviderConfig
+
+    cfg = Config()
+    cfg.llm.default = "codex"
+    if configured is not None:
+        cfg.llm.providers["codex"] = ProviderConfig(notifications=configured)
+    plan = session_plan(_ctx(), cfg, seed="seed", slug="s", session_name="s", title="t", cwd=".")
+    assert plan.session_argv == [
+        "codex",
+        "-c",
+        "tui.terminal_title=[]",
+        "-c",
+        f"tui.notifications={expected}",
+        "seed",
+    ]

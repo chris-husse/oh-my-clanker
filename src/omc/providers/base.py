@@ -34,31 +34,13 @@ class Provider(ABC):
 
     @abstractmethod
     def session_argv(
-        self,
-        *,
-        session_name: str,
-        model: str,
-        seed: str,
-        notify_sink_argv: list[str] | None = None,
+        self, *, session_name: str, model: str, seed: str, notifications: bool = True
     ) -> list[str]:
-        """Interactive session seeded with ``seed``; named where the CLI supports it.
+        """Interactive session with explicit native notification state."""
 
-        ``notify_sink_argv``, when set, is the notification sink command; the
-        provider that wires notifications via argv (codex) places it itself —
-        flag ordering is provider-specific. File-wired providers ignore it.
-        """
-
-    def notification_setup(self, sink_argv: list[str]) -> dict[str, str]:
-        """Worktree-relative path -> file content wiring this provider's
-        "needs attention" events to ``sink_argv``. {} = no file wiring.
-        Pure like everything here — the caller writes the files."""
+    def notification_setup(self, notifications: bool) -> dict[str, str]:
+        """Worktree-relative native settings fragment; {} means argv-only."""
         return {}
-
-    def notifies_natively(self) -> bool:
-        """True when this harness posts its own desktop notification for
-        attention events — omc's macos backend then stays silent to avoid
-        duplicates. File backends always log regardless."""
-        return False
 
     def headless_stream_argv(
         self,

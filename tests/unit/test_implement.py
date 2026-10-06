@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from omc.config.schema import Config, NotificationsConfig
+from omc.config.schema import Config
 from omc.errors import Refusal
 from omc.implement import IMPLEMENT_ALLOWED_TOOLS, IMPLEMENT_SEED, run_implement
 from omc.toolctx import ToolContext
@@ -72,13 +72,13 @@ def test_dry_run_prints_record_and_named_session(tmp_path, monkeypatch, capsys):
     assert "session:" in out and f"{SLUG}-implement" in out
     assert "session argv:" in out and "'/omc:implement'" in out
     assert f"'-n', '{SLUG}-implement'" in out
-    assert "shell argv:" in out and "notify:" in out
+    assert "shell argv:" in out and "notifications: native, on" in out
 
 
 def test_dry_run_never_writes_notification_files(tmp_path, monkeypatch):
     repo = _worktree(tmp_path)
     ctx = _ctx(tmp_path, repo, monkeypatch)
-    cfg = Config(notifications=NotificationsConfig(enabled=True))
+    cfg = Config()
     assert run_implement(ctx, cfg, dry_run=True) == 0
     assert not (repo / ".claude" / "settings.local.json").exists()
 
@@ -134,14 +134,13 @@ def test_headless_wires_notifications_idempotently(tmp_path, monkeypatch):
     repo = _worktree(tmp_path)
     ctx = _ctx(tmp_path, repo, monkeypatch)
     monkeypatch.setattr(impl, "run_headless", lambda *a, **k: 0)
-    cfg = Config(notifications=NotificationsConfig(enabled=True))
+    cfg = Config()
     assert run_implement(ctx, cfg, headless=True) == 0
     settings = repo / ".claude" / "settings.local.json"
     first = settings.read_text()
     assert run_implement(ctx, cfg, headless=True) == 0
     assert settings.read_text() == first  # second launch merges, never duplicates
-    hooks = json.loads(first)["hooks"]
-    assert "Notification" in hooks and "Stop" in hooks
+    assert json.loads(first) == {"preferredNotifChannel": "auto"}
 
 
 def test_interactive_execs_in_the_worktree_with_slug_env(tmp_path, monkeypatch):
@@ -219,3 +218,46 @@ def test_implement_record_refusal_does_not_write_global_section(tmp_path, monkey
     with pytest.raises(Refusal):
         run_implement(ctx, cfg, headless=True)
     assert not (tmp_path / ".codex" / "AGENTS.md").exists()
+
+
+@pytest.mark.parametrize(
+    "provider,configured",
+    [
+        ("claude", True),
+        ("claude", False),
+        ("claude", None),
+        ("codex", True),
+        ("codex", False),
+        ("codex", None),
+    ],
+)
+def test_implement_wires_once_for_provider_state(tmp_path, monkeypatch, provider, configured):
+    import omc.implement as impl
+    from omc.config.schema import ProviderConfig
+
+    repo = _worktree(tmp_path)
+    ctx = _ctx(tmp_path, repo, monkeypatch)
+    cfg = Config()
+    cfg.llm.default = provider
+    if configured is None:
+        cfg.llm.providers.pop(provider, None)
+    else:
+        cfg.llm.providers[provider] = ProviderConfig(notifications=configured)
+    real_wire = impl.notify.wire_worktree
+    seen = []
+
+    def recording_wire(p, path, enabled):
+        seen.append((p.name, path, enabled))
+        return real_wire(p, path, enabled)
+
+    monkeypatch.setattr(impl.notify, "wire_worktree", recording_wire)
+    monkeypatch.setattr(impl, "run_headless", lambda *a, **k: 0)
+    assert run_implement(ctx, cfg, headless=True) == 0
+    expected = True if configured is None else configured
+    assert seen == [(provider, repo, expected)]
+    if provider == "claude":
+        settings = json.loads((repo / ".claude/settings.local.json").read_text())
+        channel = "auto" if expected else "notifications_disabled"
+        assert settings["preferredNotifChannel"] == channel
+    else:
+        assert not (repo / ".claude/settings.local.json").exists()

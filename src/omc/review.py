@@ -33,7 +33,7 @@ def _print_plan(branch: str, record: str, session_name: str, plan: SessionPlan, 
     print(f"  session:      {session_name}")
     print(f"  session argv: {plan.session_argv}")
     print(f"  shell argv:   {plan.shell_argv}")
-    print(f"  notify:       {notify_desc}")
+    print(f"  notifications: {notify_desc}")
 
 
 def run_review(
@@ -67,19 +67,17 @@ def run_review(
     )
 
     if dry_run:
-        if cfg.notifications.enabled:
-            files = provider.notification_setup(notify.sink_argv(name))
-            what = ", ".join(files) or "none (argv only)"
-            notify_desc = f"backend {cfg.notifications.backend}; files: {what}"
-        else:
-            notify_desc = "disabled"
+        pcfg = cfg.llm.providers.get(name)
+        notifications = pcfg.notifications if pcfg else True
+        notify_desc = notify.native_description(provider, notifications)
         _print_plan(branch, verdict.path, session_name, plan, notify_desc)
         return 0
 
-    if cfg.notifications.enabled:
-        wired = notify.wire_worktree(provider, Path(root))
-        if wired:
-            _say(f"✓ notification wiring: {', '.join(wired)}")
+    pcfg = cfg.llm.providers.get(name)
+    notifications = pcfg.notifications if pcfg else True
+    wired = notify.wire_worktree(provider, Path(root), notifications)
+    if wired:
+        _say(f"✓ notification wiring: {', '.join(wired)}")
 
     if headless:
         _say(f"→ running headless {name} session seeded with {REVIEW_SEED}")

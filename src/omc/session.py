@@ -8,7 +8,6 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from . import notify
 from .config.schema import Config
 from .providers.registry import get_provider
 from .shells.registry import detect_shell
@@ -43,9 +42,11 @@ def session_plan(
     provider = get_provider(name)
     pcfg = cfg.llm.providers.get(name)
     model = pcfg.model if pcfg else ""
-    sink = notify.sink_argv(name) if cfg.notifications.enabled else None
     session_argv = provider.session_argv(
-        session_name=session_name, model=model, seed=seed, notify_sink_argv=sink
+        session_name=session_name,
+        model=model,
+        seed=seed,
+        notifications=pcfg.notifications if pcfg else True,
     )
     title_seq = detect_terminal(ctx.env).title_sequence(title)
     title_argv = terminal_title_argv()

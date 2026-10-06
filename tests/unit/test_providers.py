@@ -43,7 +43,7 @@ def test_codex_argv():
     ]  # fmt: skip
     # no session-name flag exists; seed is the trailing positional
     assert p.session_argv(session_name="n", model="", seed="s") == [
-        "codex", "-c", "tui.terminal_title=[]", "s",
+        "codex", "-c", "tui.terminal_title=[]", "-c", "tui.notifications=true", "s",
     ]  # fmt: skip
     assert p.title_env() == {}
 
@@ -59,57 +59,6 @@ def test_headless_session_name():
     c = get_provider("claude").headless_argv("x", model="", session_name="s-1")
     assert c[: c.index("-n") + 2] == ["claude", "-p", "x", "--output-format", "text", "-n", "s-1"]
     assert "-n" not in get_provider("codex").headless_argv("x", model="", session_name="s-1")
-
-
-SINK = ["omc", "internal", "notify", "--provider", "X"]
-
-
-def test_claude_notification_setup_settings_file():
-    files = get_provider("claude").notification_setup(
-        ["omc", "internal", "notify", "--provider", "claude"]
-    )
-    assert list(files) == [".claude/settings.local.json"]
-    settings = json.loads(files[".claude/settings.local.json"])
-    cmd = "omc internal notify --provider claude"
-    for event in ("Notification", "Stop"):
-        (group,) = settings["hooks"][event]
-        assert group["hooks"] == [{"type": "command", "command": cmd}]
-    # Notification is UNFILTERED (no matcher key): all attention events ping
-    assert "matcher" not in settings["hooks"]["Notification"][0]
-
-
-def test_codex_notify_sink_argv_before_seed():
-    p = get_provider("codex")
-    sink = ["omc", "internal", "notify", "--provider", "codex"]
-    argv = p.session_argv(session_name="n", model="m", seed="s", notify_sink_argv=sink)
-    # -c value is TOML; a JSON array of strings is valid TOML array syntax,
-    # and the flag must come BEFORE the trailing positional seed
-    assert argv == [
-        "codex", "-c", "tui.terminal_title=[]", "-m", "m",
-        "-c", f"notify={json.dumps(sink)}", "s",
-    ]  # fmt: skip
-    assert p.session_argv(session_name="n", model="", seed="s") == [
-        "codex", "-c", "tui.terminal_title=[]", "s",
-    ]  # fmt: skip
-    assert p.notification_setup(sink) == {}  # codex wiring is argv-only
-
-
-def test_notification_setup_defaults_and_purity(tmp_path, monkeypatch):
-    # default is {}; and no provider touches the filesystem or spawns anything
-    monkeypatch.chdir(tmp_path)
-    for name in provider_names():
-        p = get_provider(name)
-        p.notification_setup(SINK)
-        p.session_argv(session_name="n", model="", seed="s", notify_sink_argv=SINK)
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_claude_ignores_notify_sink_argv():
-    # Claude's wiring is a file; argv must stay identical with/without the param.
-    p = get_provider("claude")
-    with_arg = p.session_argv(session_name="n", model="m", seed="s", notify_sink_argv=SINK)
-    without = p.session_argv(session_name="n", model="m", seed="s")
-    assert with_arg == without
 
 
 def test_plugin_update_argvs_are_pure_and_per_provider():
@@ -219,13 +168,6 @@ def test_codex_stream_defaults_are_identity():
     assert p.decode_stream_line("anything") == ["anything"]
 
 
-def test_notifies_natively_flags():
-    # claude: the harness posts its own clickable desktop notification;
-    # codex: no native channel — omc's alert is its only one.
-    assert get_provider("claude").notifies_natively() is True
-    assert get_provider("codex").notifies_natively() is False
-
-
 def test_api_backend_adapter_defaults_and_claude_values():
     claude, codex = get_provider("claude"), get_provider("codex")
     # Trailing slash is deliberate: GitNexus strips it; omc joins without "//".
@@ -271,3 +213,48 @@ def test_global_instruction_path_uses_supplied_env(tmp_path, name, override, fil
 def test_global_instruction_path_requires_home_when_no_override():
     with pytest.raises(OmcError, match="HOME"):
         get_provider("claude").instructions_file({})
+
+
+@pytest.mark.parametrize("enabled,value", [(True, "true"), (False, "false")])
+def test_codex_native_notification_argv(enabled, value):
+    argv = get_provider("codex").session_argv(
+        session_name="n", model="m", seed="s", notifications=enabled
+    )
+    assert argv == [
+        "codex",
+        "-c",
+        "tui.terminal_title=[]",
+        "-m",
+        "m",
+        "-c",
+        f"tui.notifications={value}",
+        "s",
+    ]
+    assert "notify=" not in " ".join(argv)
+
+
+def test_codex_native_notification_defaults_on():
+    assert get_provider("codex").session_argv(session_name="", model="", seed="s") == [
+        "codex",
+        "-c",
+        "tui.terminal_title=[]",
+        "-c",
+        "tui.notifications=true",
+        "s",
+    ]
+
+
+@pytest.mark.parametrize("enabled,channel", [(True, "auto"), (False, "notifications_disabled")])
+def test_claude_native_notification_fragment_and_unchanged_argv(enabled, channel):
+    p = get_provider("claude")
+    assert json.loads(p.notification_setup(enabled)[".claude/settings.local.json"]) == {
+        "preferredNotifChannel": channel
+    }
+    assert p.session_argv(session_name="n", model="m", seed="s", notifications=enabled) == [
+        "claude",
+        "-n",
+        "n",
+        "--model",
+        "m",
+        "s",
+    ]

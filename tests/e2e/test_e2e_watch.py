@@ -48,11 +48,18 @@ def test_configure_in_repo_seeds_project_and_global_instructions(container):
     assert rc == 0, out
     rc, out = run_in(container, ["omc", "configure", "--set", "llm.default=claude"], cwd=repo)
     assert rc == 0, out
-    for name in ("AGENTS.md", "CLAUDE.md", ".gitignore"):
+    for name in ("AGENTS.md", "CLAUDE.md"):
         rc, _ = run_in(container, ["test", "-e", f"{repo}/{name}"])
         assert rc == 1, f"configure created root {name}"
         rc, _ = run_in(container, ["test", "-L", f"{repo}/{name}"])
         assert rc == 1, f"configure created root {name} symlink"
+    # The fixture ships a one-line .gitignore; configure must leave it as is.
+    rc, ignored = run_in(container, ["cat", f"{repo}/.gitignore"])
+    assert rc == 0 and ignored == ".claude/settings.local.json\n", (
+        f"configure touched .gitignore: {ignored!r}"
+    )
+    rc, _ = run_in(container, ["test", "-L", f"{repo}/.gitignore"])
+    assert rc == 1, "configure replaced root .gitignore with a symlink"
     rc, global_instructions = run_in(container, ["cat", "/root/.claude/CLAUDE.md"])
     assert rc == 0, global_instructions
     assert global_instructions.count("<!-- omc:begin ") == 1

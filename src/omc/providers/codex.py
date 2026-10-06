@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -29,7 +28,7 @@ class CodexProvider(Provider):
         argv.append(prompt)
         return argv
 
-    def session_argv(self, *, session_name, model, seed, notify_sink_argv=None):
+    def session_argv(self, *, session_name, model, seed, notifications=True):
         # No session-name flag exists — codex names sessions internally; omc's
         # terminal title carries the slug instead.
         # Codex now updates the terminal title itself. An empty item list
@@ -38,12 +37,10 @@ class CodexProvider(Provider):
         argv = ["codex", "-c", "tui.terminal_title=[]"]
         if model:
             argv += ["-m", model]
-        if notify_sink_argv:
-            # -c overrides one config.toml key for THIS session only (the global
-            # config is never touched). The value is TOML — a JSON array of
-            # strings happens to be valid TOML array syntax. Must precede the
-            # seed: the prompt is a trailing positional.
-            argv += ["-c", f"notify={json.dumps(notify_sink_argv)}"]
+        # Codex 0.158.0: tui.notifications controls native alerts; the native
+        # defaults are notification_method=auto and notification_condition=unfocused.
+        # This session override leaves the user's global notify command intact.
+        argv += ["-c", f"tui.notifications={str(notifications).lower()}"]
         argv.append(seed)
         return argv
 

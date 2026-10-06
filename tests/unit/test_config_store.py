@@ -7,10 +7,89 @@ from omc.config.schema import GlobalConfig, ProjectConfig, ProviderConfig, Secre
 from omc.errors import ConfigError
 
 
-def test_unknown_key_rejected(tmp_path):
-    (tmp_path / "config.yaml").write_text("schema_version: 1\nbogus: true\n")
-    with pytest.raises(ConfigError, match="bogus"):
+def test_global_unknown_fields_warn_once_and_disappear_on_save(tmp_path, capsys):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "schema_version: 1\nbogus: true\nllm:\n  default: codex\n"
+        "  extra: 9\n  docs:\n    surprise: yes\n  providers:\n"
+        "    codex:\n      model: gpt-x\n      future: value\n"
+    )
+    cfg = store.load_global(tmp_path)
+    assert cfg.llm.default == "codex"
+    assert cfg.llm.providers["codex"].model == "gpt-x"
+    warning = capsys.readouterr()
+    assert warning.out == ""
+    assert warning.err.count("· config: ignoring unknown key(s)") == 1
+    assert str(path) in warning.err
+    for name in ("bogus", "extra", "surprise", "future"):
+        assert name in warning.err
+    store.save_global(tmp_path, cfg)
+    saved = path.read_text()
+    for name in ("bogus", "extra", "surprise", "future"):
+        assert name not in saved
+
+
+def test_unknown_mixed_type_keys_do_not_break_warning(tmp_path, capsys):
+    (tmp_path / "config.yaml").write_text("schema_version: 1\n1: a\nnull: b\nx: c\n")
+    assert store.load_global(tmp_path).schema_version == 1
+    assert capsys.readouterr().err.count("· config: ignoring unknown key(s)") == 1
+
+
+def test_provider_notifications_default_and_round_trip(tmp_path):
+    assert ProviderConfig().notifications is True
+    (tmp_path / "config.yaml").write_text("llm:\n  providers:\n    codex:\n      model: gpt-x\n")
+    assert store.load_global(tmp_path).llm.providers["codex"].notifications is True
+    cfg = GlobalConfig()
+    cfg.llm.providers["codex"] = ProviderConfig(notifications=False)
+    store.save_global(tmp_path, cfg)
+    assert store.load_global(tmp_path).llm.providers["codex"].notifications is False
+
+
+def test_set_provider_notifications_bool():
+    cfg = GlobalConfig()
+    store.set_key(cfg, "llm.providers.codex.notifications", "false")
+    assert cfg.llm.providers["codex"].notifications is False
+    store.set_key(cfg, "llm.providers.codex.notifications", "true")
+    assert cfg.llm.providers["codex"].notifications is True
+    for value in ("yes", "1"):
+        with pytest.raises(ConfigError, match="true or false"):
+            store.set_key(cfg, "llm.providers.codex.notifications", value)
+    with pytest.raises(ConfigError, match="unknown config key"):
+        store.set_key(cfg, "llm.providers.codex.notifications.extra", "true")
+    with pytest.raises(ConfigError, match="retired.*claude.*codex"):
+        store.set_key(cfg, "llm.providers.retired.notifications", "true")
+
+
+@pytest.mark.parametrize("value", ['"false"', "1", "null", "[true]", "{enabled: true}"])
+def test_provider_notifications_wrong_type(tmp_path, value):
+    (tmp_path / "config.yaml").write_text(
+        f"llm:\n  providers:\n    codex:\n      notifications: {value}\n"
+    )
+    with pytest.raises(ConfigError, match="llm.providers.codex.notifications"):
         store.load_global(tmp_path)
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_provider_notifications_bool_loads(tmp_path, value):
+    (tmp_path / "config.yaml").write_text(
+        f"llm:\n  providers:\n    codex:\n      notifications: {value}\n"
+    )
+    assert store.load_global(tmp_path).llm.providers["codex"].notifications is (value == "true")
+
+
+@pytest.mark.parametrize("leaf", ["model", "docs_model"])
+def test_provider_model_leaves_require_strings(tmp_path, leaf):
+    (tmp_path / "config.yaml").write_text(f"llm:\n  providers:\n    codex:\n      {leaf}: 1\n")
+    with pytest.raises(ConfigError, match=f"llm.providers.codex.{leaf}"):
+        store.load_global(tmp_path)
+
+
+@pytest.mark.parametrize("leaf", ["model", "docs_model"])
+def test_set_provider_model_leaves_require_strings(leaf):
+    cfg = GlobalConfig()
+    with pytest.raises(ConfigError, match=f"llm.providers.codex.{leaf}"):
+        store.set_key(cfg, f"llm.providers.codex.{leaf}", 1)
+    assert "codex" not in cfg.llm.providers
 
 
 def test_set_key_provider_model():
@@ -71,73 +150,14 @@ def test_provider_entry_must_be_object(tmp_path):
         store.load_global(tmp_path)
 
 
-def test_notifications_defaults(tmp_path):
-    cfg = GlobalConfig()
-    assert cfg.notifications.enabled is False
-    assert cfg.notifications.backend == "macos"
+def test_legacy_notifications_are_ignored_on_load_and_save(tmp_path, capsys):
+    (tmp_path / "config.yaml").write_text("schema_version: 1\nnotifications:\n  enabled: true\n")
+    cfg = store.load_global(tmp_path)
+    assert "ignoring unknown key" in capsys.readouterr().err
     store.save_global(tmp_path, cfg)
-    loaded = store.load_global(tmp_path)
-    assert loaded.notifications.enabled is False
-    assert loaded.notifications.backend == "macos"
-
-
-def test_notifications_missing_key_defaults(tmp_path):
-    # configs written before this feature carry no notifications key at all
-    (tmp_path / "config.yaml").write_text("schema_version: 1\n")
-    loaded = store.load_global(tmp_path)
-    assert loaded.notifications.enabled is False
-    assert loaded.notifications.backend == "macos"
-
-
-def test_notifications_round_trip(tmp_path):
-    cfg = GlobalConfig()
-    cfg.notifications.enabled = True
-    cfg.notifications.backend = "file:///tmp/omc-notifications.log"
-    store.save_global(tmp_path, cfg)
-    loaded = store.load_global(tmp_path)
-    assert loaded.notifications.enabled is True
-    assert loaded.notifications.backend == "file:///tmp/omc-notifications.log"
-
-
-def test_set_key_notifications_enabled_coerces_bool():
-    cfg = GlobalConfig()
-    store.set_key(cfg, "notifications.enabled", "true")
-    assert cfg.notifications.enabled is True
-    store.set_key(cfg, "notifications.enabled", "false")
-    assert cfg.notifications.enabled is False
-    with pytest.raises(ConfigError, match="true or false"):
-        store.set_key(cfg, "notifications.enabled", "yes")
-
-
-def test_set_key_notifications_backend_validated():
-    cfg = GlobalConfig()
-    store.set_key(cfg, "notifications.backend", "file:///var/log/omc.log")
-    assert cfg.notifications.backend == "file:///var/log/omc.log"
-    store.set_key(cfg, "notifications.backend", "macos")
-    assert cfg.notifications.backend == "macos"
-    with pytest.raises(ConfigError, match="notifications.backend"):
-        store.set_key(cfg, "notifications.backend", "file://relative/path")
-    with pytest.raises(ConfigError, match="notifications.backend"):
-        store.set_key(cfg, "notifications.backend", "slack")
+    assert "\nnotifications:" not in (tmp_path / "config.yaml").read_text()
     with pytest.raises(ConfigError, match="unknown config key"):
-        store.set_key(cfg, "notifications.bogus", "x")
-
-
-def test_hydrate_rejects_bad_notification_values(tmp_path):
-    (tmp_path / "config.yaml").write_text('schema_version: 1\nnotifications:\n  enabled: "true"\n')
-    with pytest.raises(ConfigError, match="notifications.enabled"):
-        store.load_global(tmp_path)
-    (tmp_path / "config.yaml").write_text("schema_version: 1\nnotifications:\n  backend: slack\n")
-    with pytest.raises(ConfigError, match="notifications.backend"):
-        store.load_global(tmp_path)
-
-
-def test_set_key_notifications_rejects_trailing_segments():
-    cfg = GlobalConfig()
-    with pytest.raises(ConfigError, match="unknown config key"):
-        store.set_key(cfg, "notifications.enabled.extra", "true")
-    with pytest.raises(ConfigError, match="unknown config key"):
-        store.set_key(cfg, "notifications.backend.extra", "macos")
+        store.set_key(cfg, "notifications.enabled", "true")
 
 
 # --- split YAML store ---
@@ -151,22 +171,19 @@ def test_global_round_trip_yaml(tmp_path):
     cfg = GlobalConfig()
     cfg.llm.default = "codex"
     cfg.llm.providers["codex"] = ProviderConfig(model="gpt-x")
-    cfg.notifications.enabled = True
-    cfg.notifications.backend = "file:///tmp/omc.log"
     store.save_global(tmp_path, cfg)
     text = (tmp_path / "config.yaml").read_text()
     assert "schema_version" in text and "{" not in text  # YAML block style, not JSON
     loaded = store.load_global(tmp_path)
     assert loaded.llm.default == "codex"
     assert loaded.llm.providers["codex"].model == "gpt-x"
-    assert loaded.notifications.enabled is True
     assert loaded.schema_version == 1
 
 
-def test_global_has_no_worktree_key(tmp_path):
+def test_global_ignores_project_section(tmp_path, capsys):
     (tmp_path / "config.yaml").write_text("schema_version: 1\nworktree:\n  base_branch: dev\n")
-    with pytest.raises(ConfigError, match="worktree"):
-        store.load_global(tmp_path)
+    assert store.load_global(tmp_path).llm.default == "claude"
+    assert "worktree" in capsys.readouterr().err
 
 
 def test_project_round_trip_yaml(tmp_path):
@@ -184,11 +201,20 @@ def test_project_missing_returns_none(tmp_path):
     assert store.load_project(tmp_path) is None
 
 
-def test_project_rejects_global_keys(tmp_path):
+def test_project_ignores_global_keys(tmp_path, capsys):
     (tmp_path / ".omc").mkdir()
     (tmp_path / ".omc" / "config.yaml").write_text("llm:\n  default: claude\n")
-    with pytest.raises(ConfigError, match="llm"):
-        store.load_project(tmp_path)
+    assert store.load_project(tmp_path).worktree.base_branch == "main"
+    assert "llm" in capsys.readouterr().err
+
+
+def test_project_nested_unknown_warns_once_and_preserves_worktree(tmp_path, capsys):
+    _write_project(tmp_path, "future: yes\nworktree:\n  base_branch: develop\n  extra: yes\n")
+    cfg = store.load_project(tmp_path)
+    assert cfg.worktree.base_branch == "develop"
+    assert capsys.readouterr().err.count("· config: ignoring unknown key(s)") == 1
+    store.save_project(tmp_path, cfg)
+    assert "extra:" not in (tmp_path / ".omc" / "config.yaml").read_text()
 
 
 def test_yaml_parse_error_rejected(tmp_path):
@@ -284,8 +310,22 @@ def test_load_legacy_splits_sections(tmp_path):
     )
     gcfg, pcfg = store.load_legacy(tmp_path)
     assert gcfg.llm.default == "codex"
-    assert gcfg.notifications.enabled is True
     assert pcfg.worktree.base_branch == "develop"
+
+
+def test_legacy_nested_unknown_warns_once(tmp_path, capsys):
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"unknown": 1, "llm": {"default": "codex", "extra": 2, '
+        '"providers": {"codex": {"model": "gpt-x", "future": 3}}}, '
+        '"worktree": {"base_branch": "develop", "extra": 4}}'
+    )
+    gcfg, pcfg = store.load_legacy(tmp_path)
+    assert gcfg.llm.providers["codex"].model == "gpt-x"
+    assert pcfg.worktree.base_branch == "develop"
+    warning = capsys.readouterr().err
+    assert warning.count("· config: ignoring unknown key(s)") == 1
+    assert str(path) in warning
 
 
 def test_load_legacy_rejects_bad_json(tmp_path):
@@ -393,7 +433,6 @@ def test_secrets_repr_never_shows_the_key():
 @pytest.mark.parametrize(
     "body",
     [
-        "schema_version: 1\nbogus: 1\n",
         "api_keys: [a]\n",
         "api_keys:\n  claude: 31\n",  # YAML reads 0x1F as an int
         "api_keys:\n  retired: sk-x\n",
@@ -414,8 +453,6 @@ def test_load_secrets_rejects_bad_files(tmp_path, body):
     [
         # a key pasted where the provider NAME belongs (transposed by hand)
         (f"api_keys:\n  {_KEY}: claude\n", "unsupported provider name in api_keys"),
-        # a key pasted as a top-level key
-        (f"schema_version: 1\n{_KEY}: 1\n", "only schema_version and api_keys are allowed"),
     ],
 )
 def test_load_secrets_never_echoes_a_hand_edited_key_name(tmp_path, body, match):
@@ -424,6 +461,18 @@ def test_load_secrets_never_echoes_a_hand_edited_key_name(tmp_path, body, match)
         store.load_secrets(tmp_path)
     assert "secrets.yaml" in str(exc.value)
     assert _KEY not in str(exc.value) and _KEY[:12] not in str(exc.value)
+
+
+def test_secrets_unknown_top_level_warns_by_count_without_echoing_secrets(tmp_path, capsys):
+    path = tmp_path / "secrets.yaml"
+    path.write_text(
+        f"schema_version: 1\napi_keys:\n  claude: {_KEY}\n{_KEY}: {_KEY}\nnull: stray\n1: stray\n"
+    )
+    assert store.load_secrets(tmp_path).api_keys == {"claude": _KEY}
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"· config: ignoring 3 unknown keys in {path}\n"
+    assert _KEY not in captured.err
 
 
 def test_load_secrets_yaml_error_names_file_but_not_contents(tmp_path):

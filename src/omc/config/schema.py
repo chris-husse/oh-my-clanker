@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 @dataclass
 class ProviderConfig:
     model: str = ""  # blank = provider default
+    notifications: bool = True
     # Model for documentation/wiki generation (bulk grounded summarization).
     # Blank = the provider's docs default — the standard-coding-tier floor —
     # NEVER the session model above (a thinking-heavy session model makes
@@ -38,12 +39,6 @@ class WorktreeConfig:
 
 
 @dataclass
-class NotificationsConfig:
-    enabled: bool = False  # opt-in
-    backend: str = "macos"  # "macos" | "file://<absolute path>"
-
-
-@dataclass
 class SecretsConfig:
     """Persisted at <home>/secrets.yaml, mode 0600 — API keys per provider
     (spec 2026-10-01 §2.2). repr=False: a traceback, print(cfg) or a pytest
@@ -62,7 +57,6 @@ class Config:
     schema_version: int = 1
     llm: LLMConfig = field(default_factory=LLMConfig)
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
-    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     # Composed from <home>/secrets.yaml by resolve.load_effective; never persisted
     # as part of this composite. repr=False: see SecretsConfig.
     secrets: SecretsConfig = field(default_factory=SecretsConfig, repr=False)
@@ -74,7 +68,6 @@ class GlobalConfig:
 
     schema_version: int = 1
     llm: LLMConfig = field(default_factory=LLMConfig)
-    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
 
 
 @dataclass

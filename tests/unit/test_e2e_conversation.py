@@ -76,6 +76,8 @@ def test_codex_bridge_waits_for_input_ack_before_long_completion_wait():
 def test_trust_prompt_is_answered_after_session_metadata_arrives(monkeypatch):
     session = PTYSession.__new__(PTYSession)
     session.trust_answered = False
+    session.trust_attempts = 0
+    session.trust_answered_at = 0.0
     session.fd = 99
     session.session_id = "early-session-meta"
     session.tracker = TurnTracker()
@@ -91,9 +93,43 @@ def test_trust_prompt_is_answered_after_session_metadata_arrives(monkeypatch):
     assert session.trust_answered
 
 
+def test_trust_prompt_is_re_answered_while_it_stays_on_screen(monkeypatch):
+    """Codex can draw the prompt before it reads input: Enter is repeated,
+    spaced out and capped, until a turn starts — and recorded once."""
+    session = PTYSession.__new__(PTYSession)
+    session.trust_answered = False
+    session.trust_attempts = 0
+    session.trust_answered_at = 0.0
+    session.fd = 99
+    session.session_id = None
+    session.tracker = TurnTracker()
+    session.cwd = Path("/work/native-slash")
+    session.events = []
+    session.output = bytearray(
+        b"/work/native-slash Trust this folder? 1. Trust and continue enter esc quit"
+    )
+    writes = []
+    clock = [100.0]
+    monkeypatch.setattr(_module.os, "write", lambda fd, data: writes.append((fd, data)))
+    monkeypatch.setattr(_module.time, "monotonic", lambda: clock[0])
+    session._maybe_answer_bootstrap_trust()
+    session._maybe_answer_bootstrap_trust()  # same instant: no second Enter
+    assert writes == [(99, b"\r")]
+    clock[0] += 3.1
+    session._maybe_answer_bootstrap_trust()
+    clock[0] += 3.1
+    session._maybe_answer_bootstrap_trust()
+    clock[0] += 3.1
+    session._maybe_answer_bootstrap_trust()  # capped at three
+    assert writes == [(99, b"\r")] * 3
+    assert session.events == [{"type": "bootstrap_trust", "scope": "/work"}]
+
+
 def test_trust_prompt_is_not_answered_after_actor_turn_started(monkeypatch):
     session = PTYSession.__new__(PTYSession)
     session.trust_answered = False
+    session.trust_attempts = 0
+    session.trust_answered_at = 0.0
     session.fd = 99
     session.session_id = "actor-session"
     session.tracker = TurnTracker()

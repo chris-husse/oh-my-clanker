@@ -120,7 +120,7 @@ def _fixture(container, *, failing_stage: str | None = None, path="/work/lifecyc
     payload = r"""
 from pathlib import Path
 root = Path("/work/lifecycle")
-(root / ".gitignore").write_text("__pycache__/\n")
+(root / ".gitignore").write_text("__pycache__/\n.claude/settings.local.json\n")
 (root / "greeting.py").write_text("def greeting():\n    return 'Goodbye, world!'\n")
 (root / "test_greeting.py").write_text(
     "import unittest\nfrom greeting import greeting\n\n"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
 import tempfile
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
@@ -15,7 +16,6 @@ from .schema import (
     Config,
     GlobalConfig,
     LLMConfig,
-    NotificationsConfig,
     ProjectConfig,
     ProviderConfig,
     SecretsConfig,
@@ -91,19 +91,8 @@ def load_legacy(home: Path) -> tuple[GlobalConfig, ProjectConfig] | None:
         raise ConfigError(f"unexpected 'secrets' in {path}: API keys live in secrets.yaml")
     combined = _hydrate(Config, data, str(path))
     return (
-        GlobalConfig(llm=combined.llm, notifications=combined.notifications),
+        GlobalConfig(llm=combined.llm),
         ProjectConfig(worktree=combined.worktree),
-    )
-
-
-def validate_backend(value: str) -> str:
-    """'macos' or file:// + absolute path; shared by load and set paths."""
-    if value == "macos":
-        return value
-    if value.startswith("file://") and value[len("file://") :].startswith("/"):
-        return value
-    raise ConfigError(
-        f"invalid notifications.backend {value!r}: use 'macos' or 'file:///absolute/path'"
     )
 
 
@@ -213,10 +202,10 @@ def load_secrets(home: Path) -> SecretsConfig:
     if not isinstance(data, dict):
         raise ConfigError(f"invalid config in {path}: expected a mapping")
     # Never echo a NAME from this file: a hand-edit can transpose a key into one.
-    if set(data) - {"schema_version", "api_keys"}:
-        raise ConfigError(
-            f"unknown config key in {path}: only schema_version and api_keys are allowed"
-        )
+    unknown_count = len(set(data) - {"schema_version", "api_keys"})
+    if unknown_count:
+        noun = "key" if unknown_count == 1 else "keys"
+        print(f"· config: ignoring {unknown_count} unknown {noun} in {path}", file=sys.stderr)
     keys = data.get("api_keys", {})
     if not isinstance(keys, dict):
         raise ConfigError(f"invalid value for 'api_keys' in {path}: expected a mapping")
@@ -263,9 +252,15 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
     head, _, tail = dotted.partition(".")
     if isinstance(cfg, LLMConfig) and head == "providers":
         name, _, leaf = tail.partition(".")
-        if leaf not in ("model", "docs_model"):
+        if leaf not in ("model", "docs_model", "notifications"):
             raise ConfigError(f"unknown config key: providers.{tail}")
         _validate_provider(name, "llm.providers")
+        if leaf == "notifications":
+            if value not in ("true", "false"):
+                raise ConfigError(f"llm.providers.{name}.notifications expects true or false")
+            value = value == "true"
+        elif not isinstance(value, str):
+            raise ConfigError(f"llm.providers.{name}.{leaf} expects a string")
         setattr(cfg.providers.setdefault(name, ProviderConfig()), leaf, value)
         return
     if isinstance(cfg, LLMConfig) and head == "docs":
@@ -280,23 +275,6 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
         # The backend/provider consistency check is the save path's job
         # (validate_llm): --set order is arbitrary, see that docstring.
         return
-    if isinstance(cfg, NotificationsConfig):
-        # set_key values arrive as strings; enabled is a bool ("true" would be
-        # truthy as a string even when the user meant false) and backend has a
-        # closed scheme set — both need explicit handling.
-        if head == "enabled":
-            if tail:
-                raise ConfigError(f"unknown config key: notifications.{head}.{tail}")
-            if value not in ("true", "false"):
-                raise ConfigError(f"notifications.enabled expects true or false, got {value!r}")
-            cfg.enabled = value == "true"
-            return
-        if head == "backend":
-            if tail:
-                raise ConfigError(f"unknown config key: notifications.{head}.{tail}")
-            cfg.backend = validate_backend(value)
-            return
-        raise ConfigError(f"unknown config key: notifications.{head}")
     if isinstance(cfg, WorktreeConfig):
         # values reach git argv — validate (option-injection surface) on the set
         # path too, exactly as the load path does via _hydrate.
@@ -324,13 +302,16 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
     setattr(cfg, head, value)
 
 
-def _hydrate(cls: type, data: dict, path: str):
+def _hydrate(cls: type, data: dict, path: str, unknown: list[str] | None = None, prefix: str = ""):
+    outermost = unknown is None
+    if unknown is None:
+        unknown = []
     field_map = {f.name: f for f in fields(cls)}
-    unknown = set(data) - set(field_map)
-    if unknown:
-        raise ConfigError(f"unknown config key(s) {sorted(unknown)} in {path}")
     kwargs = {}
     for name, value in data.items():
+        if name not in field_map:
+            unknown.append(f"{prefix}{name}")
+            continue
         f = field_map[name]
         if cls is LLMConfig and name == "providers":
             if not isinstance(value, dict):
@@ -342,29 +323,35 @@ def _hydrate(cls: type, data: dict, path: str):
                     raise ConfigError(
                         f"invalid value for llm.providers[{k!r}] in {path}: expected an object"
                     )
-                providers[k] = _hydrate(ProviderConfig, v, path)
+                providers[k] = _hydrate(ProviderConfig, v, path, unknown, f"{prefix}providers.{k}.")
             kwargs[name] = providers
         elif is_dataclass(f.type):
             if not isinstance(value, dict):
                 raise ConfigError(f"invalid value for {name!r} in {path}: expected an object")
-            kwargs[name] = _hydrate(f.type, value, path)
+            kwargs[name] = _hydrate(f.type, value, path, unknown, f"{prefix}{name}.")
         else:
             kwargs[name] = value
     obj = cls(**kwargs)
     if cls is LLMConfig:
         validate_llm(obj)
-    if cls is NotificationsConfig:
-        if not isinstance(obj.enabled, bool):
+    if cls is ProviderConfig:
+        provider_path = prefix.rstrip(".")
+        for fname in ("model", "docs_model"):
+            if not isinstance(getattr(obj, fname), str):
+                raise ConfigError(f"invalid {provider_path}.{fname} in {path}: expected a string")
+        if not isinstance(obj.notifications, bool):
             raise ConfigError(
-                f"invalid value for 'notifications.enabled' in {path}: expected true/false"
+                f"invalid {provider_path}.notifications in {path}: expected true/false"
             )
-        if not isinstance(obj.backend, str):
-            raise ConfigError(f"invalid value for 'notifications.backend' in {path}")
-        validate_backend(obj.backend)
     if cls is WorktreeConfig:
         for fname in ("branch_prefix", "base_branch"):
             try:
                 validate_worktree_value(fname, getattr(obj, fname))
             except ConfigError as exc:
                 raise ConfigError(f"{exc} in {path}") from exc
+    if outermost and unknown:
+        print(
+            f"· config: ignoring unknown key(s) {sorted(unknown)} in {path}",
+            file=sys.stderr,
+        )
     return obj

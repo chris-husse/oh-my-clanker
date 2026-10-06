@@ -28,7 +28,6 @@ def load_effective(ctx: ToolContext) -> Config | None:
         return None
     return Config(
         llm=gcfg.llm,
-        notifications=gcfg.notifications,
         worktree=project_config(ctx).worktree,
         secrets=store.load_secrets(ctx.home),
     )

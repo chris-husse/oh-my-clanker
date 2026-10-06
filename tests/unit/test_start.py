@@ -53,6 +53,7 @@ def full_env(tmp_path, *, verdict=OK_VERDICT, wt_json=None):
     # superpowers (so ensure_plugin leaves them alone); everything else — the
     # slug call — answers with the verdict.
     make_claude_stub(bindir, plugins=HEALTHY_PLUGINS, stdout=verdict)
+    make_stub(bindir, "codex", stdout=verdict)
     make_stub(bindir, "wt", stdout=json.dumps(wt_json or {"path": str(tmp_path / "wtree")}))
     return ToolContext.from_env(stub_env(bindir, SHELL="/bin/bash"))
 
@@ -211,40 +212,30 @@ def test_headless_runs_seed_in_worktree(tmp_path, capsys):
     assert "OMC_SLUG" in capsys.readouterr().out
 
 
-def _notify_cfg():
+def test_start_wires_native_notifications_for_both_states(tmp_path, capsys):
+    from omc.config.schema import ProviderConfig
+
+    for enabled, channel in ((True, "auto"), (False, "notifications_disabled")):
+        ctx = full_env(tmp_path)
+        wt = tmp_path / "wtree"
+        wt.mkdir(exist_ok=True)
+        cfg = Config()
+        cfg.llm.providers["claude"] = ProviderConfig(notifications=enabled)
+        assert run_start(ctx, cfg, "PROJ-1", headless=True) == 0
+        settings = json.loads((wt / ".claude/settings.local.json").read_text())
+        assert settings["preferredNotifChannel"] == channel
+        assert "✓ notification wiring: .claude/settings.local.json" in capsys.readouterr().err
+
+
+def test_dry_run_shows_native_plan_without_writing(tmp_path, capsys):
+    from omc.config.schema import ProviderConfig
+
+    ctx = full_env(tmp_path)
     cfg = Config()
-    cfg.notifications.enabled = True
-    return cfg
-
-
-def test_start_wires_notifications_when_enabled(tmp_path, capsys):
-    ctx = full_env(tmp_path)
-    wt = tmp_path / "wtree"
-    wt.mkdir()
-    rc = run_start(ctx, _notify_cfg(), "PROJ-1", headless=True)
-    assert rc == 0
-    settings = json.loads((wt / ".claude" / "settings.local.json").read_text())
-    assert "Notification" in settings["hooks"]
-    assert "✓ notification wiring: .claude/settings.local.json" in capsys.readouterr().err
-
-
-def test_start_skips_wiring_when_disabled(tmp_path):
-    ctx = full_env(tmp_path)
-    wt = tmp_path / "wtree"
-    wt.mkdir()
-    rc = run_start(ctx, Config(), "PROJ-1", headless=True)
-    assert rc == 0
-    assert not (wt / ".claude").exists()
-
-
-def test_dry_run_shows_notify_plan(tmp_path, capsys):
-    ctx = full_env(tmp_path)
-    rc = run_start(ctx, _notify_cfg(), "PROJ-1", dry_run=True)
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "notify:       backend macos; files: .claude/settings.local.json" in out
-    rc = run_start(ctx, Config(), "PROJ-1", dry_run=True)
-    assert "notify:       disabled" in capsys.readouterr().out
+    cfg.llm.providers["claude"] = ProviderConfig(notifications=False)
+    assert run_start(ctx, cfg, "PROJ-1", dry_run=True) == 0
+    assert "notifications: native, off" in capsys.readouterr().out
+    assert not (tmp_path / "wtree" / ".claude").exists()
 
 
 def _repo_env(tmp_path):
@@ -539,3 +530,46 @@ def test_dry_run_fresh_knowledge_row(tmp_path, capsys, monkeypatch):
     ctx = full_env(tmp_path)
     assert run_start(ctx, Config(), "PROJ-1", dry_run=True) == 0
     assert "knowledge:    fresh (computed without fetch)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "provider,configured",
+    [
+        ("claude", True),
+        ("claude", False),
+        ("claude", None),
+        ("codex", True),
+        ("codex", False),
+        ("codex", None),
+    ],
+)
+def test_start_wires_once_for_provider_state(tmp_path, monkeypatch, provider, configured):
+    import omc.start as start_mod
+    from omc.config.schema import ProviderConfig
+
+    ctx = full_env(tmp_path)
+    worktree = tmp_path / "wtree"
+    worktree.mkdir()
+    cfg = Config()
+    cfg.llm.default = provider
+    if configured is None:
+        cfg.llm.providers.pop(provider, None)
+    else:
+        cfg.llm.providers[provider] = ProviderConfig(notifications=configured)
+    real_wire = start_mod.notify.wire_worktree
+    seen = []
+
+    def recording_wire(p, path, enabled):
+        seen.append((p.name, path, enabled))
+        return real_wire(p, path, enabled)
+
+    monkeypatch.setattr(start_mod.notify, "wire_worktree", recording_wire)
+    assert run_start(ctx, cfg, "PROJ-1", headless=True) == 0
+    expected = True if configured is None else configured
+    assert seen == [(provider, worktree, expected)]
+    if provider == "claude":
+        settings = json.loads((worktree / ".claude/settings.local.json").read_text())
+        channel = "auto" if expected else "notifications_disabled"
+        assert settings["preferredNotifChannel"] == channel
+    else:
+        assert not (worktree / ".claude/settings.local.json").exists()
