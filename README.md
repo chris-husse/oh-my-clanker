@@ -62,7 +62,7 @@ A ticket key or URL is resolved through whatever tracker tool your session alrea
 
 To verify the iTerm2 behavior natively, run `just iterm2-tests` on a macOS desktop with iTerm2 3.7.3 installed at `/Applications/iTerm.app`, fish, and your terminal allowed to control iTerm2 (System Settings → Privacy & Security → Automation). The tier copies the app bundle to `/private/tmp/omc-<hex>/iTerm.app`, launches it hidden under a private `-suite` and a private HOME, connects the stock Python SDK over that instance's socket, and never attaches to, reads from, or writes to your running iTerm2. It exercises a split pane with competing title writes, the branch→detached→outside→branch sequence, and ordinary prompts running plain `codex`, `codex resume`, and `claude`; Codex uses the dedicated `omc-e2e-codex-auth` Docker volume from `just codex-login`, Claude uses your existing `claude auth login` (a token is copied into a 0600 file inside the private HOME only when that HOME cannot see the Keychain login, and removed afterwards). Teardown quits the private instance, deletes its preference domains and the temporary directory, and reports any leftover. `just check` and Docker E2E never launch a native app.
 
-From there, `/omc:start` takes over inside the session itself: it gathers the ticket's context (parent/epic, linked docs — each summarized, or reported as "couldn't fetch" rather than failing outright), verifies the base branch is still fresh (rebasing, or stopping cleanly on conflicts — it never brainstorms on a stale base), and then hands off to `/omc:plan`, which runs one `/omc:explain` pass over the ticket ("which parts of this codebase are relevant to this?"), bundles the answer with pointers to prior design records into a project primer, and asks for your own seed thinking. It waits for your answer and resolves material scope questions before brainstorming presents a complete design for discussion. Agreement, including a brief `ok`, leaves the session at the handoff. Type `/omc:design` (`$omc:design` on Codex) to write, harden and commit the design record; the session stays open and tells you the two ways on. Type `/omc:implement` (`$omc:implement` on Codex) there to plan, build and finish on the same provider — or exit and run `omc implement --claude` or `omc implement --codex` in the worktree to hand the committed record to a fresh session on the provider you choose; it refuses without exactly one committed record. Codex 0.156.1 treats `/omc:…` typed at its prompt as an unknown command; its direct skill syntax is `$omc:…`. Only critical unanswered questions or genuine blockers interrupt either flow; answering one resumes the same authorization.
+From there, `/omc:start` takes over inside the session itself: it gathers the ticket's context (parent/epic, linked docs — each summarized, or reported as "couldn't fetch" rather than failing outright), verifies the base branch is still fresh (rebasing, or stopping cleanly on conflicts — it never brainstorms on a stale base), and then hands off to `/omc:plan`, which runs one `/omc:explain` pass over the ticket ("which parts of this codebase are relevant to this?"), bundles the answer with pointers to prior design records into a project primer, and asks for your own seed thinking. It waits for your answer and resolves material scope questions before brainstorming presents a complete design for discussion. Agreement, including a brief `ok`, leaves the session at the handoff. Type `/omc:design` (`$omc:design` on Codex) to write, harden and commit the design record; the session stays open and tells you the two ways on. Type `/omc:implement` (`$omc:implement` on Codex) there to plan and build on the same provider — or exit and run `omc implement --claude` or `omc implement --codex` in the worktree to hand the committed record to a fresh session on the provider you choose. Implementation ends on a clean, committed, unpublished branch. Type `/omc:audit` (`$omc:audit` on Codex) there to review conformance and publish, or run `omc review --claude` or `omc review --codex` in the worktree for a fresh audit session on either provider. `/omc:finish` remains available to publish without audit. Both launchers require the committed record. Codex 0.156.1 treats `/omc:…` typed at its prompt as an unknown command; its direct skill syntax is `$omc:…`. Only critical unanswered questions or genuine blockers interrupt an authorized flow; answering one resumes the same authorization.
 
 When the work is done, run `/omc:finish` inside the session: it rebases onto a fresh base, squashes the branch to a single commit whose message *is* the MR/PR description (generated from the real diff), pushes with `--force-with-lease`, and prints where to open the MR — it never creates one for you. Worktrees are snapshots of main — code AND knowledge: `wt` copies every gitignored file (`.env`, caches, the `.gitnexus`/`.omc/docs` graph+docs) into new worktrees, and `/omc:rebase-main` refreshes both later (rebase onto the fresh base + a deterministic Python re-mirror of the knowledge dirs; it is also `/omc:finish`'s first step). omc seeds a starter `.config/wt.toml` when a project has none, and `/omc:check-wt-config` reviews an existing one against the faithful-worktree expectations.
 
@@ -112,7 +112,8 @@ already-wired worktrees included.
 |---|---|
 | `omc configure` | Pick your LLM (global `~/.omc/config.yaml`), install the global behavior section, and set the repo's worktree naming (committed `.omc/config.yaml`) |
 | `omc design <context> [--claude\|--codex]` | Ticket key, ticket URL, or quoted task description → worktree → seeded session; `--claude`/`--codex` run this session on that provider without changing the saved default (alias: `omc start`) |
-| `omc implement [--claude\|--codex]` | Hand this worktree's committed design record to a fresh session: plan → build → finish (`--dry-run`, `--headless`); a repeat launch in the same worktree creates a second `<slug>-implement` session, so resume by id then |
+| `omc implement [--claude\|--codex]` | Hand this worktree's committed design record to a fresh session: plan → build → committed, unpublished handoff (`--dry-run`, `--headless`); a repeat launch creates a second `<slug>-implement` session, so resume by id then |
+| `omc review [--claude\|--codex]` | Hand the committed implementation to a fresh `<slug>-audit` session: conformance audit → record trace → finish and publish (`--dry-run`, `--headless`); the configured provider is the default |
 | `omc watch` | Keep the main checkout's base branch + knowledge graph fresh (`--once`, `--interval`, `--enable-documentation`, `--auto-build`, `--rebase`, `--reset-gitnexus`); runs the project's `.omc/hooks/post-watch.sh` (and with `--auto-build` its build stage — streamed to a live log with an in-place progress bar, no timeout) after action ticks |
 | `omc dependency watch` | Backfill LLM docs for indexed external dependencies until everything is documented — announces completion (`--interval`, `--once`) |
 | `omc dependency list` | Show cached external dependencies: repo, commit, index/doc status |
@@ -145,11 +146,13 @@ just e2e-tests
 It builds the image once from this checkout (tagged by source sha), runs the
 **golden lifecycle path** sequentially — `omc design` → design → agreement →
 `/omc:design` (`recorded`) → `omc implement --claude --headless`
-(`implemented`, expensive), one or two agent turns per stage, each
+(`implemented`, default golden tier after a 38.4 s measurement) → `omc review --claude --headless`
+(`audited`, expensive), one or two agent turns per stage, each
 snapshotted with `docker commit` — then runs everything else with `-n auto`:
 **variations**
 that fork a container from a stage snapshot and run one or two turns from
-there (a clean implement, a critical question, a sabotaged build), plus the
+there (a clean implement, a critical question, a sabotaged audit build, and an
+audit repairing committed drift), plus the
 smoke and marketplace cases. Every test has a 300 s ceiling (pytest-timeout);
 a test that cannot run in parallel fails instead of passing. Claude needs
 `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` in the gitignored `.env`.
@@ -160,9 +163,9 @@ Useful pieces:
 just golden            # only the golden path (refreshes the stage snapshots)
 just e2e-rest tests/e2e/variations   # variations against existing snapshots
 just codex-login && just codex-gate             # Codex integration cases, serial, opt-in
-just lifecycle-full    # the old monolithic lifecycle runs (expensive tier, evidence only)
-just golden-full       # golden path incl. the expensive `implemented` stage (writes that snapshot)
-just e2e-rest -m "e2e and expensive and variation" tests/e2e/variations   # implement variations
+just lifecycle-full    # monolithic lifecycle and cross-provider handoffs (expensive evidence)
+just golden-full       # golden path incl. the expensive `audited` stage
+just e2e-rest '-m "e2e and expensive and variation"' tests/e2e/variations   # implement and audit variations
 just e2e-rest tests/e2e/test_e2e_smoke.py   # token-free smoke only (no Claude token needed)
 just e2e-prune         # remove E2E images and snapshots that do not belong to this tree
 ```

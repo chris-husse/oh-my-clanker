@@ -215,7 +215,10 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
                 result = record
                 if isinstance(record.get("uuid"), str):
                     result_uuids.add(record["uuid"])
-            elif record.get("origin") == {"kind": "task-notification"}:
+            elif (
+                isinstance(record.get("origin"), dict)
+                and record["origin"].get("kind") == "task-notification"
+            ):
                 session_id = record["session_id"]
                 if session_id != result["session_id"]:
                     raise ValueError("Claude notification result changed session identity")

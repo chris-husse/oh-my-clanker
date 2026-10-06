@@ -853,6 +853,16 @@ def test_claude_stream_keeps_requested_turn_when_background_notification_auto_re
     }
 
 
+def test_claude_stream_accepts_notification_origin_with_extra_metadata():
+    from tests.e2e.conversation import parse_claude_stream
+
+    records = _claude_background_result_records()
+    records[-1]["origin"] = {"kind": "task-notification", "task_id": "agent-task"}
+    parsed = parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
+    assert parsed["text"] == "The requested turn answered"
+    assert parsed["provider_session_id"] == "session-1"
+
+
 def test_claude_stream_rejects_reused_auxiliary_result_identity():
     from tests.e2e.conversation import parse_claude_stream
 
@@ -891,6 +901,7 @@ def test_claude_stream_rejects_reused_auxiliary_result_identity():
         ("malformed-notification", "malformed"),
         ("cross-session", "session"),
         ("unknown-origin", "repeated"),
+        ("non-object-origin", "repeated"),
         ("missing-notification", "notification"),
         ("wrong-task", "notification"),
         ("out-of-order-index", "result_index"),
@@ -913,6 +924,8 @@ def test_claude_stream_rejects_invalid_followup_results(variant, error):
         followup["session_id"] = "session-2"
     elif variant == "unknown-origin":
         followup["origin"] = {"kind": "other"}
+    elif variant == "non-object-origin":
+        followup["origin"] = "task-notification"
     elif variant == "missing-notification":
         del records[3]
     elif variant == "wrong-task":

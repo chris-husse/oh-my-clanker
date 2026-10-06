@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Lifecycle conductor from a committed design record to pushed branch - plan (pressure-tested via explain), subagent build, finish. Type it after /omc:design has committed the record, in the design session or in a fresh one launched by `omc implement`.
+description: Lifecycle conductor from a committed design record to an unpublished implementation - plan (pressure-tested via explain), subagent build, handoff. Type it after /omc:design has committed the record, in the design session or in a fresh one launched by `omc implement`.
 ---
 
 # omc implement (conductor)
@@ -9,8 +9,8 @@ Invoked directly (`$omc:implement` in Codex, `/omc:implement` in Claude) once
 `/omc:design` has committed the design record — in the same session, or in a
 fresh session that `omc implement [--claude|--codex]` seeded in this worktree.
 Three phases, strictly in order; each phase is a black-box command call.
-/omc:implement IS the user's approval to carry the committed record all the
-way to a pushed branch: do not ask permission between phases. The only
+/omc:implement IS the user's approval to carry the committed record through
+committed implementation on this branch: do not ask permission between phases. The only
 interactive stops are genuine blockers and CRITICAL questions a plan cannot
 answer. The user's authorization persists through a required answer: once a
 critical question is resolved, resume the remaining phases without a new
@@ -22,11 +22,10 @@ satisfied by this direct command.
 ## Phase -1 — externalize the flow (first action, no exceptions)
 
 **Write the three phases into the task list now**, before the record gate:
-plan → subagent build → ship. Mark each completed as you pass it.
+plan → subagent build → handoff. Mark each completed as you pass it.
 
-This is omc's deepest nesting (`implement → finish → create-mr →
-get-mr-description`), and every phase ends in a large, polished artifact — a
-1,200-line plan, an MR description. **The bigger the artifact, the more it
+Every phase can end in a large, polished artifact — a
+1,200-line plan or a completed build. **The bigger the artifact, the more it
 reads as a destination**, when it is only an argument to the next phase. The
 task list is what keeps the outer frames alive; without it this flow reliably
 stops after the plan, and a half-run conductor is indistinguishable from a
@@ -90,13 +89,26 @@ and do not ask permission to begin — the user typed /omc:implement, that
 IS the instruction to build. The only stops are CRITICAL questions a plan
 cannot answer and genuine blockers.
 
-## Phase 3 — ship
+## Phase 3 — hand off
 
-Invoke the `finish` skill (`/omc:finish`): rebase, squash with the MR
-description as the commit message, check/build/verify/review stages, push.
+Commit the plan file and any tracked product or documentation changes left by
+the implementation workers. Restore only known tool drift, such as a lockfile
+changed by `uv run`; never discard unknown work. Verify the working tree is
+clean and at least one task commit exists over the base. If either condition
+fails, resolve it before handoff.
+
+Post a short implementation summary and state this continuation verbatim as a
+statement, not a question:
+
+> The implementation is committed on this branch and not yet published. To
+> audit and publish on this provider, type `/omc:audit` here (`$omc:audit`
+> on Codex). To have another provider audit it, exit this session and run
+> `omc review --claude` or `omc review --codex` in this worktree. To publish
+> without an audit, type `/omc:finish`.
 
 ## Completion contract
 
-`implement` is complete only when `finish` has run to its own completion
-contract — branch pushed, described, ticket moved, follow-ups offered. Before
-ending the turn, read the task list: a pending phase means continue, not stop.
+`implement` is complete when the branch is committed, its working tree is
+clean, and the three continuations have been stated. Waiting for the audit
+handoff is a valid stop. Before ending the turn, read the task list: a
+pending phase means continue, not stop.

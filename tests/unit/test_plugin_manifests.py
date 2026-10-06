@@ -59,6 +59,7 @@ USER_FACING_SKILLS = (
     "plan",
     "design",
     "implement",
+    "audit",
     "finish",
     "check",
     "build",
@@ -339,7 +340,8 @@ def test_implement_skill_contract():
         "/omc:design",
         "writing-plans",
         "subagent-driven-development",
-        "`finish`",
+        "/omc:audit",
+        "omc review",
         "/omc:explain",
         "model-tier policy",
         "`Model:`",
@@ -354,9 +356,53 @@ def test_implement_skill_contract():
         text.index("omc internal design-record"),
         text.index("writing-plans"),
         text.index("subagent-driven-development"),
-        text.index("`finish`"),
+        text.index("## Phase 3 — hand off"),
     ]
-    assert order == sorted(order), "implement must order record gate -> plan -> build -> ship"
+    assert order == sorted(order), "implement must order record gate -> plan -> build -> handoff"
+    assert "Invoke the `finish` skill" not in text
+
+
+def test_audit_skill_contract():
+    text = (ROOT / "skills" / "audit" / "SKILL.md").read_text()
+    for needle in (
+        "omc internal design-record",
+        "OMC_DESIGN_RECORD",
+        "/omc:design",
+        "git fetch origin <base>",
+        "origin/<base>...HEAD",
+        "docs/superpowers/",
+        '"nothing to audit — run `/omc:implement` first"',
+        "Decisions taken during brainstorm",
+        "file:line",
+        "Important",
+        "Minor",
+        "code deviates from the record",
+        "record is stale",
+        "CRITICAL",
+        "/omc:check",
+        "Implementation review",
+        "## Deliberate complexity",
+        "provider",
+        "date",
+        "re-audit",
+        "commit",
+        "`finish`",
+    ):
+        assert needle in text, f"audit skill missing {needle!r}"
+    assert text.index("## Phase 0") < text.index("## Phase 1") < text.index("## Phase 3")
+    assert text.index("## Phase 2b") < text.index("## Phase 3")
+    assert text.index("commit", text.index("## Phase 2b")) < text.index("Invoke `finish`")
+    prose = " ".join(text.split())
+    assert "immediately before the terminal `## Deliberate complexity`" in prose
+    assert "append a new dated entry below the previous review entry" in prose
+    assert "plan" in text and "context" in text and "absence" in text
+    assert "conformance only" in text
+    assert "unrelated or undisposed" in prose
+    assert "Before invoking `finish`" in text
+    assert "preserve" in text and "CRITICAL" in text
+    assert "explicitly authorizes including" in prose
+    assert "left untouched and outside publication" in prose
+    assert "re-read `git status --porcelain`" in text
 
 
 def test_index_and_document_delegate():
@@ -601,7 +647,7 @@ def test_grug_skill_contract():
 # steps silently unrun.
 # Prose disclaimers alone did not hold; these tests pin the structural rules.
 
-CONDUCTORS = ("start", "design", "finish", "implement")
+CONDUCTORS = ("start", "design", "finish", "implement", "audit")
 
 
 def test_conductors_externalize_their_steps_first():
@@ -658,10 +704,13 @@ def test_behavior_layer_carries_the_anti_stall_doctrine():
         assert needle in text, f"behavior layer missing {needle!r}"
 
 
-def test_behavior_layer_names_two_authority_words():
+def test_behavior_layer_names_three_authority_words():
     text = (ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text()
     assert "`/omc:design`" in text and "`$omc:design`" in text
     assert "`/omc:implement`" in text and "`$omc:implement`" in text
+    assert "`/omc:audit`" in text and "`$omc:audit`" in text
+    assert "omc review" in text
     assert "requires a committed design record" in text
     # the conductor list in the "Externalize a composed flow" bullet names design too
     assert "/omc:design" in text.split("Externalize a composed flow")[1]
+    assert "/omc:audit" in text.split("Externalize a composed flow")[1]

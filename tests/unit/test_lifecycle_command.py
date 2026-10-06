@@ -21,6 +21,14 @@ FULL = {
     "test_failing_build_blocks_publication[codex]",
     "test_failing_build_blocks_publication[claude]",
     "test_codex_implement_handoff_from_claude_record",
+    "test_codex_review_handoff_from_claude_implementation",
+}
+GOLDEN = {
+    "test_stage_start",
+    "test_stage_design",
+    "test_stage_agreed",
+    "test_stage_recorded",
+    "test_stage_implemented",
 }
 
 
@@ -46,3 +54,7 @@ def test_codex_gate_collects_every_codex_case_and_nothing_else():
 
 def test_lifecycle_full_collects_the_monolithic_runs():
     assert _collected("lifecycle-full") == FULL
+
+
+def test_default_golden_collects_through_implemented_without_audited():
+    assert _collected("golden") == GOLDEN

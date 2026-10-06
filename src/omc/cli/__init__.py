@@ -95,6 +95,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_impl.add_argument("--headless", action="store_true", help="Print-mode session (no exec)")
     _add_provider_flags(p_impl)
 
+    p_review = sub.add_parser(
+        "review", help="Audit this worktree's committed design record in a fresh session"
+    )
+    p_review.add_argument(
+        "--dry-run", action="store_true", help="Print the plan; no session launched"
+    )
+    p_review.add_argument("--headless", action="store_true", help="Print-mode session (no exec)")
+    _add_provider_flags(p_review)
+
     p_watch = sub.add_parser(
         "watch", help="Keep the primary checkout's base branch + knowledge graph fresh"
     )
@@ -290,6 +299,18 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
         from ..implement import run_implement  # lazy, like every newer command
 
         return run_implement(
+            ctx,
+            _with_provider(cfg, args.provider_override),
+            dry_run=args.dry_run,
+            headless=args.headless,
+        )
+    if args.command == "review":
+        cfg = _load_cfg_or_bail(ctx)
+        if cfg is None:
+            return 2
+        from ..review import run_review
+
+        return run_review(
             ctx,
             _with_provider(cfg, args.provider_override),
             dry_run=args.dry_run,

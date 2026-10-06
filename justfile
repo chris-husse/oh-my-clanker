@@ -27,8 +27,8 @@ e2e-tests *args:
 golden *args:
     bash scripts/e2e.sh golden {{args}}
 
-# The golden path INCLUDING the expensive `implemented` stage (evidence run for
-# omc's implement duration; writes the `implemented` snapshot).
+# The golden path INCLUDING the expensive `audited` stage. `implemented` is
+# already in the default golden tier; both stage snapshots are written here.
 golden-full *args:
     bash scripts/e2e.sh golden -m "e2e and golden and not codex_gate" {{args}}
 
@@ -45,7 +45,7 @@ e2e-rest *args:
 codex-gate *args:
     CODEX_AUTH_VOLUME=${CODEX_AUTH_VOLUME:-omc-e2e-codex-auth} bash scripts/e2e.sh rest -m "e2e and codex_gate and not expensive" -n 1 {{args}}
 
-# The monolithic lifecycle cases and the cross-provider handoff (expensive tier):
+# The monolithic lifecycle cases and both cross-provider handoffs (expensive tier):
 # evidence runs, never a gate. Serial through the E2E runner (prebuilt image, Ryuk
 # off); needs the Codex account volume (`just codex-login`).
 lifecycle-full *args:

@@ -316,7 +316,7 @@ def _plugin_payload_fixture(tmp_path, *, omc_version="0.1.7", create_payloads=Tr
     (repo / ".codex-plugin" / "plugin.json").write_text(
         json.dumps({"name": "omc", "version": "0.1.7", "skills": "./skills/"})
     )
-    for skill in ("start", "plan", "design", "implement"):
+    for skill in ("start", "plan", "design", "implement", "audit"):
         (repo / "skills" / skill).mkdir(parents=True)
         (repo / "skills" / skill / "SKILL.md").write_text(f"current {skill} skill")
     entries = [
@@ -339,7 +339,7 @@ def _plugin_payload_fixture(tmp_path, *, omc_version="0.1.7", create_payloads=Tr
                 f"current {skill} skill" if name == "omc" else "installed skill"
             )
             if name == "omc":
-                for extra in ("plan", "design", "implement"):
+                for extra in ("plan", "design", "implement", "audit"):
                     (installed / "skills" / extra).mkdir(parents=True)
                     (installed / "skills" / extra / "SKILL.md").write_text(f"current {extra} skill")
                 (installed / ".codex-plugin").mkdir()
@@ -382,6 +382,16 @@ def test_same_version_stale_omc_skill_is_rejected(tmp_path):
     installed = Path(additions["omc@oh-my-clanker"]["installedPath"])
     (installed / "skills" / "plan" / "SKILL.md").write_text("outdated plan")
     with pytest.raises(ValueError, match="stale"):
+        validate_payloads(listing, additions, home, repo_manifest)
+
+
+def test_installed_audit_skill_is_required(tmp_path):
+    from tests.e2e.codex_plugin_payload import validate_payloads
+
+    home, repo_manifest, listing, additions = _plugin_payload_fixture(tmp_path)
+    installed = Path(additions["omc@oh-my-clanker"]["installedPath"])
+    (installed / "skills" / "audit" / "SKILL.md").unlink()
+    with pytest.raises(ValueError, match="lacks audit skill"):
         validate_payloads(listing, additions, home, repo_manifest)
 
 
