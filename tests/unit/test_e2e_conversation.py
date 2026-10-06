@@ -899,6 +899,39 @@ def test_claude_stream_accepts_notification_origin_with_extra_metadata():
     assert parsed["provider_session_id"] == "session-1"
 
 
+def test_claude_stream_accepts_background_task_started_without_tool_input_flag():
+    from tests.e2e.conversation import parse_claude_stream
+
+    records = _claude_background_result_records()
+    records[1]["message"]["content"][0]["input"] = {}
+    parsed = parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
+    assert parsed["text"] == "The requested turn answered"
+    assert parsed["provider_session_id"] == "session-1"
+
+
+@pytest.mark.parametrize(
+    "change", ["foreground", "wrong-tool", "wrong-session", "orphan-agent", "wrong-task-id"]
+)
+def test_claude_stream_requires_matching_background_task_started(change):
+    from tests.e2e.conversation import parse_claude_stream
+
+    records = _claude_background_result_records()
+    records[1]["message"]["content"][0]["input"] = {}
+    started = records[2]
+    if change == "foreground":
+        started["is_backgrounded"] = False
+    elif change == "wrong-tool":
+        started["tool_use_id"] = "unrelated-tool"
+    elif change == "wrong-session":
+        started["session_id"] = "other-session"
+    elif change == "orphan-agent":
+        records[1]["message"]["content"] = []
+    else:
+        records[3]["task_id"] = "other-task"
+    with pytest.raises(ValueError, match="notification"):
+        parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
+
+
 def test_claude_stream_rejects_reused_auxiliary_result_identity():
     from tests.e2e.conversation import parse_claude_stream
 

@@ -130,4 +130,12 @@ def test_audit_repairs_committed_greeting_drift(stage_session):
     session.send(_direct_audit("claude"))
     turn = session.wait_turn(IMPLEMENT_TURN_BUDGET)
     _record_phase(session, m["repo"], m["worktree"], evidence, "audit", turn)
-    _assert_audited_artifacts(container, m["repo"], m["worktree"], m["branch"], evidence, drifted)
+    _assert_audited_artifacts(
+        container,
+        m["repo"],
+        m["worktree"],
+        m["branch"],
+        evidence,
+        drifted,
+        drift_repair=True,
+    )

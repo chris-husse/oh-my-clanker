@@ -8,7 +8,7 @@ description: Lifecycle conductor from a committed design record to an unpublishe
 Invoked directly (`$omc:implement` in Codex, `/omc:implement` in Claude) once
 `/omc:design` has committed the design record — in the same session, or in a
 fresh session that `omc implement [--claude|--codex]` seeded in this worktree.
-Three phases, strictly in order; each phase is a black-box command call.
+Four phases, strictly in order; each phase is a black-box command call.
 /omc:implement IS the user's approval to carry the committed record through
 committed implementation on this branch: do not ask permission between phases. The only
 interactive stops are genuine blockers and CRITICAL questions a plan cannot
@@ -21,8 +21,9 @@ satisfied by this direct command.
 
 ## Phase -1 — externalize the flow (first action, no exceptions)
 
-**Write the three phases into the task list now**, before the record gate:
-plan → subagent build → handoff. Mark each completed as you pass it.
+**Write the four phases into the task list now**, before the record gate:
+plan → subagent build → milestone gate → handoff. Mark each completed as you
+pass it.
 
 Every phase can end in a large, polished artifact — a
 1,200-line plan or a completed build. **The bigger the artifact, the more it
@@ -79,8 +80,9 @@ After EACH task's subagent completes (and its reviews pass), run
 need, run them) — before dispatching the next task. A failing check blocks
 progression: fix forward until check passes. Never substitute ad-hoc test
 commands for the stage; an unconfigured check is a pass, so this costs
-nothing on projects without one. Full E2E (`/omc:verify`) is NOT part of
-the per-task loop — it belongs to major milestones (finish runs it).
+nothing on projects without one. Full E2E (`/omc:verify`) is not part of
+the per-task loop; it runs once at the milestone gate below, and `finish`
+runs all four stages again on the squashed commit.
 
 Phase 1 → 2 is NOT a gate: once the plan is written and pressure-tested,
 start the subagent build immediately. Do not ask which execution approach
@@ -89,11 +91,26 @@ and do not ask permission to begin — the user typed /omc:implement, that
 IS the instruction to build. The only stops are CRITICAL questions a plan
 cannot answer and genuine blockers.
 
+## Phase 2b — milestone gate
+
+After the last task's subagent and reviews pass, its green `/omc:check`
+supplies this milestone's check. Invoke `/omc:build`, then `/omc:verify` as
+black-box project-stage proxies. Before invoking verify, announce on its own
+line that the project's `verify` stage is starting. Read each single-line
+`OMC_STAGE` verdict: only `"passed": true` permits progression, including
+an unconfigured stage with `"configured": false`. A missing verdict is a
+failure, even if the invocation otherwise appears successful.
+
+For any red stage, follow the behavior layer's stage-gate rule: bounded fix-forward, then a CRITICAL stop. Do not enter Phase 3 or make a handoff
+commit while the gate is red. After a required answer, resume this gate and
+the remaining phases under the same `/omc:implement` authorization.
+
 ## Phase 3 — hand off
 
 Commit the plan file and any tracked product or documentation changes left by
 the implementation workers. Restore only known tool drift, such as a lockfile
-changed by `uv run`; never discard unknown work. Verify the working tree is
+changed by `uv run` or the milestone verify run; never discard unknown work.
+Verify the working tree is
 clean and at least one task commit exists over the base. If either condition
 fails, resolve it before handoff.
 

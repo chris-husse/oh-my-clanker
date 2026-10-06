@@ -14,7 +14,8 @@ flow; after it arrives, resume without asking for another command.
 ## Phase -1 — externalize the flow (first action, no exceptions)
 
 Write every remaining phase into the task list now: gates → conformance →
-disposition → trace and commit → finish. Mark each completed as you pass it.
+disposition → post-fix gate → trace and commit → finish. Mark each completed
+as you pass it.
 The record verdict, findings and trace are arguments to the next phase, never
 the end of the turn.
 
@@ -68,10 +69,24 @@ For each Important finding, act in this order:
    the required answers, then resume this phase. Assigned fix workers inherit
    the `/omc:audit` authorization.
 
-After any code fixes, invoke `/omc:check` once. A failure means the repair is
-not ready; fix forward and rerun the check before proceeding. Record a clear
-disposition for every Important finding. List Minor findings without making
-them a gate.
+Record a clear disposition for every Important finding. List Minor findings
+without making them a gate.
+
+## Phase 2a — post-fix gate
+
+After the disposition pass, always invoke `/omc:check`, then `/omc:build`,
+whether or not a conformance fix changed files. If disposition step 1 fixed
+code in tracked product files, also invoke `/omc:verify`; otherwise the gate
+ends after build. Before invoking verify, announce on its own line that the
+project's `verify` stage is starting. Read each single-line `OMC_STAGE`
+verdict: only `"passed": true` permits progression, including an unconfigured
+stage with `"configured": false`. A missing verdict is a failure.
+
+For any red stage, follow the behavior layer's stage-gate rule: bounded fix-forward, then a CRITICAL stop. Fold an unresolved gate into the existing
+batched CRITICAL question. Do not invoke `finish` while the gate is red. If a
+gate repair itself changes tracked product files, run verify too. A required
+answer resumes this gate and the remaining phases under the same `/omc:audit`
+authorization.
 
 Before invoking `finish`, read `git status --porcelain` and classify every
 remaining path against the implementation, known stage/configuration work, and

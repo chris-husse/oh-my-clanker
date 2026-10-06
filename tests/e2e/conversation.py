@@ -136,7 +136,9 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
     result = None
     model = None
     pending_reads = {}
+    agent_tools = {}
     background_agents = {}
+    started_background_tasks = set()
     completed_background_tasks = set()
     notification_results = 0
     result_uuids = set()
@@ -154,6 +156,17 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
         if not isinstance(record, dict):
             raise ValueError("Claude stream record must be an object")
         if record.get("type") == "system":
+            if record.get("subtype") == "task_started" and record.get("is_backgrounded") is True:
+                tool_id = record.get("tool_use_id")
+                task_id = record.get("task_id")
+                session_id = record.get("session_id")
+                if (
+                    isinstance(tool_id, str)
+                    and isinstance(task_id, str)
+                    and isinstance(session_id, str)
+                    and agent_tools.get(tool_id) == session_id
+                ):
+                    started_background_tasks.add((session_id, tool_id, task_id))
             if record.get("subtype") == "task_notification" and record.get("status") == "completed":
                 tool_id = record.get("tool_use_id")
                 task_id = record.get("task_id")
@@ -162,7 +175,10 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
                     isinstance(tool_id, str)
                     and isinstance(task_id, str)
                     and isinstance(session_id, str)
-                    and background_agents.get(tool_id) == session_id
+                    and (
+                        background_agents.get(tool_id) == session_id
+                        or (session_id, tool_id, task_id) in started_background_tasks
+                    )
                 ):
                     completed_background_tasks.add((session_id, task_id))
         elif record.get("type") == "assistant":
@@ -175,12 +191,15 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
                         events.append({"type": "tool_use", "name": block.get("name")})
                         if (
                             block.get("name") in ("Agent", "Task")
-                            and isinstance(block.get("input"), dict)
-                            and block["input"].get("run_in_background") is True
                             and isinstance(block.get("id"), str)
                             and isinstance(record.get("session_id"), str)
                         ):
-                            background_agents[block["id"]] = record["session_id"]
+                            agent_tools[block["id"]] = record["session_id"]
+                            if (
+                                isinstance(block.get("input"), dict)
+                                and block["input"].get("run_in_background") is True
+                            ):
+                                background_agents[block["id"]] = record["session_id"]
                         if block.get("name") == "Read" and isinstance(block.get("input"), dict):
                             for skill, path in skill_paths.items():
                                 if block["input"].get("file_path") == path:

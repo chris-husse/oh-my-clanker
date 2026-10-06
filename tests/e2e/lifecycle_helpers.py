@@ -115,11 +115,12 @@ _CLI = "/root/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js"
 
 def _fixture(container, *, failing_stage: str | None = None, path="/work/lifecycle") -> str:
     """A real, small Python repo with all four local stages and a bare origin."""
-    assert failing_stage in (None, "build")
+    assert failing_stage in (None, "build", "verify")
     repo = make_work_repo(container, path)
     payload = r"""
+import sys
 from pathlib import Path
-root = Path("/work/lifecycle")
+root = Path(sys.argv[1])
 (root / ".gitignore").write_text("__pycache__/\n.claude/settings.local.json\n")
 (root / "greeting.py").write_text("def greeting():\n    return 'Goodbye, world!'\n")
 (root / "test_greeting.py").write_text(
@@ -142,12 +143,19 @@ for stage in ("check", "build", "verify", "review"):
         "verify": "python3 -m unittest discover -v",
         "review": "git diff --check",
     }[stage]
-    fail = (
-        "\ntest ! -e /tmp/omc-external-build-unavailable"
-        if stage == "build" else ""
-    )
+    fail = ""
+    if stage == "build":
+        fail = "\ntest ! -e /tmp/omc-external-build-unavailable"
+    elif stage == "verify":
+        fail = (
+            "\nif test -e "
+            '"${OMC_EXTERNAL_VERIFY_SENTINEL:-/tmp/omc-external-verify-unavailable}"; then\n'
+            "  echo 'E2E environment unavailable: verify sentinel present' >&2\n"
+            "  exit 1\nfi"
+        )
     script = (
-        f"#!/bin/sh\nset -eu\nprintf '{stage}\\n' >> /tmp/omc-lifecycle-stages\n"
+        f"#!/bin/sh\nset -eu\nprintf '{stage}\\n' "
+        '>> "${OMC_LIFECYCLE_MARKER:-/tmp/omc-lifecycle-stages}"\n'
         f"{command}{fail}\n"
     )
     scripts = root / ".omc" / "stage-scripts"
@@ -160,10 +168,10 @@ for stage in ("check", "build", "verify", "review"):
         "Report the actual exit status.\n"
     )
 """
-    rc, out = run_in(container, ["python3", "-c", payload])
+    rc, out = run_in(container, ["python3", "-c", payload, repo])
     assert rc == 0, out
-    if failing_stage == "build":
-        rc, out = run_in(container, ["touch", "/tmp/omc-external-build-unavailable"])
+    if failing_stage in ("build", "verify"):
+        rc, out = run_in(container, ["touch", f"/tmp/omc-external-{failing_stage}-unavailable"])
         assert rc == 0, out
     rc, out = run_in(
         container,
@@ -624,6 +632,22 @@ def _assert_finish_stage_order(markers):
     ), markers
 
 
+def _assert_implement_stage_order(markers: str) -> None:
+    """Require an implementation check before adjacent build and verify markers."""
+    seen = markers.splitlines()
+    assert any(
+        stage == "build" and i + 1 < len(seen) and seen[i + 1] == "verify" and "check" in seen[:i]
+        for i, stage in enumerate(seen)
+    ), f"implementation milestone lacks check → build → verify: {markers}"
+
+
+def _assert_audit_verify_count(markers: str, *, drift_repair: bool) -> None:
+    if drift_repair:
+        assert markers.splitlines().count("verify") >= 3, (
+            f"drift repair requires implementation, audit, and finish verification: {markers}"
+        )
+
+
 def _assert_successful_implementation(
     container, provider, session, repo, worktree, branch, evidence, baseline
 ):
@@ -636,7 +660,9 @@ def _assert_successful_implementation(
     return recorded
 
 
-def _assert_audited_artifacts(container, repo, worktree, branch, evidence, implemented):
+def _assert_audited_artifacts(
+    container, repo, worktree, branch, evidence, implemented, *, drift_repair=False
+):
     final = evidence["turns"][-1]["snapshot"]
     records = [key for key in implemented["spec_plan"] if "/specs/" in key]
     assert len(records) == 1, f"expected one design record: {records}"
@@ -653,6 +679,7 @@ def _assert_audited_artifacts(container, repo, worktree, branch, evidence, imple
     rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
     assert rc == 0, "project stages never executed"
     _assert_finish_stage_order(markers)
+    _assert_audit_verify_count(markers, drift_repair=drift_repair)
     _assert_published_fix(
         container,
         repo,
@@ -680,3 +707,6 @@ def _assert_implemented_artifacts(container, repo, worktree, branch, evidence, r
         container, ["git", "-C", worktree, "rev-list", "--count", "origin/main..HEAD"]
     )
     assert rc == 0 and int(commits.strip()) >= 1, f"implementation left no task commits: {commits}"
+    rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
+    assert rc == 0, "implementation project stages never executed"
+    _assert_implement_stage_order(markers)

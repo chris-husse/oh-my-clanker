@@ -35,7 +35,28 @@ repo). In any other repository, ignore everything in this section.
   track" gate (build what the unit tests need, run them) — use it
   constantly while working. `/omc:build` builds the world, no tests.
   `/omc:verify` is full E2E — run it only after major milestones, never as
-  a routine dev-loop gate.
+  a routine dev-loop gate. The end of `/omc:implement`'s build is a milestone:
+  its final green check is followed by `/omc:build` → `/omc:verify` before
+  handoff. `/omc:audit` always runs `/omc:check` → `/omc:build` after its
+  disposition pass, and also `/omc:verify` when its fixes changed tracked
+  product files. `/omc:finish` runs all four stages on the squashed commit.
+- **stage-gate rule — bounded fix-forward, then a CRITICAL stop**: Consume
+  each stage's single `OMC_STAGE` verdict. Only `"passed": true` passes;
+  `"configured": false` is success when `"passed": true`. A `"passed": false`
+  verdict or no verdict fails closed. On failure, dispatch one fix subagent at
+  the heavy coding tier with the failed stage's `summary` as its brief (or
+  the observed failure when no verdict exists), run `/omc:check`, then
+  restart from `/omc:build` and rerun the remaining gate stages in order.
+  A failed `/omc:check` blocks progression to build. It is the cycle's red
+  stage; any further repair consumes the remaining cycle budget and never
+  resets the bound. Allow at most two fix-and-rerun cycles, or three gate
+  runs total when checks pass; even a flaky pass on rerun consumes a cycle.
+  At the bound, stop with one CRITICAL question naming the
+  red stage, its failure summary, what both fixes tried, and what answer is
+  needed from the user. No later phase runs on a red gate: implement makes
+  no handoff commit or continuation offer, and audit invokes no `finish`.
+  A required answer resumes the remaining phases under the same authorization;
+  in a headless run, make the question the final output.
 - **Ask the graph, not grep**: `/omc:explain <question>` answers from the
   project's GitNexus knowledge graph and docs.
 - **Model selection**: the main session runs the model chosen in

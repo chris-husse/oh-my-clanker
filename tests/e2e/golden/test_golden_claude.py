@@ -201,9 +201,10 @@ def test_stage_recorded(flow):
     flow.done("recorded")
 
 
-# Implement took 38.4 s after the audit split (2026-10-06), below the 240 s
-# default-tier limit. The CLI handoff on Claude exercises the shared launch
-# path; the in-session path is covered by variations/test_from_recorded.py.
+# Implement took 57.5–141.4 s with the milestone gate (two passing runs on
+# 2026-10-06), below the 240 s actor budget. The CLI handoff on Claude
+# exercises the shared launch path; the in-session path is covered by
+# variations/test_from_recorded.py.
 def test_stage_implemented(flow):
     _require(flow, "recorded")
     flow.implement_session = f"{flow.session.slug}-implement"
@@ -233,6 +234,24 @@ def test_stage_audited(flow):
     _require(flow, "implemented")
     rc, out = run_in(
         flow.container,
+        [
+            "python3",
+            "-c",
+            "from pathlib import Path; "
+            "Path('greeting.py').write_text(\"def greeting():\\n    return 'Goodbye, world!'\\n\")",
+        ],
+        cwd=flow.worktree,
+    )
+    assert rc == 0, out
+    rc, out = run_in(flow.container, ["git", "add", "greeting.py"], cwd=flow.worktree)
+    assert rc == 0, out
+    rc, out = run_in(
+        flow.container, ["git", "commit", "-m", "introduce greeting drift"], cwd=flow.worktree
+    )
+    assert rc == 0, out
+    drifted = flow.session.snapshot(flow.worktree)
+    rc, out = run_in(
+        flow.container,
         ["omc", "review", "--claude", "--headless"],
         cwd=flow.worktree,
         timeout=IMPLEMENT_TURN_BUDGET,
@@ -240,6 +259,12 @@ def test_stage_audited(flow):
     assert rc == 0, out
     _record_phase(flow.session, flow.repo, flow.worktree, flow.evidence, "audit", {"text": out})
     _assert_audited_artifacts(
-        flow.container, flow.repo, flow.worktree, flow.branch, flow.evidence, flow.implemented
+        flow.container,
+        flow.repo,
+        flow.worktree,
+        flow.branch,
+        flow.evidence,
+        drifted,
+        drift_repair=True,
     )
     flow.done("audited")
