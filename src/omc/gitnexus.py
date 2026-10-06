@@ -18,7 +18,13 @@ from typing import TYPE_CHECKING
 from .errors import OmcError
 from .mirror import DOCS_MIRROR_REL, clear_docs_mirror, mirror_dir
 from .toolctx import ToolContext
-from .wikirun import _WIKI_POLL_SECONDS, _WIKI_STALL_SECONDS, GitNexusProgress, PageCountTracker
+from .wikirun import (
+    _WIKI_POLL_SECONDS,
+    _WIKI_STALL_SECONDS,
+    GitNexusProgress,
+    PageCountTracker,
+    wiki_failure_excerpt,
+)
 
 if TYPE_CHECKING:  # annotation-only; ToolContext stays the subprocess boundary
     import subprocess
@@ -361,7 +367,7 @@ def _run_wiki(ctx: ToolContext, cfg: Config, root: Path, say) -> bool:
         # bug; depwatch narrates headless runs the same way). Heartbeats repeat
         # the phase and are not news; an unchanged detail is not either.
         nonlocal narrated
-        gn.feed(line)
+        gn.feed(run.redact(line))
         if bar.enabled or gn.phase in ("", "heartbeat") or gn.detail == narrated:
             return
         narrated = gn.detail
@@ -384,10 +390,7 @@ def _run_wiki(ctx: ToolContext, cfg: Config, root: Path, say) -> bool:
         say(f"✗ wiki stalled — no progress for {int(_WIKI_STALL_SECONDS)}s; killed")
         return False
     if cp.returncode != 0:
-        # redact BEFORE truncating: a key cut in half still leaks its prefix.
-        # Tail, not head: GitNexus prints the error after its pino records and
-        # progress lines.
-        say(f"✗ wiki failed: {run.redact((cp.stderr or cp.stdout or '').strip())[-400:]}")
+        say(f"✗ wiki failed (exit {cp.returncode}): {wiki_failure_excerpt(cp, run.redact)}")
     return True  # the recomputed verdict, not the exit code, decides
 
 

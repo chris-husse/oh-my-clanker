@@ -876,17 +876,30 @@ def _claude_background_result_records():
     ]
 
 
-def test_claude_stream_keeps_requested_turn_when_background_notification_auto_resumes():
+def test_claude_stream_reports_the_final_answer_after_a_background_notification_resumes():
+    """Observed live 2026-10-06: with the implementer Agent backgrounded, the
+    requested-turn result reads "waiting for its completion notification" and
+    the real answer (the verify question) is the task-notification result that
+    `claude -p` emits before exiting. The turn's text is the last answer."""
     from tests.e2e.conversation import parse_claude_stream
 
     records = _claude_background_result_records()
     parsed = parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
     assert parsed == {
-        "text": "The requested turn answered",
+        "text": "The background task finished",
         "provider_session_id": "session-1",
         "model_observed": "claude-fable-5-1",
         "events": [{"type": "tool_use", "name": "Agent"}],
     }
+
+
+def test_claude_stream_without_notification_keeps_the_requested_turn_text():
+    from tests.e2e.conversation import parse_claude_stream
+
+    records = _claude_background_result_records()[:-1]
+    records = [r for r in records if r.get("subtype") != "task_notification"]
+    parsed = parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
+    assert parsed["text"] == "The requested turn answered"
 
 
 def test_claude_stream_accepts_notification_origin_with_extra_metadata():
@@ -895,7 +908,7 @@ def test_claude_stream_accepts_notification_origin_with_extra_metadata():
     records = _claude_background_result_records()
     records[-1]["origin"] = {"kind": "task-notification", "task_id": "agent-task"}
     parsed = parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
-    assert parsed["text"] == "The requested turn answered"
+    assert parsed["text"] == "The background task finished"
     assert parsed["provider_session_id"] == "session-1"
 
 
@@ -905,7 +918,7 @@ def test_claude_stream_accepts_background_task_started_without_tool_input_flag()
     records = _claude_background_result_records()
     records[1]["message"]["content"][0]["input"] = {}
     parsed = parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
-    assert parsed["text"] == "The requested turn answered"
+    assert parsed["text"] == "The background task finished"
     assert parsed["provider_session_id"] == "session-1"
 
 

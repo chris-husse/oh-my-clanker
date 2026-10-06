@@ -2,6 +2,57 @@
 project wiki (spec 2026-09-27-stale-knowledge-snapshot-self-heal §2)."""
 
 import json
+from subprocess import CompletedProcess
+
+
+def test_wiki_failure_excerpt_reads_stderr_before_stdout_and_drops_progress():
+    from omc.wikirun import wiki_failure_excerpt
+
+    cp = CompletedProcess(
+        ["node"],
+        1,
+        stdout="\nError: capped\n",
+        stderr='GITNEXUS_PROGRESS {"detail":"private progress"}\n\nwarning\n',
+    )
+    assert wiki_failure_excerpt(cp, lambda s: s) == "warning\nError: capped"
+
+
+def test_wiki_failure_excerpt_handles_missing_streams():
+    from omc.wikirun import wiki_failure_excerpt
+
+    assert wiki_failure_excerpt(CompletedProcess(["node"], 1, None, None), lambda s: s) == ""
+    assert (
+        wiki_failure_excerpt(CompletedProcess(["node"], 1, "Error: capped", None), lambda s: s)
+        == "Error: capped"
+    )
+
+
+def test_wiki_failure_excerpt_keeps_last_400_characters():
+    from omc.wikirun import wiki_failure_excerpt
+
+    cp = CompletedProcess(["node"], 1, "Error: capped", "x" * 500)
+    excerpt = wiki_failure_excerpt(cp, lambda s: s)
+    assert len(excerpt) == 400
+    assert excerpt.endswith("Error: capped")
+
+
+def test_wiki_failure_excerpt_redacts_both_streams_before_tail_cut():
+    from omc.wikirun import wiki_failure_excerpt
+
+    key = "sk-ant-test-0123456789abcdef"
+
+    def redact(s: str) -> str:
+        return s.replace(key, "******")
+
+    assert (
+        wiki_failure_excerpt(CompletedProcess(["node"], 1, "", key + " stderr"), redact)
+        == "****** stderr"
+    )
+    cp = CompletedProcess(["node"], 1, key + "x" * 390, key + " stderr")
+    excerpt = wiki_failure_excerpt(cp, redact)
+    assert key not in excerpt and key[:12] not in excerpt
+    assert "******" in excerpt
+    assert len(excerpt) == 400
 
 
 def test_tracker_lives_in_wikirun_and_is_reexported_by_dependency():

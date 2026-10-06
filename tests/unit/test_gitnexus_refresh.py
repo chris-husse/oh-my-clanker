@@ -275,15 +275,48 @@ def test_wiki_api_failure_tail_is_redacted_before_truncation(tmp_path):
     text = node.read_text()
     assert arm in text
     noise = "x" * 370 + f"LLM API error {key} boom"
-    node.write_text(text.replace(arm, f"{arm}printf '%s' '{noise}' >&2; exit 1; "))
+    progress = 'GITNEXUS_PROGRESS {"detail":"private progress"}'
+    node.write_text(
+        text.replace(arm, f"{arm}echo '{progress}' >&2; printf '%s' '{noise}'; exit 1; ")
+    )
     said = []
     v = refresh_knowledge(
         ctx, _api_cfg(key), str(repo), "main", say=said.append, documentation=True, reset=False
     )
     assert not v.fresh
-    assert any(s.startswith("✗ wiki failed: ") for s in said)
+    failed = next(s for s in said if s.startswith("✗ wiki failed (exit 1): "))
+    assert "LLM API error" in failed and "private progress" not in failed
     assert not any(key in s or key[:12] in s for s in said)
     assert any("******" in s for s in said)
+
+
+def test_wiki_api_success_redacts_progress_before_narration_and_tracker(tmp_path, monkeypatch):
+    import omc.cli.progress_bar as pb
+
+    key = "sk-ant-test-0123456789abcdef"
+    trackers = []
+    real_bar = pb.BarThread
+
+    def capture_bar(tracker):
+        trackers.append(tracker)
+        return real_bar(tracker)
+
+    monkeypatch.setattr(pb, "BarThread", capture_bar)
+    progress = (
+        'GITNEXUS_PROGRESS {"phase":"grouping","percent":28,'
+        f'"detail":"Fallback after API error {key}; grouping by directory"}}'
+    )
+    ctx, repo = _wiki_behind_with_speaking_stub(tmp_path, extra_shell=f"echo '{progress}' >&2; ")
+    said = []
+    v = refresh_knowledge(
+        ctx, _api_cfg(key), str(repo), "main", say=said.append, documentation=True, reset=False
+    )
+    assert v.fresh
+    assert any("Fallback after API error ******" in line for line in said)
+    assert not any(key in line for line in said)
+    assert trackers[0].percent == 28
+    assert "Fallback after API error ******" in trackers[0].detail
+    assert key not in trackers[0].detail
 
 
 _GN_LINES = (
@@ -362,8 +395,11 @@ def test_wiki_failure_excerpt_is_the_tail_where_the_error_is(tmp_path):
     node = tmp_path / "bin" / "node"
     arm = '*" wiki --provider"*) '
     noise = "x" * 500 + " LLM API error: boom"
-    node.write_text(node.read_text().replace(arm, f"{arm}printf '%s' '{noise}' >&2; exit 1; "))
+    progress = 'GITNEXUS_PROGRESS {"detail":"private progress"}'
+    command = f"{arm}echo '{progress}' >&2; printf '%s' '{noise}'; exit 1; "
+    node.write_text(node.read_text().replace(arm, command))
     v, said = _run(ctx, repo, documentation=True, reset=False)
     assert not v.fresh
-    failed = next(s for s in said if s.startswith("✗ wiki failed: "))
+    failed = next(s for s in said if s.startswith("✗ wiki failed (exit 1): "))
     assert "LLM API error: boom" in failed
+    assert "private progress" not in failed

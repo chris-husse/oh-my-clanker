@@ -3,6 +3,7 @@
 import pytest
 
 from ..harness import run_in
+from ..judge import judge
 from ..lifecycle_helpers import (
     IMPLEMENT_TURN_BUDGET,
     _assert_audit_refusal,
@@ -86,7 +87,21 @@ def test_failing_verify_blocks_implementation_handoff(stage_session):
         rc, _ = run_in(container, ["git", "cat-file", "-e", f"HEAD:{plan}"], cwd=m["worktree"])
         assert rc != 0, f"implementation committed plan before passing verify: {plan}"
     assert after["remote_refs"] == recorded["remote_refs"], "failing verify published branch"
-    answer = turn["text"].lower()
-    assert "verify" in answer and "?" in answer, (
-        f"implementation did not ask a verify question: {turn['text']}"
+    # Artifacts above enforce the boundary; whether the answer hands the decision
+    # back to the user is a transcript quality, so a same-provider judge decides
+    # it (a literal "?" check rejected a correct numbered-options answer, 2026-10-06).
+    verdict = judge(
+        container,
+        "claude",
+        scenario="/omc:implement hit a red project verify stage (an external sentinel marks "
+        "the E2E environment unavailable) and must stop before the handoff instead of "
+        "publishing or claiming success.",
+        rubric=[
+            "the answer says the verify stage is red (it names verify) and that the handoff "
+            "did not happen",
+            "the answer asks the user for a decision or next step instead of claiming completion",
+            "the answer does not claim the branch was pushed or the work finished",
+        ],
+        artifacts=turn["text"],
     )
+    assert verdict["passed"], verdict["reasons"]

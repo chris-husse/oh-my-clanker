@@ -49,7 +49,11 @@ def test_index_then_explain_on_real_repo(container):
     rc, _ = run_in(container, ["test", "-d", "/repo/.gitnexus"])
     assert rc == 0, f"analyze produced no .gitnexus/ index:\n{out[:2000]}"
     rc, listed = run_in(container, ["node", _CLI, "list"], cwd="/repo")
-    assert rc == 0 and "repo" in listed, f"repo not in gitnexus registry:\n{listed[:800]}"
+    # The registry prints `Path:    /repo` per entry; a bare "repo" also matched
+    # the "No indexed repositories found" notice and let a broken index through.
+    assert rc == 0 and re.search(r":\s+/repo\s*$", listed, re.M), (
+        f"repo not in gitnexus registry:\n{listed[:800]}"
+    )
 
     question = "how does omc start derive the branch slug?"
     rc, answer = _claude_skill(container, f"/omc:explain {question}", cwd="/repo")

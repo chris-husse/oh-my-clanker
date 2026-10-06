@@ -15,6 +15,10 @@ import json
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from subprocess import CompletedProcess
 
 # Liveness window for wiki generation: the run may take 40+ minutes, but 300 s
 # with zero progress (no new page on disk, no child output) marks a wedge.
@@ -34,6 +38,16 @@ _WIKI_POLL_SECONDS = 1.0
 # Prefix of the progress lines the fork's wiki command prints on stderr when
 # piped (fork src/cli/wiki-progress.ts): `GITNEXUS_PROGRESS {"phase","percent","detail"}`.
 PROGRESS_PREFIX = "GITNEXUS_PROGRESS "
+
+
+def wiki_failure_excerpt(cp: CompletedProcess[str], redact: Callable[[str], str]) -> str:
+    """Show the useful tail of a failed wiki run, with secrets and progress removed."""
+    lines = (
+        line.strip()
+        for stream in (cp.stderr, cp.stdout)
+        for line in redact(stream or "").splitlines()
+    )
+    return "\n".join(line for line in lines if line and not line.startswith(PROGRESS_PREFIX))[-400:]
 
 
 class PageCountTracker:

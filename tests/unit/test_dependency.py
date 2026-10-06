@@ -387,6 +387,10 @@ def test_document_failed_wiki_keeps_documented_false(tmp_path, capsys):
     ctx, _, nodecalls = _ctx(tmp_path)
     _seed_indexed(ctx, with_wiki=False)  # stub creates no wiki dir -> mirror impossible
     assert run_document(ctx, "github.com/foo/bar") == 1
+    err = capsys.readouterr().err
+    missing = ctx.home / "dependencies" / "github.com" / "foo" / "bar" / H / ".gitnexus" / "wiki"
+    assert str(missing) in err
+    assert "exit 0" not in err
     from omc.dependency import load_manifest
 
     entry = load_manifest(ctx.home)["dependencies"]["github.com/foo/bar"]["commits"][H]
@@ -693,12 +697,14 @@ def _api_config(ctx, *, model="claude-sonnet-5-5", key="sk-ant-test-0123456789ab
     return key
 
 
-def _env_echoing_node(tmp_path, nodecalls, *, rc=0, stderr=""):
+def _env_echoing_node(tmp_path, nodecalls, *, rc=0, stderr="", stdout=""):
     node = tmp_path / "bin" / "node"
     err = f'echo "{stderr}" >&2\n' if stderr else ""
+    out = f'echo "{stdout}"\n' if stdout else ""
     node.write_text(
         f'#!/bin/sh\necho "$@" >> "{nodecalls}"\n'
-        f'echo "KEY=$GITNEXUS_API_KEY" >> "{nodecalls}"\npwd >> "{nodecalls}"\n{err}exit {rc}\n'
+        f'echo "KEY=$GITNEXUS_API_KEY" >> "{nodecalls}"\npwd >> "{nodecalls}"\n'
+        f"{err}{out}exit {rc}\n"
     )
     node.chmod(node.stat().st_mode | stat.S_IXUSR)
 
@@ -722,6 +728,37 @@ def test_document_api_backend_key_only_in_child_env(tmp_path, capsys):
     assert "· via claude api (claude-sonnet-5-5)" in out.err
 
 
+def test_document_api_success_redacts_progress_before_tracking(tmp_path, capsys, monkeypatch):
+    import omc.dependency as dep
+
+    ctx, _, nodecalls = _ctx(tmp_path)
+    _seed_indexed(ctx)
+    key = _api_config(ctx)
+    trackers = []
+    real_tracker = dep.GitNexusProgress
+
+    def capture_tracker():
+        tracker = real_tracker()
+        trackers.append(tracker)
+        return tracker
+
+    monkeypatch.setattr(dep, "GitNexusProgress", capture_tracker)
+    node = tmp_path / "bin" / "node"
+    node.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{nodecalls}"\n'
+        'echo \'GITNEXUS_PROGRESS {"phase":"grouping","percent":28,'
+        f'"detail":"Fallback after API error {key}; grouping by directory"}}\' >&2\n'
+        "exit 0\n"
+    )
+    assert run_document(ctx, "github.com/foo/bar") == 0
+    output = capsys.readouterr()
+    assert key not in output.out + output.err
+    assert trackers[0].percent == 28
+    assert "Fallback after API error ******" in trackers[0].detail
+    assert key not in trackers[0].detail
+
+
 def test_document_cli_backend_with_a_stored_key_passes_no_key(tmp_path, capsys):
     from omc.config import store
     from omc.config.schema import SecretsConfig
@@ -742,10 +779,18 @@ def test_document_api_failure_tail_is_redacted_before_truncation(tmp_path, capsy
     # 370 chars of noise, then the key spans offsets 384-412: a naive [:400] would
     # cut it in half and leak `sk-ant-test-0123`; redaction must happen first,
     # and the redacted line (395 chars) keeps its ****** inside the cut.
-    _env_echoing_node(tmp_path, nodecalls, rc=1, stderr="x" * 370 + f"LLM API error {key} boom")
+    _env_echoing_node(
+        tmp_path,
+        nodecalls,
+        rc=1,
+        stderr='GITNEXUS_PROGRESS {"detail":"private progress"}',
+        stdout="x" * 370 + f"LLM API error {key} boom",
+    )
     assert run_document(ctx, "github.com/foo/bar") == 1
     err = capsys.readouterr().err
     assert key not in err and key[:12] not in err and "******" in err
+    assert "error: gitnexus wiki failed (exit 1): " in err
+    assert "LLM API error" in err and "private progress" not in err
 
 
 def test_document_api_without_key_is_a_clean_error(tmp_path, capsys):
@@ -797,9 +842,16 @@ def test_document_reports_gitnexus_percent_over_the_page_count_once_it_speaks(
 def test_document_failure_excerpt_is_the_tail_where_the_error_is(tmp_path, capsys):
     ctx, _, nodecalls = _ctx(tmp_path)
     _seed_indexed(ctx)
-    # pino records and progress lines precede the error on stderr; a head cut
-    # would show 400 chars of noise and no error.
-    _env_echoing_node(tmp_path, nodecalls, rc=1, stderr="x" * 500 + " LLM API error: boom")
+    # Progress arrives on stderr while GitNexus's final error arrives on stdout.
+    _env_echoing_node(
+        tmp_path,
+        nodecalls,
+        rc=1,
+        stderr='GITNEXUS_PROGRESS {"detail":"private progress"}',
+        stdout="x" * 500 + " LLM API error: boom",
+    )
     assert run_document(ctx, "github.com/foo/bar") == 1
     err = capsys.readouterr().err
+    assert "error: gitnexus wiki failed (exit 1): " in err
     assert "LLM API error: boom" in err
+    assert "private progress" not in err
