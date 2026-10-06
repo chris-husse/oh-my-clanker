@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from pathlib import Path
+
+from ..errors import OmcError
 
 
 class Provider(ABC):
@@ -110,6 +114,24 @@ class Provider(ABC):
         boolean; [] = no such command (the headless model probe is the only
         login check). Pure like everything here."""
         return []
+
+    @abstractmethod
+    def instructions_file(self, env: Mapping[str, str]) -> Path:
+        """Global instruction file path derived solely from the supplied environment."""
+
+    @staticmethod
+    def _instruction_dir(env: Mapping[str, str], override: str, default: str) -> Path:
+        raw = env.get(override)
+        home = env.get("HOME")
+        if not raw:
+            if not home:
+                raise OmcError(f"HOME is required to locate global instructions for {override}")
+            raw = str(Path(home) / default)
+        if raw == "~" or raw.startswith("~/"):
+            if not home:
+                raise OmcError(f"HOME is required to expand {override}")
+            return Path(home) if raw == "~" else Path(home) / raw[2:]
+        return Path(raw)
 
     @abstractmethod
     def plugin_update_argvs(self, marketplace_source: str | None = None) -> list[list[str]]:

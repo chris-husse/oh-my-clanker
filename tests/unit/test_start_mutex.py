@@ -39,11 +39,9 @@ _HOLDER = (
 
 
 @pytest.fixture(autouse=True)
-def _no_agents_chain(monkeypatch):
-    """run_start calls ensure_agents_chain unguarded when cwd is a real repo;
-    the AGENTS.md distribution asset may be absent in a dev venv and is
-    orthogonal to the mutex under test — neutralize it."""
-    monkeypatch.setattr("omc.start.ensure_agents_chain", lambda ctx, root: "ok")
+def _no_global_instruction_write(monkeypatch):
+    """Mutex tests isolate the global instruction step from lock behavior."""
+    monkeypatch.setattr("omc.start.ensure_global_section", lambda ctx, name: "current")
 
 
 @pytest.fixture(autouse=True)

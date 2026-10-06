@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import docsllm
-from .agentsmd import ensure_agents_chain
+from .agentsmd import ensure_global_section, seed_project_agents_md
 from .config import store
 from .config.schema import GlobalConfig, ProjectConfig, ProviderConfig, SecretsConfig
 from .errors import ConfigError, OmcError, Refusal
@@ -178,7 +178,7 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
             store.save_project(root, pcfg)
             print(f"Updated {store.project_config_path(root)}")
         _migrate_legacy(ctx, migrated=write_global, carried=write_project)
-        _ensure_repo_chain(ctx)
+        _ensure_instructions(ctx, gcfg, root)
         _ensure_plugins(ctx, gcfg)
         print(_PLUGIN_HINTS)
         return 0
@@ -206,7 +206,7 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
     else:
         print("(not inside a git repository — worktree.* settings are configured per-repo)")
     _migrate_legacy(ctx, migrated=True, carried=root is not None)
-    _ensure_repo_chain(ctx)
+    _ensure_instructions(ctx, gcfg, root)
     _ensure_plugins(ctx, gcfg)
     print(_PLUGIN_HINTS)
     return 0
@@ -247,12 +247,18 @@ def _ensure_plugins(ctx: ToolContext, cfg: GlobalConfig) -> None:
         print(f"{mark} {name}: omc plugin {status}", file=sys.stderr)
 
 
-def _ensure_repo_chain(ctx: ToolContext) -> None:
-    """In a git repo, verify/create the AGENTS.md control chain; outside one,
-    configure is global-only and the chain is skipped."""
-    root = repo_root(ctx)
+def _ensure_instructions(ctx: ToolContext, cfg: GlobalConfig, root: Path | None) -> None:
+    """Refresh configured harnesses and the effective default, then seed repo guidance."""
+    for name in dict.fromkeys((*cfg.llm.providers, cfg.llm.default)):
+        try:
+            ensure_global_section(ctx, name)
+        except (OmcError, OSError) as exc:
+            _say(f"✗ {name}: {exc}")
     if root is not None:
-        ensure_agents_chain(ctx, root)
+        try:
+            seed_project_agents_md(root)
+        except OSError as exc:
+            _say(f"✗ project instructions: {exc}")
 
 
 def _walkthrough_global(

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from pathlib import Path
 
 from .base import Provider
 
 
 class CodexProvider(Provider):
     name = "codex"
+
+    def instructions_file(self, env: Mapping[str, str]) -> Path:
+        # Codex 0.158 loads this global AGENTS.md in every session.
+        return self._instruction_dir(env, "CODEX_HOME", ".codex") / "AGENTS.md"
 
     def models(self):
         return []  # free-text entry; codex model ids move fast

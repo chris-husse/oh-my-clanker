@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from . import notify, worktree
-from .agentsmd import ensure_agents_chain
+from .agentsmd import ensure_global_section, seed_project_agents_md
 from .config.schema import Config
 from .errors import OmcError
 from .gitnexus import ensure_gitnexus, snapshot_freshness
@@ -107,10 +107,16 @@ def run_start(
         if rc:
             raise OmcError("GitNexus is required but could not be installed")
 
+    try:
+        ensure_global_section(ctx, name)
+    except (OmcError, OSError) as exc:
+        _say(f"✗ {name} global instructions: {exc}")
     root = repo_root(ctx)
     if root is not None:
-        # Warn-but-proceed: a blocked chain is configure's fight, not start's.
-        ensure_agents_chain(ctx, root)
+        try:
+            seed_project_agents_md(root)
+        except OSError as exc:
+            _say(f"✗ project instructions: {exc}")
 
     _say(f"→ generating slug via {name} (LLM call, typically 15–60s)…")
     slug = fetch_slug(ctx, cfg, context)  # raises Refusal with the skill's message

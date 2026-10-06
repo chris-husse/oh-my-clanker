@@ -41,19 +41,22 @@ def test_watch_once_syncs_and_reindexes_for_real(container):
     assert rc == 0, "ensure_wt_config did not seed the starter"
 
 
-def test_configure_in_repo_builds_agents_chain(container):
+def test_configure_in_repo_seeds_project_and_global_instructions(container):
     configure_omc(container, "claude")
     repo = make_work_repo(container)
+    rc, out = run_in(container, ["rm", "/root/.claude/CLAUDE.md"])
+    assert rc == 0, out
     rc, out = run_in(container, ["omc", "configure", "--set", "llm.default=claude"], cwd=repo)
     assert rc == 0, out
-    rc, _ = run_in(container, ["test", "-L", f"{repo}/AGENTS.md"])
-    assert rc == 0, "AGENTS.md is not a symlink"
-    rc, _ = run_in(container, ["test", "-L", f"{repo}/CLAUDE.md"])
-    assert rc == 0, "CLAUDE.md is not a symlink"
-    rc, resolved = run_in(
-        container, ["bash", "-c", f"cat {repo}/AGENTS.md && cat {repo}/CLAUDE.md"]
-    )
-    assert rc == 0 and resolved.count("omc behavior layer") == 2, resolved[:400]
+    for name in ("AGENTS.md", "CLAUDE.md", ".gitignore"):
+        rc, _ = run_in(container, ["test", "-e", f"{repo}/{name}"])
+        assert rc == 1, f"configure created root {name}"
+        rc, _ = run_in(container, ["test", "-L", f"{repo}/{name}"])
+        assert rc == 1, f"configure created root {name} symlink"
+    rc, global_instructions = run_in(container, ["cat", "/root/.claude/CLAUDE.md"])
+    assert rc == 0, global_instructions
+    assert global_instructions.count("<!-- omc:begin ") == 1
+    assert "# omc behavior layer" in global_instructions
     rc, _ = run_in(container, ["test", "-f", f"{repo}/.omc/config/AGENTS.md"])
     assert rc == 0, "project layer not seeded"
 

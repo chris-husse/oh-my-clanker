@@ -1,38 +1,34 @@
-"""The AGENTS.md control chain, v2: root AGENTS.md + CLAUDE.md are
-machine-local, gitignored symlinks into the INSTALLED omc package's
-distribution/AGENTS.md, which defers to the project-owned
-.omc/config/AGENTS.md.
-
-`uv tool upgrade omc` replacing the venv is the whole propagation story —
-every managed repo serves the new behavior layer instantly. The v1 chain
-(root symlinks -> committed .omc/internal/AGENTS.md stamped from a constant)
-is migrated automatically; omc never touches the project layer and never
-replaces files it does not own.
-"""
+"""Deliver omc's installed behavior layer through global harness instructions."""
 
 from __future__ import annotations
 
 import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 from .errors import OmcError
 from .installsrc import package_root
+from .providers.registry import get_provider
 from .toolctx import ToolContext
 
-_V1_INTERNAL_REL = Path(".omc/internal/AGENTS.md")
 _PROJECT_REL = Path(".omc/config/AGENTS.md")
 _DISTRIBUTION_REL = Path("distribution/AGENTS.md")
-_ROOT_NAMES = ("AGENTS.md", "CLAUDE.md")
-_GITIGNORE_ENTRIES = ("/AGENTS.md", "/CLAUDE.md")
+SECTION_UUID = "75a24d62-844e-46f7-ab20-767f41397704"
+BEGIN_MARKER = (
+    f"<!-- omc:begin {SECTION_UUID} — managed by omc; edits inside are overwritten "
+    "by `omc configure` / `omc update` -->"
+).encode()
+END_MARKER = f"<!-- omc:end {SECTION_UUID} -->".encode()
 
 PROJECT_STARTER = """\
 # Project agent instructions
 
 This file is YOURS — omc seeds it once and never touches it again. Put the
 project's real guidance here: build/test commands, architecture ground
-rules, review expectations, tribal knowledge. Every agent reads it right
-after omc's behavior layer (the root AGENTS.md/CLAUDE.md symlinks).
+rules, review expectations, tribal knowledge. Agents read it after omc's
+global behavior layer when working in this repository.
 """
 
 
@@ -41,109 +37,138 @@ def _say(msg: str) -> None:
 
 
 def distribution_agents_md() -> Path:
-    """The installed behavior-layer file — the chain's symlink target."""
+    """The installed, authoritative behavior-layer file."""
     target = package_root() / _DISTRIBUTION_REL
     if not target.is_file():
         raise OmcError(f"broken install: {target} is missing")
     return target
 
 
-def is_omc_link(link: Path) -> bool:
-    """True when `link` is a symlink omc owns (v1, v2, or a stale v2 from a
-    previous install location) and may therefore repair or migrate."""
-    if not link.is_symlink():
-        return False
-    raw = os.readlink(link)
-    if raw.endswith(str(_V1_INTERNAL_REL)):
-        return True  # v1 relative link
-    return raw.endswith(str(_DISTRIBUTION_REL))  # v2, current or stale
+def seed_project_agents_md(root: str | Path) -> None:
+    """Seed project guidance once; existing project and root files are owned by the project."""
+    project = Path(root) / _PROJECT_REL
+    if not project.exists() and not project.is_symlink():
+        project.parent.mkdir(parents=True, exist_ok=True)
+        project.write_text(PROJECT_STARTER)
 
 
-def chain_healthy(root: str | Path) -> bool:
-    """Cheap read-only probe: both root links exist and hit the live target."""
-    root = Path(root)
-    target = distribution_agents_md().resolve()
-    return all(
-        (root / name).is_symlink() and (root / name).resolve() == target for name in _ROOT_NAMES
+def _target(ctx: ToolContext, provider_name: str) -> Path:
+    return get_provider(provider_name).instructions_file(ctx.env)
+
+
+def _read(target: Path) -> bytes | None:
+    if target.is_symlink():
+        raise OmcError(f"{target}: global instructions file is a symlink; refusing to replace it")
+    try:
+        return target.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise OmcError(f"{target}: cannot read global instructions: {exc}") from exc
+
+
+def _span(target: Path, data: bytes) -> tuple[int, int] | None:
+    begins, ends = data.count(BEGIN_MARKER), data.count(END_MARKER)
+    if begins == ends == 0:
+        return None
+    if begins != 1 or ends != 1:
+        raise OmcError(f"{target}: malformed omc section markers (begin={begins}, end={ends})")
+    start = data.index(BEGIN_MARKER)
+    end = data.index(END_MARKER) + len(END_MARKER)
+    if start >= end - len(END_MARKER):
+        raise OmcError(f"{target}: malformed omc section markers (end before begin)")
+    return start, end
+
+
+def _render() -> bytes:
+    body = distribution_agents_md().read_bytes()
+    return (
+        BEGIN_MARKER + b"\n" + body + (b"" if body.endswith(b"\n") else b"\n") + END_MARKER + b"\n"
     )
 
 
-def _ensure_gitignore(root: Path) -> bool:
-    """Append-only: add missing root-anchored entries, never rewrite content."""
-    gi = root / ".gitignore"
-    text = gi.read_text() if gi.is_file() else ""
-    missing = [e for e in _GITIGNORE_ENTRIES if e not in text.splitlines()]
-    if not missing:
-        return False
-    chunk = "" if not text or text.endswith("\n") else "\n"
-    chunk += "# machine-local omc chain symlinks (targets differ per machine)\n"
-    chunk += "".join(f"{e}\n" for e in missing)
-    gi.write_text(text + chunk)
-    return True
+def _atomic_write(target: Path, data: bytes, *, mode: int | None = None) -> None:
+    """Replace within the same directory, preserving an existing file's mode."""
+    temp_name: str | None = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=target.parent, prefix=f".{target.name}.", delete=False
+        ) as temp:
+            temp_name = temp.name
+            temp.write(data)
+            temp.flush()
+            os.fsync(temp.fileno())
+        if mode is not None:
+            os.chmod(temp_name, mode)
+        os.replace(temp_name, target)
+    except OSError as exc:
+        raise OmcError(f"{target}: cannot write global instructions: {exc}") from exc
+    finally:
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
 
 
-def ensure_agents_chain(ctx: ToolContext, root: str | Path) -> str:
-    """Verify/create the v2 chain. Returns "created" | "ok" | "blocked".
+def ensure_global_section(ctx: ToolContext, provider_name: str) -> str:
+    """Ensure the exact installed section; return created, updated, or current."""
+    target = _target(ctx, provider_name)
+    previous = _read(target)
+    rendered = _render()
+    if previous is None:
+        updated, result = rendered, "created"
+    else:
+        span = _span(target, previous)
+        if span is None:
+            separator = (
+                b""
+                if not previous or previous.endswith(b"\n\n")
+                else (b"\n" if previous.endswith(b"\n") else b"\n\n")
+            )
+            updated, result = previous + separator + rendered, "created"
+        else:
+            start, end = span
+            # The rendering includes one trailing newline; the old section's
+            # trailing line break is part of its span when present.
+            if previous[end : end + 1] == b"\n":
+                end += 1
+            updated, result = previous[:start] + rendered + previous[end:], "updated"
+        if updated == previous:
+            return "current"
+    mode = stat.S_IMODE(target.stat().st_mode) if previous is not None else None
+    _atomic_write(target, updated, mode=mode)
+    _say(f"→ omc section written to {target}")
+    return result
 
-    - Root AGENTS.md/CLAUDE.md: absolute symlinks to the installed
-      distribution/AGENTS.md; gitignored (entries ensured, append-only).
-    - v1 chain artifacts (omc's own relative symlinks + the stamped
-      .omc/internal/AGENTS.md) migrate automatically.
-    - Foreign regular files or unknown symlinks: NEVER replaced — chain is
-      "blocked" with migration steps and NOTHING is mutated.
-    - .omc/config/AGENTS.md: seeded only if absent (the project owns it).
-    """
-    root = Path(root)
-    target = distribution_agents_md()
-    resolved_target = target.resolve()
 
-    # Check the root files FIRST: a blocked chain must not half-mutate the repo.
-    blocked = []
-    for name in _ROOT_NAMES:
-        link = root / name
-        if not link.exists() and not link.is_symlink():
-            continue  # missing -> creatable
-        if not is_omc_link(link):
-            blocked.append(name)
-    if blocked:
-        _say(
-            f"→ {', '.join(blocked)} already exist and are not omc's symlinks — "
-            "omc will not replace them. To adopt the omc chain: move your content "
-            f"into {_PROJECT_REL}, delete the root file(s), and re-run `omc configure`."
-        )
-        return "blocked"
-
-    created = False
-    for name in _ROOT_NAMES:
-        link = root / name
-        if link.is_symlink():
-            if link.resolve() == resolved_target:
-                continue  # already correct
-            link.unlink()  # v1 or stale v2 — replace
-        link.symlink_to(target)
-        created = True
-
-    internal = root / _V1_INTERNAL_REL
-    if internal.is_file():
-        internal.unlink()  # v1 stamped layer retired; content now ships installed
-        if internal.parent.is_dir() and not any(internal.parent.iterdir()):
-            internal.parent.rmdir()
-        created = True
-
-    project = root / _PROJECT_REL
-    if not project.exists():
-        project.parent.mkdir(parents=True, exist_ok=True)
-        project.write_text(PROJECT_STARTER)
-        created = True
-
-    if _ensure_gitignore(root):
-        created = True
-
-    if created:
-        _say(
-            "→ AGENTS.md/CLAUDE.md now symlink into the omc install "
-            f"({target}); they are machine-local (gitignored) — project guidance "
-            f"lives in {_PROJECT_REL}, commit that one"
-        )
-        return "created"
-    return "ok"
+def remove_global_section(ctx: ToolContext, provider_name: str) -> str | None:
+    """Remove only omc's marked section, leaving foreign instructions intact."""
+    target = _target(ctx, provider_name)
+    previous = _read(target)
+    if previous is None:
+        return None
+    span = _span(target, previous)
+    if span is None:
+        return None
+    start, end = span
+    if previous[end : end + 1] == b"\n":
+        end += 1
+    prefix, suffix = previous[:start], previous[end:]
+    if prefix.endswith(b"\n\n"):
+        # Keep the preceding user line's terminator. When the section sits
+        # between two separated blocks, the following separator already
+        # supplies that line break.
+        prefix = prefix[:-2] if suffix.startswith(b"\n") else prefix[:-1]
+    elif suffix.startswith(b"\n\n"):
+        suffix = suffix[2:]
+    remaining = prefix + suffix
+    try:
+        if remaining.strip():
+            _atomic_write(target, remaining, mode=stat.S_IMODE(target.stat().st_mode))
+        else:
+            target.unlink()
+    except OSError as exc:
+        raise OmcError(f"{target}: cannot remove omc section: {exc}") from exc
+    return f"removed omc section from {target}"

@@ -25,11 +25,9 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
-from .agentsmd import chain_healthy, ensure_agents_chain, is_omc_link
 from .buildprogress import ProgressTracker, sentinel_line
 from .cli.progress_bar import BarThread
 from .config.schema import Config
-from .errors import OmcError
 from .gitnexus import Freshness, ensure_gitnexus, refresh_knowledge, snapshot_freshness
 from .probe import require_tools
 from .providers.registry import get_provider
@@ -227,41 +225,6 @@ def _refresh_index(
     )
 
 
-def _chain_tick(ctx: ToolContext, root: str, last: str | None) -> str:
-    """REPAIR the AGENTS.md chain; never create it from nothing (that is
-    configure/start's job — watch must not mutate repos it merely observes).
-    Healthy: silent. Repair: narrates (action outcome). Blocked: warn once
-    per state change (quiet-token doctrine, like _tick), never block the loop."""
-    try:
-        if chain_healthy(root):
-            return "chain-ok"
-        root_p = Path(root)
-        names = ("AGENTS.md", "CLAUDE.md")
-        if not any((root_p / n).exists() or (root_p / n).is_symlink() for n in names):
-            return "chain-absent"  # never chain-managed — silently leave it alone
-        if last == "chain-blocked":
-            # Still blocked (foreign root files/symlinks don't vanish between
-            # ticks) — re-running ensure would re-narrate the same warning
-            # every tick.
-            if any(
-                ((root_p / n).exists() or (root_p / n).is_symlink()) and not is_omc_link(root_p / n)
-                for n in names
-            ):
-                return "chain-blocked"
-        status = ensure_agents_chain(ctx, root)
-        return "chain-blocked" if status == "blocked" else "chain-ok"
-    except OmcError as e:
-        # chain_healthy()/ensure_agents_chain() call distribution_agents_md(),
-        # which RAISES OmcError when the installed distribution/AGENTS.md is
-        # missing (a broken install). Watch doctrine: a tick failure must warn
-        # and skip, never crash the loop — narrate once per state change, same
-        # quiet-token convention as everything else here.
-        token = "chain-error"
-        if token != last:
-            _say(f"✗ chain check failed: {e}")
-        return token
-
-
 def _tick(
     ctx: ToolContext,
     cfg: Config,
@@ -440,14 +403,12 @@ def run_watch(
         f"{', documentation enabled' if enable_documentation else ''}) — Ctrl-C stops"
     )
     last: str | None = None
-    chain_last: str | None = None
     reset_pending = reset_gitnexus
     reset_note: str | None = None
     try:
         while True:
             # Busy lock held for the WHOLE busy portion (tick + hooks): free ⇔ idle.
             with acquire_busy_narrated(busy, _say) if busy is not None else nullcontext():
-                chain_last = _chain_tick(ctx, root, chain_last)
                 last = _tick(
                     ctx,
                     cfg,

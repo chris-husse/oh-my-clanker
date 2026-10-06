@@ -10,8 +10,9 @@ import sys
 from pathlib import Path
 
 from . import notify
+from .agentsmd import ensure_global_section
 from .config.schema import Config
-from .errors import Refusal
+from .errors import OmcError, Refusal
 from .plugin import ensure_plugin
 from .probe import require_tools
 from .providers.registry import get_provider
@@ -82,6 +83,11 @@ def run_implement(
     require_tools(ctx, cfg)
     plugin_status = ensure_plugin(ctx, name, check_only=dry_run)
     _say(f"→ omc plugin for {name}: {plugin_status}")
+    if not dry_run:
+        try:
+            ensure_global_section(ctx, name)
+        except (OmcError, OSError) as exc:
+            _say(f"✗ {name} global instructions: {exc}")
     # A second `claude -n <slug>` silently forks a new session and makes
     # `--resume <slug>` ambiguous (verified live 2026-10-02); the design
     # session keeps the slug, this one gets its own name. OMC_SLUG stays the
