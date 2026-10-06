@@ -147,7 +147,7 @@ def test_review_proxy_runs_grug():
         "Deliberate complexity",
         'regardless of `"configured"`',
         "grug skill unavailable — plugin stale? run omc update",
-        "top-tier",
+        "Review",
         "batched",
     ):
         assert needle in text, f"review proxy missing {needle!r}"
@@ -158,12 +158,23 @@ def test_review_proxy_runs_grug():
     # the lens is unavailable → the stage FAILS, it never passes lens-less
     unavailable = text.index("grug skill unavailable")
     assert '"passed": false' in text[unavailable - 400 : unavailable + 200]
-    # fix first (top tier), waive second, ask last — and batched
-    assert text.index("Fix first, top tier") < text.index("**waive**") < text.index("batched")
+    # fix first (configured Review choice), waive second, ask last — and batched
+    assert text.index("Fix first, Review") < text.index("**waive**") < text.index("batched")
     assert "nothing to do" in text and '"configured"' in text and "OMC_STAGE" in text
     # the other three proxies stay pure pass-throughs
     for stage in ("check", "build", "verify"):
         assert "grug" not in (ROOT / "skills" / stage / "SKILL.md").read_text()
+
+
+def test_review_proxy_dispatches_grug_judgment_on_review_choice():
+    text = (ROOT / "skills" / "review" / "SKILL.md").read_text()
+    judgment = text.split("3. **Grug lens.**", 1)[1].split("- **Grug unavailable.", 1)[0]
+    assert "Dispatch a grug judge worker" in judgment
+    assert "tasks.review.model" in judgment
+    assert "tasks.review.effort" in judgment
+    assert "grug diff <base>" in judgment
+    assert "main session" in judgment
+    assert "orchestrator model" in judgment
 
 
 def test_squash_skill_contract():
@@ -315,7 +326,7 @@ def test_integrate_inventories_global_knowledge_sources():
     assert "omc internal skills list" in inventory
 
 
-def test_machine_contract_listings_include_knowledge():
+def test_machine_contract_listings_include_knowledge_and_models():
     for rel in (
         "src/omc/distribution/AGENTS.md",
         ".omc/config/AGENTS.md",
@@ -324,6 +335,7 @@ def test_machine_contract_listings_include_knowledge():
     ):
         assert "OMC_KNOWLEDGE" in (ROOT / rel).read_text(), rel
         assert "OMC_DESIGN_RECORD" in (ROOT / rel).read_text(), rel
+        assert "OMC_MODELS" in (ROOT / rel).read_text(), rel
 
 
 def test_investigate_skill_contract():
@@ -361,7 +373,7 @@ def test_plan_skill_contract():
         "$ARGUMENTS",
         "OMC_SLUG",
         "non-fatal",
-        "model-tier",
+        "`Complexity:`",
         "OMC_KNOWLEDGE",
         "/omc:design",
     ):
@@ -385,9 +397,9 @@ def test_implement_skill_contract():
         "/omc:audit",
         "omc review",
         "/omc:explain",
-        "model-tier policy",
-        "`Model:`",
-        "top tier",
+        "omc internal models",
+        "`Complexity:`",
+        "missing `Complexity:`",
         "/omc:check",
         "before dispatching the next task",
         "plan already exists",
@@ -413,6 +425,31 @@ def test_implement_skill_contract():
     )
     assert "finish runs it" not in text
     assert "Invoke the `finish` skill" not in text
+
+
+def test_task_model_skill_routing_contract():
+    design = (ROOT / "skills/design/SKILL.md").read_text()
+    implement = (ROOT / "skills/implement/SKILL.md").read_text()
+    audit = (ROOT / "skills/audit/SKILL.md").read_text()
+    review = (ROOT / "skills/review/SKILL.md").read_text()
+    plan = (ROOT / "skills/plan/SKILL.md").read_text()
+    behavior = (ROOT / "src/omc/distribution/AGENTS.md").read_text()
+
+    assert "omc internal models" in design and "Design" in design
+    assert "fresh" in design and "converged" in design
+    assert "CRITICAL" in design and "main session" in design
+    assert "omc internal models" in implement and "Plan" in implement
+    assert "simple | medium | high" in implement
+    assert "missing `Complexity:`" in implement and "medium" in implement
+    assert "Review" in implement and "reasoning_effort" in implement
+    assert "Complexity:" in audit and "Review" in audit
+    assert "omc internal models" in review and "Review" in review
+    assert "`Complexity:`" in plan and "model-tier" not in plan
+    assert "Orchestrator" in behavior and "omc internal models" in behavior
+    assert "orchestrator model" in behavior and "test actors and test judges" in behavior.lower()
+    for skill in (design, implement, audit, review):
+        assert "model-tier policy" not in skill
+    assert "Do not request a model override on a full-history" in design
 
 
 def test_audit_skill_contract():
@@ -536,19 +573,33 @@ def test_integrate_skill_contract():
     assert "--defaults" in text  # the do-NOT-reset-config warning
 
 
-def test_distribution_agents_model_tier_policy():
+def test_distribution_agents_task_model_policy():
     text = (ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text()
     for needle in (
-        "model-tier policy",
-        "top tier",
-        "heavy coding tier",
-        "standard coding tier",
+        "Orchestrator",
+        "omc internal models",
+        "OMC_MODELS",
+        "Complexity: simple | medium | high",
+        "Review",
         "never used",
-        "OpenAI",
+        "E2E_MODEL",
     ):
         assert needle in text, f"behavior layer missing {needle!r}"
+    assert "model-tier policy" not in text
     # the old guidance invited cheap-tier models for execution work
     assert "efficient models" not in text, "old Model selection phrasing must be gone"
+
+
+def test_audit_and_project_review_dispatch_review_judgment_even_without_findings():
+    audit = (ROOT / "skills" / "audit" / "SKILL.md").read_text()
+    conformance = audit.split("## Phase 1 — conformance", 1)[1].split("## Phase 2", 1)[0]
+    assert "omc internal models" in conformance
+    assert "Dispatch a Review worker" in conformance
+    assert "even when" in conformance
+    review = (ROOT / "skills" / "review" / "SKILL.md").read_text()
+    project = review.split("2. Look for", 1)[1].split("3. **Grug lens.**", 1)[0]
+    assert "Dispatch a Review worker" in project
+    assert "even when" in project
 
 
 def test_distribution_agents_validation_cadence():
@@ -623,7 +674,7 @@ def test_design_skill_contract():
         "Deliberate complexity",
         "None.",
         "grug skill unavailable — plugin stale? run omc update",
-        "Fix, by the top tier",
+        "Fix, by Design",
         "Ask, batched",
         "$ARGUMENTS",
         "omc internal design-record",
@@ -642,7 +693,7 @@ def test_design_skill_contract():
     step2 = text.index("## Step 2")
     assert text.index("/omc:explain", step2) < text.index("grug section", step2)
     step4 = text.index("## Step 4")
-    assert text.index("Fix, by the top tier", step4) < text.index("Waive by record", step4)
+    assert text.index("Fix, by Design", step4) < text.index("Waive by record", step4)
     assert text.index("Waive by record", step4) < text.index("Ask, batched", step4)
     # grug unavailable is a hard stop: Step 5 must not commit or continue past it
     step5 = text.index("## Step 5")

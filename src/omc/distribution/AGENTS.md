@@ -59,28 +59,22 @@ repo). In any other repository, ignore everything in this section.
   in a headless run, make the question the final output.
 - **Ask the graph, not grep**: `/omc:explain <question>` answers from the
   project's GitNexus knowledge graph and docs.
-- **Model selection**: the main session runs the model chosen in
-  `omc configure` — never second-guess it. When dispatching subagents or
-  assigning models to plan tasks, apply the **model-tier policy**. Tiers
-  are abstract, baselined on Claude's stack, and resolved at dispatch time
-  against the provider's *current* lineup: pin the **top tier** to whatever
-  is the latest & best model available (Fable-class today), then
-  reinterpret the **heavy coding tier** (Opus-class) and the **standard
-  coding tier** (Sonnet-class) down the current hierarchy. On other
-  providers (OpenAI, …), map the tiers to that provider's current
-  equivalents the same way.
-  - Spec, review, and judging tasks → **top tier**.
-  - Coding tasks → never below the **standard coding tier**; bigger coding
-    tasks (multi-file, architecturally tricky, or ambiguous) → **heavy
-    coding tier**.
-  - The cheap/fast tier (Haiku-class or its equivalent on any provider) is
-    **never used**, for anything.
+- **Model selection**: the main session runs the configured Orchestrator
+  model from `omc configure` — never second-guess it. Run `omc internal models`
+  and read its single `OMC_MODELS` verdict before dispatching lifecycle
+  workers. Design, Plan and Review workers use their named choices; coding
+  tasks use the plan's `Complexity: simple | medium | high` label, with a
+  missing label treated as `medium`. Apply each choice's model and effort
+  where the harness supports them. If the harness cannot pin a worker model,
+  use the orchestrator model and say so in one line. The cheap/fast tier
+  (Haiku-class or its equivalent on any provider) is **never used**.
   - Test actors and test judges are not omc's own spec/review/judging work:
     the `tests/e2e` suites default to the **standard coding tier** (a
     three-line rubric over a one-line fixture needs no more), overridable
     through `CLAUDE_E2E_MODEL` / `CLAUDE_E2E_JUDGE_MODEL`.
 - **Machine contracts are sacred**: single-line `OMC_SLUG` / `OMC_STAGE` /
-  `OMC_SQUASH` / `OMC_REBASE_MAIN` / `OMC_TICKET` / `OMC_KNOWLEDGE` / `OMC_DESIGN_RECORD` verdicts are
+  `OMC_SQUASH` / `OMC_REBASE_MAIN` / `OMC_TICKET` / `OMC_KNOWLEDGE` /
+  `OMC_DESIGN_RECORD` / `OMC_MODELS` verdicts are
   parsed by tools — emit them exactly as their skills specify, never wrapped in
   markdown.
 - **A verdict is an argument, not a destination within the active phase.** Those verdict lines — and

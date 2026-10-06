@@ -67,10 +67,10 @@ primer and seed before brainstorming.
 
 Invoke `superpowers:brainstorming` with: the user's actual seed, all material
 scope answers, the complete input context, the primer, the
-presentation rule below, this model-tier pointer: "Any implementation plan
-born from this brainstorm follows the behavior layer's model-tier policy
-(AGENTS.md, Model selection): every task carries a `Model:` line naming
-its tier; the cheap/fast tier is never used." — and, only when `OMC_SLUG`
+presentation rule below, this task-model pointer: "Any implementation plan
+born from this brainstorm gives each task a `Complexity:` line with one of
+`simple`, `medium`, or `high`; the cheap/fast tier is never used." — and,
+only when `OMC_SLUG`
 is set
 (`echo "$OMC_SLUG"`) — this doc-naming directive: "Use the topic slug
 `$OMC_SLUG` so the design doc lands at

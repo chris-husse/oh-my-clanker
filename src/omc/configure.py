@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import copy
 import sys
-from dataclasses import dataclass, field, fields
+from collections.abc import Callable
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from . import docsllm
+from . import docsllm, taskmodels
 from .agentsmd import ensure_global_section, seed_project_agents_md
 from .config import store
 from .config.schema import GlobalConfig, ProjectConfig, ProviderConfig, SecretsConfig
@@ -114,6 +115,33 @@ def _probe_docs(
     return False
 
 
+def _probe_task_models(ctx: ToolContext, gcfg: GlobalConfig, *, before: GlobalConfig) -> None:
+    """Validate changed model leaves before any file write: one live probe per
+    distinct effective value per provider, and one Codex list refresh per run
+    (seven leaves pinned to one id cost one turn, not seven)."""
+    for name, pcfg in gcfg.llm.providers.items():
+        previous = before.llm.providers.get(name, ProviderConfig())
+        probed: set[tuple[str, str]] = set()
+        refreshed = False
+        for task in taskmodels.TASKS:
+            value = pcfg.model if task == "orchestrator" else getattr(pcfg.tasks, task)
+            old = previous.model if task == "orchestrator" else getattr(previous.tasks, task)
+            if value == old:
+                continue
+            key = taskmodels.probe_key(name, value, task)
+            if key in probed:
+                _say(f"· {name} {task}: {key[0]} already validated in this run")
+                continue
+            probed.add(key)
+            taskmodels.validate_selection(
+                ctx, name, value, task=task, say=_say, refresh=not refreshed
+            )
+            # Only a Codex *family* leaf refreshes the list; a full id is
+            # probed directly and leaves the list untouched.
+            if name == "codex" and key[0].partition(":")[0] in get_provider(name).families():
+                refreshed = True
+
+
 def _apply_settings(
     ctx: ToolContext,
     root: Path | None,
@@ -163,6 +191,7 @@ def _apply_settings(
         write_global = True
     # Order (spec §3.2): consistency → refuse api-without-key → probes → write.
     store.validate_llm(gcfg.llm)
+    _probe_task_models(ctx, gcfg, before=before)
     if _probe_docs(
         ctx, gcfg, scfg, before=before, before_keys=before_keys, removed_provider=remove_provider
     ):
@@ -294,6 +323,24 @@ class _MenuSession:
     interface: Any = None
 
 
+def _model_picker(
+    ctx: ToolContext,
+    provider: str,
+    task: str,
+    saved: str,
+    *,
+    warn: Callable[[str], object] | None = None,
+) -> dict[str, str]:
+    choices = taskmodels.model_options(ctx, provider, task, warn=warn)
+    choices["Other (type a model id)"] = "__other_model__"
+    if saved and saved not in choices.values():
+        # Preserve a previously saved full id or effort omitted by a later
+        # provider-list refresh as the currently selected menu entry.
+        first, *rest = choices.items()
+        choices = dict((first, (saved, saved), *rest))
+    return choices
+
+
 def _compose_menu(
     ctx: ToolContext,
     root: Path | None,
@@ -375,9 +422,9 @@ def _compose_menu(
 
     def commit(key: str, tag: Any, *, provider: str | None = None):
         value = tag.val
-        if value == "" and not isinstance(tag, SelectTag):
+        if value == "" and not isinstance(tag, SelectTag) and ".tasks." not in key:
             return True, current(key, provider)
-        if value == "__other_model__":
+        if value in ("__other_model__", "__other__"):
             if session.interface is None:
                 return "Model input is unavailable"
             try:
@@ -450,7 +497,10 @@ def _compose_menu(
         if key.endswith(".api_key"):
             return scfg.api_keys.get(provider, "")
         if provider is not None:
-            return getattr(gcfg.llm.providers.get(provider, ProviderConfig()), parts[-1])
+            obj: Any = gcfg.llm.providers.get(provider, ProviderConfig())
+            for part in parts[3:]:
+                obj = getattr(obj, part)
+            return obj
         obj: Any = pcfg if parts[0] == "worktree" else gcfg
         for part in parts:
             obj = getattr(obj, part)
@@ -492,6 +542,13 @@ def _compose_menu(
             gcfg.llm, config_field.name, f"llm.{config_field.name}", options=options
         )
     other = "__other_model__"
+    warned: set[str] = set()
+
+    def warn_once(msg: str) -> None:
+        if msg not in warned:
+            warned.add(msg)
+            _say(msg)
+
     for name in provider_names():
         p = gcfg.llm.providers.get(name, ProviderConfig())
         toggle = SavedTag(
@@ -507,8 +564,29 @@ def _compose_menu(
         submenu = {"Configured": toggle}
         for config_field in fields(p):
             attr = config_field.name
+            if is_dataclass(getattr(p, attr)):
+                section = getattr(p, attr)
+                submenu[config_field.metadata["label"]] = {
+                    f.metadata["label"]: leaf(
+                        section,
+                        f.name,
+                        f"llm.providers.{name}.{attr}.{f.name}",
+                        provider=name,
+                        options=(
+                            _model_picker(
+                                ctx, name, f.name, getattr(section, f.name), warn=warn_once
+                            )
+                            if attr == "tasks"
+                            else None
+                        ),
+                    )
+                    for f in fields(section)
+                }
+                continue
             choices = None
-            if attr in ("model", "docs_model") and models:
+            if attr == "model":
+                choices = _model_picker(ctx, name, "orchestrator", p.model, warn=warn_once)
+            elif attr == "docs_model" and models:
                 value = getattr(p, attr)
                 choices = {m: m for m in models}
                 choices["Other (type a model id)"] = other

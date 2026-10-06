@@ -10,6 +10,7 @@ from .config.schema import Config
 from .errors import OmcError, Refusal
 from .providers.registry import get_provider
 from .skills_source import skill_prompt
+from .taskmodels import orchestrator
 from .toolctx import ToolContext
 from .wtconfig import sanitize_slug
 
@@ -78,10 +79,12 @@ def build_prompt(context: str) -> str:
 def fetch_slug(ctx: ToolContext, cfg: Config, context: str) -> str:
     name = cfg.llm.default
     provider = get_provider(name)
-    pcfg = cfg.llm.providers.get(name)
-    model = pcfg.model if pcfg else ""
+    choice = orchestrator(ctx, cfg)
     argv = provider.headless_argv(
-        build_prompt(context), model=model, allowed_tools=MCP_TOOL_PATTERNS
+        build_prompt(context),
+        model=choice.model_arg,
+        effort=choice.effort,
+        allowed_tools=MCP_TOOL_PATTERNS,
     )
     try:
         cp = ctx.run(argv, extra_env=provider.title_env())

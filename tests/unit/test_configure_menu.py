@@ -17,12 +17,30 @@ from omc.config.schema import GlobalConfig, ProjectConfig, SecretsConfig
 from omc.errors import Refusal
 from omc.toolctx import ToolContext
 
+from ._stubs import seed_codex_model_cache
+
+
+@pytest.fixture(autouse=True)
+def _stub_task_model_probe(monkeypatch):
+    # Menu tests exercise persistence and tag replay. The subprocess/cache
+    # contract has its own restricted-PATH test in test_taskmodels.py.
+    monkeypatch.setattr(configure.taskmodels, "validate_selection", lambda *a, **kw: None)
+
 
 def _menu(tmp_path: Path, *, root: Path | None = None):
-    ctx = ToolContext(home=tmp_path / "home", env={})
+    seed_codex_model_cache(tmp_path)
+    ctx = ToolContext(home=tmp_path / "home", env={"HOME": str(tmp_path)})
     gcfg, pcfg, scfg = GlobalConfig(), ProjectConfig(), SecretsConfig()
     session = configure._compose_menu(ctx, root, gcfg, pcfg, scfg)
     return session, (ctx, gcfg, pcfg, scfg)
+
+
+def _tags(section):
+    for value in section.values():
+        if isinstance(value, dict):
+            yield from _tags(value)
+        else:
+            yield value
 
 
 def test_menu_groups_schema_fields_and_registry_providers(tmp_path):
@@ -33,9 +51,10 @@ def test_menu_groups_schema_fields_and_registry_providers(tmp_path):
     assert set(llm) == {"Default provider", "claude", "codex"}
     assert set(llm["claude"]) == {
         "Configured",
-        "Session model",
+        "Orchestrator model",
         "Native notifications",
         "Documentation model",
+        "Task models",
         "API key",
     }
     assert "API key" not in llm["codex"]
@@ -46,7 +65,15 @@ def test_menu_groups_schema_fields_and_registry_providers(tmp_path):
     assert set(
         session.root["Documentation"]["Documentation backend"]._build_options().values()
     ) == {"cli", "api"}
-    assert "Other (type a model id)" in llm["claude"]["Session model"]._build_options()
+    assert "Other (type a model id)" in llm["claude"]["Orchestrator model"]._build_options()
+    assert set(llm["claude"]["Task models"]) == {
+        "Design",
+        "Plan",
+        "Review",
+        "Simple Complexity Task",
+        "Medium Complexity Task",
+        "High Complexity Task",
+    }
     assert llm["claude"]["Native notifications"].description == (
         "Use this provider's native session alerts."
     )
@@ -66,6 +93,72 @@ def test_docs_backend_choices_follow_selected_provider_capability(tmp_path):
     assert list(
         session.root["Documentation"]["Documentation backend"]._build_options().values()
     ) == ["cli"]
+
+
+def test_task_submenu_uses_nested_schema_labels_and_saves_a_leaf(tmp_path):
+    session, (ctx, gcfg, _, _) = _menu(tmp_path)
+    tag = session.root["LLM"]["codex"]["Task models"]["Medium Complexity Task"]
+    assert tag.description
+    assert tag.update("sol:high")
+    assert gcfg.llm.providers["codex"].tasks.medium == "sol:high"
+    assert store.load_global(ctx.home).llm.providers["codex"].tasks.medium == "sol:high"
+    assert tag.update("")
+    assert store.load_global(ctx.home).llm.providers["codex"].tasks.medium == ""
+
+
+def test_task_picker_options_and_default_clear(tmp_path, monkeypatch):
+    monkeypatch.setattr(configure.taskmodels, "validate_selection", lambda *a, **kw: None)
+    session, (ctx, gcfg, _, _) = _menu(tmp_path)
+    codex = session.root["LLM"]["codex"]
+    claude = session.root["LLM"]["claude"]
+    assert list(codex["Orchestrator model"]._build_options())[0] == "Provider default (sol:high)"
+    assert (
+        list(codex["Task models"]["Medium Complexity Task"]._build_options())[0]
+        == "Provider default (sol:high)"
+    )
+    assert list(claude["Task models"]["Plan"]._build_options())[-1] == "Other (type a model id)"
+    assert "Opus (high)" not in claude["Task models"]["Plan"]._build_options()
+    assert "Opus (high)" in claude["Orchestrator model"]._build_options()
+    tag = codex["Task models"]["Medium Complexity Task"]
+    assert tag.update("sol:high")
+    assert tag.update("")
+    assert gcfg.llm.providers["codex"].tasks.medium == ""
+    assert store.load_global(ctx.home).llm.providers["codex"].tasks.medium == ""
+
+
+def test_unreadable_codex_cache_degrades_pickers_and_warns_once(tmp_path, capsys):
+    (tmp_path / ".codex").mkdir(exist_ok=True)
+    (tmp_path / ".codex" / "models_cache.json").write_text("{broken")
+    ctx = ToolContext(home=tmp_path / "home", env={"HOME": str(tmp_path)})
+    session = configure._compose_menu(ctx, None, GlobalConfig(), ProjectConfig(), SecretsConfig())
+    codex = session.root["LLM"]["codex"]
+    assert list(codex["Task models"]["Design"]._build_options()) == [
+        "Provider default (astra)",
+        "Astra",
+        "Sol",
+        "Other (type a model id)",
+    ]
+    assert "Opus (high)" in session.root["LLM"]["claude"]["Orchestrator model"]._build_options()
+    err = capsys.readouterr().err
+    assert err.count("models_cache.json") == 1 and "families only" in err
+
+
+def test_failed_task_picker_edit_and_renderer_replay_keep_prior_value(tmp_path, monkeypatch):
+    session, (ctx, gcfg, _, _) = _menu(tmp_path)
+    tag = session.root["LLM"]["claude"]["Task models"]["Design"]
+    monkeypatch.setattr(configure.taskmodels, "validate_selection", lambda *a, **kw: None)
+    assert tag.update("fable")
+    before = store.global_config_path(ctx.home).read_bytes()
+    monkeypatch.setattr(
+        configure.taskmodels,
+        "validate_selection",
+        lambda *a, **kw: (_ for _ in ()).throw(docsllm.ProbeFailed("rejected")),
+    )
+    tag._on_change_trigger("opus")
+    assert not tag.update("opus")
+    assert tag.val == "fable"
+    assert gcfg.llm.providers["claude"].tasks.design == "fable"
+    assert store.global_config_path(ctx.home).read_bytes() == before
 
 
 def test_schema_field_and_section_metadata_drive_menu(tmp_path, monkeypatch):
@@ -236,10 +329,24 @@ def test_other_model_asks_for_id_and_keeps_custom_value_visible(tmp_path):
             return "my-custom-model"
 
     session.interface = Interface()
-    tag = session.root["LLM"]["claude"]["Session model"]
+    tag = session.root["LLM"]["claude"]["Orchestrator model"]
     assert tag.update("__other_model__")
     assert store.load_global(ctx.home).llm.providers["claude"].model == "my-custom-model"
     assert tag._get_selected_key() == "my-custom-model"
+
+
+def test_task_model_other_input_saves_nested_leaf(tmp_path):
+    session, (ctx, _, _, _) = _menu(tmp_path)
+
+    class Interface:
+        def ask(self, label):
+            assert label == "Model id"
+            return "claude-fable-5-1"
+
+    session.interface = Interface()
+    tag = session.root["LLM"]["claude"]["Task models"]["Design"]
+    assert tag.update("__other_model__")
+    assert store.load_global(ctx.home).llm.providers["claude"].tasks.design == "claude-fable-5-1"
 
 
 def test_real_renderer_two_calls_prompt_other_once_per_edit(tmp_path, monkeypatch):
@@ -262,7 +369,7 @@ def test_real_renderer_two_calls_prompt_other_once_per_edit(tmp_path, monkeypatc
             return f"custom-{self.calls}"
 
     session.interface = Interface()
-    tag = session.root["LLM"]["claude"]["Session model"]
+    tag = session.root["LLM"]["claude"]["Orchestrator model"]
     for expected in ("custom-1", "custom-2"):
         tag._on_change_trigger("__other_model__")
         assert tag.update("__other_model__")
@@ -305,7 +412,7 @@ def test_reselect_model_after_provider_toggle_uses_actual_renderer_two_calls(tmp
     gcfg.llm.providers["codex"] = configure.ProviderConfig()
     session = configure._compose_menu(ctx, None, gcfg, ProjectConfig(), SecretsConfig())
     provider = session.root["LLM"]["claude"]
-    model = provider["Session model"]
+    model = provider["Orchestrator model"]
     configured = provider["Configured"]
 
     model._on_change_trigger("opus")
@@ -347,11 +454,11 @@ def test_interrupted_renderer_edit_cannot_save_on_level_submit(tmp_path, monkeyp
 
         session.interface = Interface()
         candidate = "__other_model__"
-        tag = session.root["LLM"]["claude"]["Session model"]
+        tag = session.root["LLM"]["claude"]["Orchestrator model"]
     with pytest.raises(KeyboardInterrupt):
         tag._on_change_trigger(candidate)
     assert tag.val == ""
-    assert Tag._submit_values((leaf, leaf.val) for leaf in session.root["LLM"]["claude"].values())
+    assert Tag._submit_values((leaf, leaf.val) for leaf in _tags(session.root["LLM"]["claude"]))
     assert store.global_config_path(ctx.home).read_bytes() == before
     assert store.load_global(ctx.home).llm.providers["claude"].notifications is False
     assert calls == (["sonnet"] if interrupt_at == "probe" else [])
@@ -367,7 +474,7 @@ def test_cancel_other_model_prompt_leaves_stored_value_unchanged(tmp_path):
             raise Cancelled
 
     session.interface = Interface()
-    tag = session.root["LLM"]["claude"]["Session model"]
+    tag = session.root["LLM"]["claude"]["Orchestrator model"]
     assert tag.update("__other_model__")
     assert tag.val == ""
     assert not store.global_config_path(ctx.home).exists()
@@ -490,7 +597,7 @@ def test_disable_edit_reenable_updates_stable_configured_tag(tmp_path):
     assert toggle.update(False)
     assert toggle.val is False
     assert "claude" not in gcfg.llm.providers
-    assert provider["Session model"].update("sonnet")
+    assert provider["Orchestrator model"].update("sonnet")
     assert toggle.val is True
     assert store.load_global(ctx.home).llm.providers["claude"].model == "sonnet"
     before = store.global_config_path(ctx.home).read_bytes()
@@ -512,9 +619,9 @@ def test_disabling_provider_with_saved_models_survives_level_revalidation(tmp_pa
     provider = session.root["LLM"]["claude"]
     assert provider["Configured"].update(False)
     persisted = store.global_config_path(ctx.home).read_bytes()
-    assert provider["Session model"].val == ""
+    assert provider["Orchestrator model"].val == ""
     assert provider["Documentation model"].val == ""
-    assert Tag._submit_values((tag, tag.val) for tag in provider.values())
+    assert Tag._submit_values((tag, tag.val) for tag in _tags(provider))
     assert "claude" not in gcfg.llm.providers
     assert store.global_config_path(ctx.home).read_bytes() == persisted
 
@@ -584,7 +691,7 @@ def test_custom_stored_model_remains_selectable(tmp_path):
     gcfg = GlobalConfig()
     gcfg.llm.providers["claude"].model = "my-custom-model"
     session = configure._compose_menu(ctx, None, gcfg, ProjectConfig(), SecretsConfig())
-    tag = session.root["LLM"]["claude"]["Session model"]
+    tag = session.root["LLM"]["claude"]["Orchestrator model"]
     assert "my-custom-model" in tag._build_options().values()
     assert tag._get_selected_key() == "my-custom-model"
 

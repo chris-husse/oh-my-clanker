@@ -2,9 +2,39 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class TaskModelsConfig:
+    design: str = field(
+        default="", metadata={"label": "Design", "help": "Model for design agents."}
+    )
+    plan: str = field(default="", metadata={"label": "Plan", "help": "Model for planning agents."})
+    review: str = field(
+        default="", metadata={"label": "Review", "help": "Model for review agents."}
+    )
+    simple: str = field(
+        default="",
+        metadata={
+            "label": "Simple Complexity Task",
+            "help": "Model for simple implementation tasks.",
+        },
+    )
+    medium: str = field(
+        default="",
+        metadata={
+            "label": "Medium Complexity Task",
+            "help": "Model for medium implementation tasks.",
+        },
+    )
+    high: str = field(
+        default="",
+        metadata={"label": "High Complexity Task", "help": "Model for high implementation tasks."},
+    )
+
+
+@dataclass
 class ProviderConfig:
     model: str = field(
-        default="", metadata={"label": "Session model", "help": "Blank uses the provider default."}
+        default="",
+        metadata={"label": "Orchestrator model", "help": "Blank uses the provider default."},
     )
     notifications: bool = field(
         default=True,
@@ -22,6 +52,13 @@ class ProviderConfig:
         metadata={
             "label": "Documentation model",
             "help": "Blank uses the provider's documentation default.",
+        },
+    )
+    tasks: TaskModelsConfig = field(
+        default_factory=TaskModelsConfig,
+        metadata={
+            "label": "Task models",
+            "help": "Models for design, planning, review, and implementation tasks.",
         },
     )
 

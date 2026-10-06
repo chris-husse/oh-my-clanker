@@ -12,6 +12,7 @@ from .config.schema import Config
 from .providers.registry import get_provider
 from .shells.registry import detect_shell
 from .slug import MCP_TOOL_PATTERNS
+from .taskmodels import orchestrator
 from .terminal_title import terminal_title_argv
 from .terminals import detect_terminal
 from .toolctx import ToolContext
@@ -22,7 +23,7 @@ START_ALLOWED_TOOLS = [*MCP_TOOL_PATTERNS, "Bash", "Read", "Glob", "Grep"]
 @dataclass(frozen=True)
 class SessionPlan:
     session_argv: list[str]
-    env: dict[str, str]  # provider title suppression + OMC_SLUG
+    env: dict[str, str]  # provider title suppression + OMC_SLUG / OMC_PROVIDER
     title_seq: str
     title_argv: list[str]
     shell_argv: list[str]
@@ -41,10 +42,11 @@ def session_plan(
     name = cfg.llm.default
     provider = get_provider(name)
     pcfg = cfg.llm.providers.get(name)
-    model = pcfg.model if pcfg else ""
+    choice = orchestrator(ctx, cfg)
     session_argv = provider.session_argv(
         session_name=session_name,
-        model=model,
+        model=choice.model_arg,
+        effort=choice.effort,
         seed=seed,
         notifications=pcfg.notifications if pcfg else True,
     )
@@ -59,7 +61,7 @@ def session_plan(
     )
     return SessionPlan(
         session_argv=session_argv,
-        env={**provider.title_env(), "OMC_SLUG": slug},
+        env={**provider.title_env(), "OMC_SLUG": slug, "OMC_PROVIDER": name},
         title_seq=title_seq,
         title_argv=title_argv,
         shell_argv=shell_argv,
@@ -83,16 +85,20 @@ def run_headless(
     function."""
     name = cfg.llm.default
     provider = get_provider(name)
-    pcfg = cfg.llm.providers.get(name)
-    model = pcfg.model if pcfg else ""
+    choice = orchestrator(ctx, cfg)
     argv = provider.headless_argv(
         seed,
-        model=model,
+        model=choice.model_arg,
+        effort=choice.effort,
         session_name=session_name or slug,
         allowed_tools=START_ALLOWED_TOOLS if allowed_tools is None else allowed_tools,
     )
     try:
-        cp = ctx.run(argv, cwd=cwd, extra_env={**provider.title_env(), "OMC_SLUG": slug})
+        cp = ctx.run(
+            argv,
+            cwd=cwd,
+            extra_env={**provider.title_env(), "OMC_SLUG": slug, "OMC_PROVIDER": name},
+        )
     except OSError as exc:
         print(f"error: headless session failed to launch: {exc}", file=sys.stderr)
         return 1

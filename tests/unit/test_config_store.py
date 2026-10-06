@@ -84,7 +84,21 @@ def test_schema_menu_metadata_does_not_change_persisted_defaults():
         "llm": {
             "default": "claude",
             "docs": {"provider": "", "backend": "cli"},
-            "providers": {"claude": {"model": "", "notifications": True, "docs_model": ""}},
+            "providers": {
+                "claude": {
+                    "model": "",
+                    "notifications": True,
+                    "docs_model": "",
+                    "tasks": {
+                        "design": "",
+                        "plan": "",
+                        "review": "",
+                        "simple": "",
+                        "medium": "",
+                        "high": "",
+                    },
+                }
+            },
         },
     }
     assert asdict(ProjectConfig()) == {
@@ -97,6 +111,7 @@ def test_schema_menu_metadata_does_not_change_persisted_defaults():
         LLMConfig,
         DocsConfig,
         ProviderConfig,
+        type(ProviderConfig().tasks),
         WorktreeConfig,
         SecretsConfig,
     ):
@@ -155,6 +170,103 @@ def test_set_key_provider_model():
     cfg = GlobalConfig()
     store.set_key(cfg, "llm.providers.claude.model", "claude-fable-5")
     assert cfg.llm.providers["claude"].model == "claude-fable-5"
+
+
+def test_old_config_hydrates_blank_task_choices_and_saves_them_blank(tmp_path):
+    (tmp_path / "config.yaml").write_text("llm:\n  providers:\n    codex:\n      model: ''\n")
+    cfg = store.load_global(tmp_path)
+    assert asdict(cfg.llm.providers["codex"].tasks) == dict.fromkeys(
+        ("design", "plan", "review", "simple", "medium", "high"), ""
+    )
+    store.save_global(tmp_path, cfg)
+    assert store.load_global(tmp_path) == cfg
+    assert "design: ''" in (tmp_path / "config.yaml").read_text()
+
+
+@pytest.mark.parametrize("task", ("design", "plan", "review", "simple", "medium", "high"))
+def test_set_each_task_model_leaf(task):
+    cfg = GlobalConfig()
+    store.set_key(cfg, f"llm.providers.codex.tasks.{task}", "sol:high")
+    assert getattr(cfg.llm.providers["codex"].tasks, task) == "sol:high"
+
+
+@pytest.mark.parametrize(
+    ("provider", "value"),
+    [
+        ("claude", "fable"),
+        ("claude", "opus:xhigh"),
+        ("claude", "claude-fable-5-1"),
+        ("claude", "claude-sonnet-4-5[1m]"),
+        ("codex", "astra"),
+        ("codex", "sol:medium"),
+        ("codex", "gpt-6-sol:ultra"),
+        ("codex", "o3"),
+        ("codex", "my-custom-model"),
+        ("codex", ""),
+    ],
+)
+def test_validate_task_model_accepts_families_and_full_ids(provider, value):
+    assert store.validate_task_model(provider, value) == value
+
+
+@pytest.mark.parametrize(
+    ("provider", "value"),
+    [
+        ("claude", "haiku"),
+        ("claude", "claude-haiku-4"),
+        ("codex", "luna"),
+        ("codex", "gpt-6-luna"),
+        ("codex", "fable"),
+        ("claude", "sol"),
+        ("codex", "sol:extreme"),
+        ("claude", "opus:ultra"),
+        ("codex", "sol:"),
+        ("codex", ":high"),
+        ("codex", "sol high"),
+        ("codex", "--model"),
+        ("codex", 123),
+    ],
+)
+def test_invalid_task_value_rejected_without_mutating_config(provider, value):
+    cfg = GlobalConfig()
+    before = asdict(cfg)
+    with pytest.raises(ConfigError):
+        store.set_key(cfg, f"llm.providers.{provider}.tasks.plan", value)
+    assert asdict(cfg) == before
+
+
+@pytest.mark.parametrize("suffix", ("tasks", "tasks.unknown", "tasks.plan.extra"))
+def test_invalid_task_path_rejected_without_mutating_config(suffix):
+    cfg = GlobalConfig()
+    before = asdict(cfg)
+    with pytest.raises(ConfigError):
+        store.set_key(cfg, f"llm.providers.codex.{suffix}", "sol")
+    assert asdict(cfg) == before
+
+
+@pytest.mark.parametrize(
+    "leaf,value", (("model", "sol"), ("docs_model", "sol"), ("notifications", "true"))
+)
+def test_provider_scalar_trailing_dot_rejected_without_mutation(leaf, value):
+    cfg = GlobalConfig()
+    before = asdict(cfg)
+    with pytest.raises(ConfigError, match="unknown config key"):
+        store.set_key(cfg, f"llm.providers.codex.{leaf}.", value)
+    assert asdict(cfg) == before
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "tasks: []",
+        "tasks:\n        plan: 123",
+        "tasks:\n        plan: luna",
+    ),
+)
+def test_invalid_task_value_on_load_names_path(tmp_path, body):
+    (tmp_path / "config.yaml").write_text(f"llm:\n  providers:\n    codex:\n      {body}\n")
+    with pytest.raises(ConfigError, match="tasks"):
+        store.load_global(tmp_path)
 
 
 @pytest.mark.parametrize("key", ["llm.default", "llm.providers.retired.model"])

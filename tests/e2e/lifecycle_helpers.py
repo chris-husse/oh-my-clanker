@@ -198,11 +198,8 @@ for stage in ("check", "build", "verify", "review"):
 
 def _configure_codex_conversation(container):
     require_token("codex")
-    configure_omc(container, "codex")
+    model = configure_omc(container, "codex")
     metadata = require_codex_ready(container)
-    model = _codex_model()
-    rc, out = run_in(container, ["omc", "configure", "--set", f"llm.providers.codex.model={model}"])
-    assert rc == 0, out
     # Only the disposable container's account home is changed. OMC's normal
     # session argv then uses this effective config for an unsandboxed actor.
     _set_write_capability(container)
@@ -396,13 +393,8 @@ def _require_complete_design(
 
 def _configure_claude_conversation(container):
     require_token("claude")
-    configure_omc(container, "claude")
-    model = os.environ.get("CLAUDE_E2E_MODEL", "claude-sonnet-5-5")
+    model = configure_omc(container, "claude")
     judge_model = os.environ.get("CLAUDE_E2E_JUDGE_MODEL", "claude-sonnet-5-5")
-    rc, out = run_in(
-        container, ["omc", "configure", "--set", f"llm.providers.claude.model={model}"]
-    )
-    assert rc == 0, out
     rc, version = run_in(container, ["claude", "--version"])
     assert rc == 0, version
     return model, judge_model, {"claude_version": version.strip()}

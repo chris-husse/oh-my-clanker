@@ -99,10 +99,14 @@ Enter edits, Esc goes up/exits, Ctrl-C abandons an edit; accepted changes save
 immediately. Reopen after changing providers to rebuild dependent choices.
 Three-row file table: global `~/.omc/config.yaml` for LLM settings, committed
 `<repo>/.omc/config.yaml` for worktree naming, `~/.omc/secrets.yaml` for keys (0600).
-Use schema labels: Default provider; Session model; Documentation provider,
-backend and model; Native notifications; Branch prefix; Base branch.
+Use schema labels: Default provider; Orchestrator model; Task models (Design,
+Plan, Review, Simple/Medium/High Complexity Task — each a `family[:effort]`
+such as `sol:high`, blank follows the provider default; take the per-provider
+defaults table from `default_task_model` in `src/omc/providers/*.py`; plan
+tasks carry a `Complexity:` label, missing means medium); Documentation
+provider, backend and model; Native notifications; Branch prefix; Base branch.
 Show `--defaults` and repeatable `--set` with two keys in one example.
-Keep docs defaults separate from session model: standard coding tier, Claude
+Keep docs defaults separate from the Orchestrator model: standard coding tier, Claude
 CLI `sonnet`/API latest matching full id; explicit aliases resolved on save.
 Explain CLI/API backend, Claude's compatible endpoint, masked key display,
 hidden interactive entry versus shell-history/process-list exposure of `--set`.
@@ -187,7 +191,7 @@ Exactly three Mermaid diagrams, each with a short explanatory paragraph:
 3. Sequence for a real internal contract (e.g. design-record): skill → internal
    command → single prefixed JSON verdict → caller continues. List exactly
    OMC_KNOWLEDGE, OMC_DESIGN_RECORD, OMC_STAGE, OMC_REBASE_MAIN, OMC_SQUASH,
-   OMC_SLUG; include OMC_TICKET from behavior layer. Distinguish CLI verdicts
+   OMC_SLUG, OMC_MODELS (`omc internal models`, resolved task choices); include OMC_TICKET from behavior layer. Distinguish CLI verdicts
    from skill-emitted contracts. Exit codes 0 ok / 1 error / 2 refusal or usage /
    3 bail (internal: inconclusive, caller judges).
    Use plain note text without semicolons: Mermaid treats semicolons as statement

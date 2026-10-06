@@ -17,11 +17,24 @@ class Provider(ABC):
         """Known model ids for the config picker; [] means free-text entry."""
 
     @abstractmethod
+    def families(self) -> list[str]:
+        """Model families available as task choices."""
+
+    @abstractmethod
+    def effort_levels(self) -> list[str]:
+        """Statically valid effort names for this provider."""
+
+    @abstractmethod
+    def default_task_model(self, task: str) -> str:
+        """Default family[:effort] for a task, including orchestrator."""
+
+    @abstractmethod
     def headless_argv(
         self,
         prompt: str,
         *,
         model: str,
+        effort: str = "",
         allowed_tools: list[str] | None = None,
         session_name: str = "",
     ) -> list[str]:
@@ -34,7 +47,13 @@ class Provider(ABC):
 
     @abstractmethod
     def session_argv(
-        self, *, session_name: str, model: str, seed: str, notifications: bool = True
+        self,
+        *,
+        session_name: str,
+        model: str,
+        seed: str,
+        notifications: bool = True,
+        effort: str = "",
     ) -> list[str]:
         """Interactive session with explicit native notification state."""
 
@@ -47,13 +66,14 @@ class Provider(ABC):
         prompt: str,
         *,
         model: str,
+        effort: str = "",
         allowed_tools: list[str] | None = None,
     ) -> list[str]:
         """Like headless_argv, but for LIVE streaming consumption. Default:
         same argv — codex already emits incremental text. Providers
         that buffer their print mode (claude) override with a streaming
         output format."""
-        return self.headless_argv(prompt, model=model, allowed_tools=allowed_tools)
+        return self.headless_argv(prompt, model=model, effort=effort, allowed_tools=allowed_tools)
 
     def decode_stream_line(self, line: str) -> list[str]:
         """Decode ONE raw child output line into human-readable text lines.

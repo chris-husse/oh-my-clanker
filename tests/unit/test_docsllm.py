@@ -158,6 +158,22 @@ def test_cli_model_probe_runs_one_headless_call(tmp_path):
     assert not ok and detail == "claude returned no output for model 'opus'"
 
 
+def test_cli_model_probe_accepts_prompt_effort_and_trimmed_output(tmp_path):
+    ctx, _, calls = _ctx(tmp_path, {}, headless_reply="  claude-fable-5-1  ")
+    assert docsllm.cli_model_probe(
+        ctx,
+        "claude",
+        "fable",
+        prompt="Reply with only your exact model id",
+        effort="high",
+        return_output=True,
+    ) == (True, "claude-fable-5-1")
+    assert (
+        "-p Reply with only your exact model id --output-format text --model fable --effort high"
+        in calls.read_text()
+    )
+
+
 def test_cli_model_probe_works_before_the_omc_home_exists(tmp_path):
     # A fresh machine: `omc configure --set ...docs_model=` probes before any
     # write, so ctx.home (the probe's cwd) may not exist yet. It must not be

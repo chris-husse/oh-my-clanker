@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 
 import pytest
@@ -147,7 +148,56 @@ if missing:
     assert rc == 0, f"Codex E2E container policy failed: {out}"
 
 
-def configure_omc(container, provider: str) -> None:
+_E2E_MODELS = {
+    "claude": ("CLAUDE_E2E_MODEL", "claude-sonnet-5-5"),
+    "codex": ("CODEX_E2E_MODEL", "gpt-6-astra"),
+}
+_TASK_MODEL_LEAVES = (
+    "model",
+    "tasks.design",
+    "tasks.plan",
+    "tasks.review",
+    "tasks.simple",
+    "tasks.medium",
+    "tasks.high",
+)
+
+
+def _e2e_model_id(container, provider: str) -> str:
+    variable, default = _E2E_MODELS[provider]
+    model = os.environ.get(variable, default)
+    if not model:
+        pytest.fail(f"{variable} must name a real model ID for live E2E")
+    if provider == "claude" and model in ("fable", "opus", "sonnet"):
+        rc, out = run_in(
+            container,
+            [
+                "claude",
+                "-p",
+                "Reply with only your exact model id",
+                "--model",
+                model,
+                "--output-format",
+                "text",
+            ],
+            timeout=120,
+        )
+        model_id = out.strip()
+        if rc != 0 or not re.fullmatch(rf"claude-{model}-[A-Za-z0-9.-]+", model_id):
+            pytest.fail(
+                f"Could not resolve CLAUDE_E2E_MODEL={model} to a full ID via Claude; "
+                "set CLAUDE_E2E_MODEL to a full model ID or fix Claude authentication. "
+                f"CLI output: {out[:500]}"
+            )
+        return model_id
+    if not re.fullmatch(
+        r"claude-[A-Za-z0-9.-]+" if provider == "claude" else r"gpt-[A-Za-z0-9.-]+", model
+    ):
+        pytest.fail(f"{variable} must be a full {provider} model ID")
+    return model
+
+
+def configure_omc(container, provider: str) -> str:
     setup = container.get_wrapped_container().exec_run(
         ["bash", "/repo/docker/setup-plugins.sh", provider]
     )
@@ -174,7 +224,20 @@ def configure_omc(container, provider: str) -> None:
     )
     assert rc == 0, f"omc configure failed in container:\n{out}"
     if provider == "codex":
+        # Before the pins: their validation probe is a `codex exec` turn that
+        # must already run under the container's approval/sandbox policy.
         set_codex_container_policy(container)
+    model = _e2e_model_id(container, provider)
+    # One configure run: seven leaves pinned to one full id cost one
+    # validation probe, not seven (configure de-duplicates per run).
+    pins = [
+        arg
+        for leaf in _TASK_MODEL_LEAVES
+        for arg in ("--set", f"llm.providers.{provider}.{leaf}={model}")
+    ]
+    rc, out = run_in(container, ["omc", "configure", *pins])
+    assert rc == 0, f"omc E2E model pin failed:\n{out}"
+    return model
 
 
 def make_work_repo(container, path="/work/repo") -> str:

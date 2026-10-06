@@ -16,6 +16,7 @@ from ._stubs import (
     make_claude_stub,
     make_stub,
     remote_marketplace,
+    seed_codex_model_cache,
     stub_env,
 )
 
@@ -47,6 +48,7 @@ def _make_git_stub(bindir):
 
 
 def full_env(tmp_path, *, verdict=OK_VERDICT, wt_json=None):
+    seed_codex_model_cache(tmp_path)
     bindir = tmp_path / "bin"
     _make_git_stub(bindir)
     # argv-aware claude stub: `plugin list --json` reports a healthy omc +

@@ -11,7 +11,7 @@ from omc.config import store
 from omc.config.schema import GlobalConfig, ProjectConfig, ProviderConfig, SecretsConfig
 from omc.toolctx import ToolContext
 
-from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub
+from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, seed_codex_model_cache
 
 
 def _home(tmp_path, monkeypatch, *, plugins=HEALTHY_PLUGINS, install_rc=0):
@@ -25,6 +25,8 @@ def _home(tmp_path, monkeypatch, *, plugins=HEALTHY_PLUGINS, install_rc=0):
     # temp HOME). The real PATH stays behind it: the chain step needs git.
     bindir = tmp_path / "bin"
     calls = make_claude_stub(bindir, plugins=plugins, install_rc=install_rc)
+    make_stub(bindir, "codex", stdout="OK")
+    seed_codex_model_cache(tmp_path)
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
     monkeypatch.chdir(tmp_path)  # outside any git repo
     _CLAUDE_CALLS[str(home)] = calls
@@ -528,7 +530,6 @@ def test_cli_not_logged_in_fails_without_writing(tmp_path, monkeypatch, capsys):
     [
         ["configure", "--defaults"],
         ["configure", "--set", "llm.default=codex"],
-        ["configure", "--set", "llm.providers.claude.model=fable"],
         ["configure", "--set", "llm.providers.claude.notifications=false"],
     ],
 )
@@ -538,6 +539,113 @@ def test_non_documentation_changes_run_no_probe(tmp_path, monkeypatch, argv):
     assert main(argv) == 0
     calls = _claude_calls(home)
     assert seen == [] and "auth status" not in calls and "-p" not in calls
+
+
+def test_changed_task_leaves_probe_once_each_and_unchanged_leaf_does_not(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    ctx = ToolContext(home=home, env=dict(os.environ))
+    gcfg = GlobalConfig()
+    gcfg.llm.providers["claude"].model = "opus"
+    seen = []
+
+    def validate(_ctx, provider, value, *, task, say, refresh=True):
+        seen.append((provider, value, task))
+        return None
+
+    monkeypatch.setattr(configure.taskmodels, "validate_selection", validate)
+    configure._apply_settings(
+        ctx,
+        None,
+        gcfg,
+        ProjectConfig(),
+        SecretsConfig(),
+        [
+            "llm.providers.claude.model=opus",
+            "llm.providers.claude.tasks.plan=sonnet",
+            "llm.providers.claude.tasks.review=opus",
+        ],
+    )
+    assert seen == [("claude", "sonnet", "plan"), ("claude", "opus", "review")]
+    assert store.load_global(home).llm.providers["claude"].tasks.plan == "sonnet"
+
+
+def test_identical_task_values_probe_once_and_codex_refreshes_once(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    ctx = ToolContext(home=home, env=dict(os.environ))
+    seen = []
+
+    def validate(_ctx, provider, value, *, task, say, refresh=True):
+        seen.append((provider, value, task, refresh))
+        return None
+
+    monkeypatch.setattr(configure.taskmodels, "validate_selection", validate)
+    leaves = ("model", "tasks.design", "tasks.plan", "tasks.review", "tasks.simple")
+    configure._apply_settings(
+        ctx,
+        None,
+        GlobalConfig(),
+        ProjectConfig(),
+        SecretsConfig(),
+        [f"llm.providers.claude.{leaf}=claude-sonnet-5-5" for leaf in leaves]
+        + ["llm.providers.codex.tasks.plan=astra", "llm.providers.codex.tasks.high=astra:high"],
+    )
+    # Seven changed leaves, one Claude probe (same id, no effort anywhere) and
+    # two Codex probes of which only the first refreshes the model list.
+    assert seen == [
+        ("claude", "claude-sonnet-5-5", "orchestrator", True),
+        ("codex", "astra", "plan", True),
+        ("codex", "astra:high", "high", False),
+    ]
+    saved = store.load_global(home)
+    assert saved.llm.providers["claude"].tasks.simple == "claude-sonnet-5-5"
+    assert saved.llm.providers["codex"].tasks.high == "astra:high"
+
+
+def test_codex_full_id_probe_does_not_count_as_a_list_refresh(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    ctx = ToolContext(home=home, env=dict(os.environ))
+    seen = []
+
+    def validate(_ctx, provider, value, *, task, say, refresh=True):
+        seen.append((value, task, refresh))
+        return None
+
+    monkeypatch.setattr(configure.taskmodels, "validate_selection", validate)
+    configure._apply_settings(
+        ctx,
+        None,
+        GlobalConfig(),
+        ProjectConfig(),
+        SecretsConfig(),
+        ["llm.providers.codex.model=gpt-6-astra", "llm.providers.codex.tasks.plan=sol"],
+    )
+    # The full id is probed directly and never touches the list, so the first
+    # family leaf after it must still refresh.
+    assert seen == [("gpt-6-astra", "orchestrator", True), ("sol", "plan", True)]
+
+
+def test_failed_task_probe_preserves_prior_config_file(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    ctx = ToolContext(home=home, env=dict(os.environ))
+    gcfg = GlobalConfig()
+    gcfg.llm.providers["claude"].tasks.plan = "fable"
+    store.save_global(home, gcfg)
+    original = store.global_config_path(home).read_bytes()
+
+    def fail(*args, **kwargs):
+        raise configure.docsllm.ProbeFailed("model rejected")
+
+    monkeypatch.setattr(configure.taskmodels, "validate_selection", fail)
+    with pytest.raises(configure.docsllm.ProbeFailed, match="model rejected"):
+        configure._apply_settings(
+            ctx,
+            None,
+            gcfg,
+            ProjectConfig(),
+            SecretsConfig(),
+            ["llm.providers.claude.tasks.plan=opus"],
+        )
+    assert store.global_config_path(home).read_bytes() == original
 
 
 def test_api_for_codex_refused_on_set_path(tmp_path, monkeypatch, capsys):
@@ -630,7 +738,9 @@ def test_menu_native_notifications_follow_model_and_save(tmp_path, initial, answ
     ctx = ToolContext(home=tmp_path / "omc", env={})
     session = configure._compose_menu(ctx, None, cfg, ProjectConfig(), SecretsConfig())
     provider = session.root["LLM"]["claude"]
-    assert list(provider).index("Session model") + 1 == list(provider).index("Native notifications")
+    assert list(provider).index("Orchestrator model") + 1 == list(provider).index(
+        "Native notifications"
+    )
     tag = provider["Native notifications"]
     assert tag.val is initial
     assert tag.update(answer)

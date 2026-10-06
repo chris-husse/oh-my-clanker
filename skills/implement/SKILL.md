@@ -49,31 +49,44 @@ writing a second plan.
 
 ## Phase 1 — plan
 
-Invoke `superpowers:writing-plans` on the committed record. Then, for each
-MAJOR section of the plan, invoke `/omc:explain` once to pressure-test the
+Run `omc internal models` once and read its single `OMC_MODELS` verdict.
+An `"ok": false` verdict is a blocker; report its `message`. Dispatch a
+Plan worker with `tasks.plan.model` and, where supported,
+`tasks.plan.effort`. Give a fresh worker the committed record, current task
+context and project conventions; a Codex model override requires a fresh or
+partial-history fork, not a full-history fork. The worker invokes
+`superpowers:writing-plans` on the committed record. Then, for each MAJOR
+section of the plan, the worker invokes `/omc:explain` once to pressure-test the
 implementation choices — emphasis here is implementation-level design, not
 architecture: should this be an enum? add a parameter here, or reuse an
 existing mechanism? does this fit what the codebase already has? Refine the
-section with the answers; surface real alternatives to the user.
+section with the answers. It returns the plan path and any CRITICAL questions
+or real alternatives to the main session. The main session asks the user;
+answers go back to the Plan worker. If the harness cannot pin a worker model,
+use the orchestrator model and say so in one line. Apply effort only where
+the worker harness accepts it.
 
-Pass this directive to writing-plans verbatim: "Per the behavior layer's
-model-tier policy (AGENTS.md, Model selection), every task in the plan
-carries a `Model:` line naming its tier — `top tier` for spec, review, and
-judging tasks; `standard coding tier` as the floor for coding tasks;
-`heavy coding tier` for bigger coding tasks (multi-file, architecturally
-tricky, or ambiguous). Tier names only, never pinned model ids."
+Pass this directive to writing-plans verbatim: "Every implementation task in
+the plan carries a `Complexity: simple | medium | high` line, choosing one
+value. Label multi-file, architecturally tricky or ambiguous coding work
+`high`; choose `simple` for narrow routine work and `medium` otherwise.
+The plan stores complexity, never model ids."
 
 ## Phase 2 — build
 
 Execute the plan via `superpowers:subagent-driven-development` — a fresh
 subagent per task; its own checkpoints and reviews apply.
 
-Dispatch each task's subagent with its `Model:` tier resolved against the
-provider's current lineup (the Agent tool's model parameter); reviewer and
-judge subagents always get the top tier. Where the harness cannot switch
-per-subagent models, proceed on the session model — never substitute a
-cheaper tier. Plans missing `Model:` lines fall back to the behavior
-layer's model-tier policy directly.
+For each implementation task, read its `Complexity:` value and dispatch the
+worker with the matching `OMC_MODELS` task choice: `simple`, `medium`, or
+`high`. A plan missing `Complexity:` defaults to `medium`. Dispatch spec,
+code-quality and other reviewer or judge workers with `tasks.review` (Review).
+Pass each choice's `model` and, where supported, `effort` (Codex
+`reasoning_effort`). Use a fresh or partial-history Codex fork for a model
+override, materializing task context for a fresh fork. Where the harness
+cannot pin a worker model, use the orchestrator model and say so in one line;
+ignore effort if the worker harness has no effort control. The main session
+retains task sequencing, checkpoint reviews and the user-question dialog.
 
 After EACH task's subagent completes (and its reviews pass), run
 `/omc:check` — the project-defined quick gate (build what the unit tests

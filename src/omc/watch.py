@@ -28,10 +28,12 @@ from pathlib import Path
 from .buildprogress import ProgressTracker, sentinel_line
 from .cli.progress_bar import BarThread
 from .config.schema import Config
+from .errors import OmcError
 from .gitnexus import Freshness, ensure_gitnexus, refresh_knowledge, snapshot_freshness
 from .probe import require_tools
 from .providers.registry import get_provider
 from .skills_source import skill_prompt
+from .taskmodels import orchestrator
 from .toolctx import ToolContext
 from .watchlock import WATCH_BAIL_MSG, acquire_busy_narrated, acquire_instance, watch_locks
 from .wtconfig import current_branch, ensure_wt_config, primary_root, repo_root
@@ -147,9 +149,12 @@ def _auto_build(ctx: ToolContext, cfg: Config, root: str) -> None:
         _say("· no project build stage configured — skipping auto-build")
         return
     name = cfg.llm.default
-    provider = get_provider(name)
-    pcfg = cfg.llm.providers.get(name)
-    model = pcfg.model if pcfg else ""
+    try:
+        provider = get_provider(name)
+        choice = orchestrator(ctx, cfg)
+    except OmcError as exc:
+        _say(f"✗ auto-build failed (model choice: {exc})")
+        return
     log, log_path = _make_live_log("omc-auto-build-")
     _say(f"→ running project build stage via {name} (LLM-heavy) — log: {log_path}")
     tracker = ProgressTracker()
@@ -170,7 +175,8 @@ def _auto_build(ctx: ToolContext, cfg: Config, root: str) -> None:
         rc = ctx.stream(
             provider.headless_stream_argv(
                 skill_prompt("build"),
-                model=model,
+                model=choice.model_arg,
+                effort=choice.effort,
                 allowed_tools=["Bash", "Read", "Glob", "Grep"],
             ),
             cwd=root,
