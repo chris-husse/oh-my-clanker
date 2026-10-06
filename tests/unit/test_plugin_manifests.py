@@ -396,10 +396,12 @@ def test_finish_starts_with_rebase_main():
     assert order == sorted(order), "finish must order rebase-main -> squash -> push"
 
 
-def test_integrate_skill_describes_chain_v2():
+def test_integrate_skill_describes_global_section():
     text = (ROOT / "skills" / "integrate" / "SKILL.md").read_text()
-    assert ".omc/internal/AGENTS.md" not in text  # v1 layer is retired
-    assert "distribution" in text or "install" in text  # points at the v2 chain
+    assert "root symlinks" not in text
+    assert "~/.claude/CLAUDE.md" in text
+    assert "~/.codex/AGENTS.md" in text
+    assert "omc configure" in text
 
 
 def test_integrate_skill_contract():

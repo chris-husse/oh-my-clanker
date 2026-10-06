@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -247,7 +248,7 @@ def test_dry_run_shows_notify_plan(tmp_path, capsys):
 
 
 def _repo_env(tmp_path):
-    """A real git repo (repo_root/ensure_agents_chain need a real toplevel) with
+    """A real git repo (repo_root needs a real toplevel) with
     stubbed wt/claude on PATH — mirrors full_env but keeps the system git
     reachable instead of a canned stub, like test_configure's chain test does."""
     import subprocess
@@ -263,23 +264,31 @@ def _repo_env(tmp_path):
     return ToolContext.from_env(env), repo
 
 
-def test_start_dry_run_ensures_the_chain(tmp_path, monkeypatch):
-    from omc.agentsmd import chain_healthy
+def test_start_dry_run_writes_only_launching_provider(tmp_path, monkeypatch):
+    from omc.agentsmd import BEGIN_MARKER
 
     ctx, repo = _repo_env(tmp_path)
     monkeypatch.chdir(repo)
     rc = run_start(ctx, Config(), "PROJ-1 do the thing", dry_run=True)
     assert rc == 0
-    assert chain_healthy(repo)  # chain exists even on dry runs
+    assert BEGIN_MARKER in (Path(ctx.env["HOME"]) / ".claude/CLAUDE.md").read_bytes()
+    assert not (Path(ctx.env["HOME"]) / ".codex/AGENTS.md").exists()
+    assert (repo / ".omc/config/AGENTS.md").exists()
+    assert not (repo / "AGENTS.md").exists()
 
 
-def test_start_proceeds_when_chain_is_blocked(tmp_path, monkeypatch):
+def test_start_preserves_root_file_and_proceeds_on_global_write_error(tmp_path, monkeypatch):
+    from omc.agentsmd import BEGIN_MARKER
+
     ctx, repo = _repo_env(tmp_path)
     (repo / "AGENTS.md").write_text("# handwritten\n")
+    global_file = Path(ctx.env["HOME"]) / ".claude/CLAUDE.md"
+    global_file.parent.mkdir(parents=True)
+    global_file.write_bytes(BEGIN_MARKER + b"\nmissing end\n")
     monkeypatch.chdir(repo)
-    rc = run_start(ctx, Config(), "PROJ-1 do the thing", dry_run=True)
-    assert rc == 0  # blocked chain never stops start
+    assert run_start(ctx, Config(), "PROJ-1 do the thing", dry_run=True) == 0
     assert (repo / "AGENTS.md").read_text() == "# handwritten\n"
+    assert global_file.read_bytes() == BEGIN_MARKER + b"\nmissing end\n"
 
 
 def test_run_headless_allows_mcp_tool_patterns():

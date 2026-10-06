@@ -149,7 +149,8 @@ def test_update_isolates_provider_failures(tmp_path, capsys):
     assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
     err = capsys.readouterr().err
     assert "claude" in err
-    assert err.count("✗") == 1  # only the FINAL argv decides pass/fail — benign
+    assert err.count("plugin install omc@oh-my-clanker") == 1  # one plugin failure
+    assert err.count("installed omc executable not found") == 2
     # marketplace add/update failures must not each print their own ✗
 
 
@@ -495,3 +496,181 @@ def test_uninstall_without_a_hook_says_nothing_about_fish(tmp_path, monkeypatch,
     monkeypatch.setattr(installer, "_uv", lambda ctx, *a: 0)
     assert installer.run_uninstall(ctx) == 0
     assert "fish" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("macos", [False, True])
+def test_update_refreshes_global_instructions_with_fresh_cli_for_each_provider(
+    tmp_path, monkeypatch, capsys, macos
+):
+    from omc import installer
+
+    ctx, calls, exe = _fresh_ctx(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer, "_is_macos", lambda: macos)
+    monkeypatch.setattr(installer, "require_tools", lambda ctx, cfg: None)
+    monkeypatch.setattr(
+        "omc.agentsmd.ensure_global_section",
+        lambda *a: pytest.fail("old process rendered global instructions"),
+    )
+    cfg = GlobalConfig()
+    cfg.llm.providers = {"claude": ProviderConfig(), "codex": ProviderConfig()}
+    store.save_global(ctx.home, cfg)
+    assert installer.run_update(ctx) == 0
+    refreshes = [
+        c for c in calls if c[0] == "bounded" and c[1][1:3] == ["internal", "global-instructions"]
+    ]
+    assert refreshes == [
+        ("bounded", [str(exe), "internal", "global-instructions", "claude"], 30),
+        ("bounded", [str(exe), "internal", "global-instructions", "codex"], 30),
+    ]
+    if not macos:
+        assert not any(
+            c[1][1:3] == ["shell-integration", "fish"] for c in calls if c[0] == "bounded"
+        )
+    assert "global instructions" not in capsys.readouterr().err.lower()
+
+
+def test_update_refreshes_default_without_provider_entry(tmp_path, monkeypatch):
+    from omc import installer
+
+    ctx, calls, exe = _fresh_ctx(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer, "require_tools", lambda ctx, cfg: None)
+    cfg = GlobalConfig()
+    cfg.llm.default = "codex"
+    store.save_global(ctx.home, cfg)
+
+    assert run_update(ctx) == 0
+    refreshes = [
+        c for c in calls if c[0] == "bounded" and c[1][1:3] == ["internal", "global-instructions"]
+    ]
+    assert refreshes == [
+        ("bounded", [str(exe), "internal", "global-instructions", "claude"], 30),
+        ("bounded", [str(exe), "internal", "global-instructions", "codex"], 30),
+    ]
+
+
+def test_update_refresh_continues_after_plugin_and_section_failures(tmp_path, monkeypatch, capsys):
+    from omc import installer
+
+    ctx, calls, exe = _fresh_ctx(tmp_path, monkeypatch)
+    monkeypatch.setattr(installer, "_is_macos", lambda: False)
+    monkeypatch.setattr(installer, "require_tools", lambda ctx, cfg: None)
+    monkeypatch.setattr(
+        installer, "ensure_plugin", lambda *a, **k: (_ for _ in ()).throw(OmcError("plugin failed"))
+    )
+    cfg = GlobalConfig()
+    cfg.llm.providers = {"claude": ProviderConfig(), "codex": ProviderConfig()}
+    store.save_global(ctx.home, cfg)
+
+    def bounded(argv, *, timeout, cwd=None, extra_env=None):
+        calls.append(("bounded", list(argv), timeout))
+        if argv[-1] == "claude":
+            return subprocess.CompletedProcess(argv, 1, "", "error: malformed section\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(ctx, "run_bounded", bounded)
+    assert installer.run_update(ctx) == 0
+    assert ("bounded", [str(exe), "internal", "global-instructions", "claude"], 30) in calls
+    assert ("bounded", [str(exe), "internal", "global-instructions", "codex"], 30) in calls
+    err = capsys.readouterr().err
+    assert "plugin failed" in err and "malformed section" in err
+
+
+def test_update_reports_missing_fresh_cli_but_continues_plugins(tmp_path, monkeypatch, capsys):
+    from omc import installer
+
+    ctx, calls, _ = _fresh_ctx(tmp_path, monkeypatch, bin_link=False)
+    (tmp_path / "uv tools" / "omc" / "bin" / "omc").unlink()
+    monkeypatch.setattr(installer, "_is_macos", lambda: False)
+    monkeypatch.setattr(installer, "require_tools", lambda ctx, cfg: None)
+    cfg = GlobalConfig()
+    cfg.llm.providers = {"claude": ProviderConfig(), "codex": ProviderConfig()}
+    store.save_global(ctx.home, cfg)
+    assert installer.run_update(ctx) == 0
+    assert not any(c[0] == "bounded" for c in calls)
+    assert any(c[0] == "run" and c[1][:2] == ["uv", "tool"] for c in calls)
+    err = capsys.readouterr().err
+    assert "installed omc executable not found" in err
+    assert "✓ codex: plugin updated" in err
+
+
+def _configured_uninstall_ctx(tmp_path):
+    env = {
+        "HOME": str(tmp_path),
+        "OMC_HOME": str(tmp_path / "omc-home"),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-config"),
+        "CODEX_HOME": str(tmp_path / "codex-home"),
+    }
+    ctx = ToolContext.from_env(env)
+    cfg = GlobalConfig()
+    cfg.llm.providers = {"claude": ProviderConfig(), "codex": ProviderConfig()}
+    store.save_global(ctx.home, cfg)
+    return ctx, tmp_path / "claude-config" / "CLAUDE.md", tmp_path / "codex-home" / "AGENTS.md"
+
+
+def test_uninstall_removes_sections_for_configured_providers_before_config_deletion(
+    tmp_path, monkeypatch, capsys
+):
+    from omc.agentsmd import ensure_global_section
+
+    ctx, claude, codex = _configured_uninstall_ctx(tmp_path)
+    monkeypatch.setattr("omc.installer._uv", lambda ctx, *a: 0)
+    ensure_global_section(ctx, "claude")
+    ensure_global_section(ctx, "codex")
+    claude.write_bytes(b"user before\n\n" + claude.read_bytes() + b"\nuser after\n")
+    assert run_uninstall(ctx) == 0
+    assert claude.read_bytes() == b"user before\nuser after\n"
+    assert not codex.exists()
+    assert not ctx.home.exists()
+    assert "removed omc section" in capsys.readouterr().err
+
+
+def test_uninstall_reports_malformed_provider_and_removes_other_provider(
+    tmp_path, monkeypatch, capsys
+):
+    from omc.agentsmd import END_MARKER, ensure_global_section
+
+    ctx, claude, codex = _configured_uninstall_ctx(tmp_path)
+    monkeypatch.setattr("omc.installer._uv", lambda ctx, *a: 0)
+    ensure_global_section(ctx, "claude")
+    ensure_global_section(ctx, "codex")
+    malformed = claude.read_bytes().replace(END_MARKER, b"broken end marker")
+    claude.write_bytes(malformed)
+    assert run_uninstall(ctx) == 0
+    assert claude.read_bytes() == malformed
+    assert not codex.exists() and not ctx.home.exists()
+    assert "malformed" in capsys.readouterr().err
+
+
+def test_uninstall_removes_owned_section_for_deselected_provider(tmp_path, monkeypatch):
+    from omc.agentsmd import ensure_global_section
+
+    ctx, claude, codex = _configured_uninstall_ctx(tmp_path)
+    cfg = GlobalConfig()
+    store.save_global(ctx.home, cfg)  # Codex was previously selected or used as an override.
+    monkeypatch.setattr("omc.installer._uv", lambda ctx, *args: 0)
+    ensure_global_section(ctx, "codex")
+    claude.parent.mkdir(parents=True)
+    claude.write_bytes(b"foreign instructions\n")
+
+    assert run_uninstall(ctx) == 0
+    assert not codex.exists()
+    assert claude.read_bytes() == b"foreign instructions\n"
+
+
+@pytest.mark.parametrize("config_state", ["missing", "malformed"])
+def test_uninstall_cleans_sections_without_valid_config(tmp_path, monkeypatch, config_state):
+    from omc.agentsmd import ensure_global_section
+
+    ctx, claude, codex = _configured_uninstall_ctx(tmp_path)
+    if config_state == "missing":
+        store.global_config_path(ctx.home).unlink()
+    else:
+        store.global_config_path(ctx.home).write_text("llm: [malformed\n")
+    calls = []
+    monkeypatch.setattr("omc.installer._uv", lambda ctx, *args: calls.append(args) or 0)
+    ensure_global_section(ctx, "claude")
+    ensure_global_section(ctx, "codex")
+
+    assert run_uninstall(ctx) == 0
+    assert not claude.exists() and not codex.exists()
+    assert calls == [("tool", "uninstall", "omc")]

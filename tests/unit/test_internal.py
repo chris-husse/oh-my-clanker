@@ -6,6 +6,49 @@ import subprocess
 from omc.internal import run_internal
 
 
+def test_global_instructions_dispatch_writes_each_provider_from_installed_package(
+    tmp_path, monkeypatch, capsys
+):
+    from omc.agentsmd import BEGIN_MARKER, END_MARKER
+
+    claude_dir = tmp_path / "claude-config"
+    codex_dir = tmp_path / "codex-home"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+    for provider, target in (
+        ("claude", claude_dir / "CLAUDE.md"),
+        ("codex", codex_dir / "AGENTS.md"),
+    ):
+        assert run_internal(["global-instructions", provider]) == 0
+        data = target.read_bytes()
+        assert data.count(BEGIN_MARKER) == 1
+        assert data.count(END_MARKER) == 1
+        assert b"omc behavior layer" in data
+    assert capsys.readouterr().out == ""
+
+
+def test_global_instructions_reports_malformed_file_and_invalid_provider(
+    tmp_path, monkeypatch, capsys
+):
+    from omc.agentsmd import BEGIN_MARKER
+
+    claude_dir = tmp_path / "claude-config"
+    claude_dir.mkdir()
+    target = claude_dir / "CLAUDE.md"
+    malformed = b"user text\n" + BEGIN_MARKER + b"\nunfinished\n"
+    target.write_bytes(malformed)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    assert run_internal(["global-instructions", "claude"]) == 1
+    assert target.read_bytes() == malformed
+    assert "malformed" in capsys.readouterr().err
+    assert run_internal(["global-instructions", "retired"]) == 1
+    assert "unknown provider" in capsys.readouterr().err
+    assert run_internal(["global-instructions"]) == 2
+
+
 def _git(*args, cwd):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 

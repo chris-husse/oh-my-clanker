@@ -34,9 +34,10 @@ the remaining slots. The interactive session is where files get written.
 
 1. **Inventory**, presented as a status table (present / missing /
    suspicious), one row each:
-   - `AGENTS.md` + `CLAUDE.md` → do both root symlinks resolve into the omc
-     install's `distribution/AGENTS.md` (machine-local, gitignored), with
-     project guidance committed at `.omc/config/AGENTS.md`?
+   - Global instructions → does each configured harness's global file
+     (`~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`, honoring its configured
+     home) contain the current omc section, with project guidance committed
+     at `.omc/config/AGENTS.md`?
    - `.omc/config/AGENTS.md` — the project's own agent instructions
    - `.config/wt.toml` — does a copy-ignored step exist?
    - `.gitnexus/` index and `.omc/docs/` generated docs
@@ -46,11 +47,12 @@ the remaining slots. The interactive session is where files get written.
    - `.omc/hooks/post-watch.sh` — optional CLI-side hook `omc watch` runs
      after action ticks (sync / forced refresh)
 2. **Mechanical fixes** via the existing machinery (with the user's go-ahead):
-   - Chain missing/stale → re-run `omc configure`: read the CURRENT default
+   - Global omc section missing/stale → re-run `omc configure`: read the CURRENT default
      from `~/.omc/config.yaml` and re-set it
      (`omc configure --set llm.default=<current>`) — **never `--defaults`,
-     which would reset the user's config**. Blocked chain (regular files in
-     the way) → walk the user through the migration steps configure printed.
+     which would reset the user's config**. If section markers are malformed,
+     report configure's error and let the user repair their global file;
+     omc leaves that file untouched.
    - wt config flagged → run the `check-wt-config` skill and present its
      findings.
    - No index → **offer** `/omc:index` now: the knowledge graph is what
@@ -135,7 +137,8 @@ warming, notifying a dashboard. Propose it only when a real use exists;
 absence is the correct default.
 
 ### `.omc/config/AGENTS.md`
-The project's own agent instructions (the omc chain sends every agent here).
+The project's own agent instructions (omc's global behavior layer directs
+agents here when working in this repository).
 Gather what the user wants agents to always know — build/test commands,
 architecture ground rules, review expectations, tribal knowledge — and
 propose the content. omc never edits this file after seeding; this is the

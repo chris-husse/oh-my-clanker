@@ -1,120 +1,223 @@
-from pathlib import Path
+import pytest
 
-from omc.agentsmd import chain_healthy, distribution_agents_md, ensure_agents_chain
+from omc import agentsmd
+from omc.errors import OmcError
 from omc.toolctx import ToolContext
 
-V1_INTERNAL = Path(".omc/internal/AGENTS.md")
+
+def _ctx(tmp_path, **overrides):
+    return ToolContext.from_env({"HOME": str(tmp_path), **overrides})
 
 
-def _ctx(tmp_path):
-    return ToolContext.from_env({"HOME": str(tmp_path)})
+def _target(tmp_path, name="claude"):
+    return tmp_path / (".claude/CLAUDE.md" if name == "claude" else ".codex/AGENTS.md")
 
 
-def test_distribution_agents_md_resolves_and_carries_the_layer():
-    target = distribution_agents_md()
-    assert target.is_file()
-    text = target.read_text()
-    assert ".omc/config/AGENTS.md" in text  # fans out to the project layer
-    assert "rebase-main" in text and "OMC_" in text
-    assert "subagent" in text.lower() and "model-tier policy" in text  # model doctrine
-    assert "omc update" in text  # header explains how the file updates
+def _section():
+    return (
+        agentsmd.BEGIN_MARKER
+        + b"\n"
+        + agentsmd.distribution_agents_md().read_bytes()
+        + agentsmd.END_MARKER
+        + b"\n"
+    )
 
 
-def test_chain_created_from_nothing(tmp_path, capsys):
-    root = tmp_path / "proj"
+def test_distribution_layer_has_global_scope_and_project_pointer():
+    target = agentsmd.distribution_agents_md()
+    body = target.read_text()
+    assert "This section is installed into your global instructions by omc" in body
+    assert "contains an `.omc/` directory" in body
+    assert "ignore everything in this section" in body
+    assert "when the repository you are working in contains `.omc/config/AGENTS.md`" in " ".join(
+        body.split()
+    )
+    assert "it takes precedence over this layer" in body
+    assert "rebase-main" in body and "model-tier policy" in body
+
+
+def test_absent_global_file_created_with_exact_inline_body(tmp_path):
+    target = _target(tmp_path)
+    assert agentsmd.ensure_global_section(_ctx(tmp_path), "claude") == "created"
+    assert target.read_bytes() == _section()
+
+
+@pytest.mark.parametrize(
+    "original,separator",
+    [
+        (b"user", b"\n\n"),
+        (b"user\n", b"\n"),
+        (b"user\n\n", b""),
+        (b"user\n\n\n", b""),
+        (b"", b""),
+        (b"\xff\r\n", b"\n"),
+    ],
+)
+def test_append_preserves_foreign_bytes_with_one_separator(tmp_path, original, separator):
+    target = _target(tmp_path)
+    target.parent.mkdir()
+    target.write_bytes(original)
+    assert agentsmd.ensure_global_section(_ctx(tmp_path), "claude") == "created"
+    assert target.read_bytes() == original + separator + _section()
+
+
+def test_existing_section_replaced_in_place_preserves_surroundings_and_mode(tmp_path):
+    target = _target(tmp_path)
+    target.parent.mkdir()
+    before = b"\xff pref\r\n\r\n"
+    after = b"\r\nuser suffix\xfe\n"
+    target.write_bytes(before + agentsmd.BEGIN_MARKER + b"\nold\n" + agentsmd.END_MARKER + after)
+    target.chmod(0o600)
+    assert agentsmd.ensure_global_section(_ctx(tmp_path), "claude") == "updated"
+    assert target.read_bytes() == before + _section() + after
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_current_section_does_not_change_bytes_or_mtime(tmp_path):
+    target = _target(tmp_path)
+    agentsmd.ensure_global_section(_ctx(tmp_path), "claude")
+    before, mtime = target.read_bytes(), target.stat().st_mtime_ns
+    assert agentsmd.ensure_global_section(_ctx(tmp_path), "claude") == "current"
+    assert (target.read_bytes(), target.stat().st_mtime_ns) == (before, mtime)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"BEGIN",
+        b"END",
+        b"BEGIN\nBEGIN\nEND",
+        b"BEGIN\nEND\nEND",
+        b"END\nBEGIN",
+    ],
+)
+def test_malformed_markers_raise_and_leave_bytes_untouched(tmp_path, body):
+    target = _target(tmp_path)
+    target.parent.mkdir()
+    original = body.replace(b"BEGIN", agentsmd.BEGIN_MARKER).replace(b"END", agentsmd.END_MARKER)
+    target.write_bytes(original)
+    with pytest.raises(OmcError, match=r"CLAUDE.md.*marker"):
+        agentsmd.ensure_global_section(_ctx(tmp_path), "claude")
+    assert target.read_bytes() == original
+    with pytest.raises(OmcError, match=r"CLAUDE.md.*marker"):
+        agentsmd.remove_global_section(_ctx(tmp_path), "claude")
+    assert target.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "name,override,filename",
+    [
+        ("claude", "CLAUDE_CONFIG_DIR", "CLAUDE.md"),
+        ("codex", "CODEX_HOME", "AGENTS.md"),
+    ],
+)
+def test_provider_override_uses_context_environment(tmp_path, name, override, filename):
+    custom = tmp_path / "custom"
+    agentsmd.ensure_global_section(_ctx(tmp_path, **{override: str(custom)}), name)
+    assert (custom / filename).read_bytes() == _section()
+    assert not _target(tmp_path, name).exists()
+
+
+def test_global_symlink_refused_without_changing_link_or_target(tmp_path):
+    target = _target(tmp_path)
+    target.parent.mkdir()
+    personal = tmp_path / "personal.md"
+    personal.write_bytes(b"mine\n")
+    target.symlink_to(personal)
+    with pytest.raises(OmcError, match="symlink"):
+        agentsmd.ensure_global_section(_ctx(tmp_path), "claude")
+    assert target.is_symlink() and target.resolve() == personal
+    assert personal.read_bytes() == b"mine\n"
+    with pytest.raises(OmcError, match="symlink"):
+        agentsmd.remove_global_section(_ctx(tmp_path), "claude")
+    assert target.is_symlink() and personal.read_bytes() == b"mine\n"
+
+
+def test_project_seed_only_if_absent_and_ignores_root_files(tmp_path):
+    root = tmp_path / "repo"
     root.mkdir()
-    status = ensure_agents_chain(_ctx(tmp_path), root)
-    assert status == "created"
-    target = distribution_agents_md().resolve()
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        link = root / name
-        assert link.is_symlink(), f"{name} must be a symlink"
-        assert link.resolve() == target  # absolute link into the install
-    assert not (root / V1_INTERNAL).exists()  # v1 layer is never created
-    assert (root / ".omc" / "config" / "AGENTS.md").is_file()  # starter seeded
-    gitignore = (root / ".gitignore").read_text()
-    assert "/AGENTS.md" in gitignore and "/CLAUDE.md" in gitignore
-    assert "AGENTS.md" in capsys.readouterr().err  # narrated
-    assert chain_healthy(root)
+    (root / "AGENTS.md").write_bytes(b"project root\n")
+    (root / ".gitignore").write_bytes(b"custom\n")
+    agentsmd.seed_project_agents_md(root)
+    seeded = root / ".omc/config/AGENTS.md"
+    assert "root AGENTS.md/CLAUDE.md symlinks" not in seeded.read_text()
+    seeded.write_bytes(b"personal project rules\n")
+    agentsmd.seed_project_agents_md(root)
+    assert seeded.read_bytes() == b"personal project rules\n"
+    assert (root / "AGENTS.md").read_bytes() == b"project root\n"
+    assert (root / ".gitignore").read_bytes() == b"custom\n"
 
 
-def test_correct_chain_is_silent_and_idempotent(tmp_path, capsys):
-    root = tmp_path / "proj"
-    root.mkdir()
-    ensure_agents_chain(_ctx(tmp_path), root)
-    project = root / ".omc" / "config" / "AGENTS.md"
-    project.write_text("# my project rules\n")
-    before = (root / ".gitignore").read_text()
-    capsys.readouterr()
-    status = ensure_agents_chain(_ctx(tmp_path), root)
-    assert status == "ok"
-    assert project.read_text() == "# my project rules\n"  # NEVER overwritten
-    assert (root / ".gitignore").read_text() == before  # no duplicate entries
-    assert capsys.readouterr().err == ""  # healthy chain is quiet
+@pytest.mark.parametrize(
+    "prefix,suffix,expected",
+    [
+        (b"user", b"", b"user"),
+        (b"user\n\n", b"", b"user\n"),
+        (b"", b"\n\nuser", b"user"),
+        (b"before\n\n", b"\n\nafter", b"before\n\nafter"),
+    ],
+)
+def test_remove_owned_span_and_one_adjacent_blank_separator(tmp_path, prefix, suffix, expected):
+    target = _target(tmp_path)
+    target.parent.mkdir()
+    target.write_bytes(prefix + _section() + suffix)
+    note = agentsmd.remove_global_section(_ctx(tmp_path), "claude")
+    assert note and "CLAUDE.md" in note
+    assert target.read_bytes() == expected
 
 
-def test_v1_chain_migrates_to_v2(tmp_path, capsys):
-    root = tmp_path / "proj"
-    root.mkdir()
-    internal = root / V1_INTERNAL
-    internal.parent.mkdir(parents=True)
-    internal.write_text("# omc behavior layer (generated)\n")
-    (root / ".omc" / "config").mkdir(parents=True)
-    (root / ".omc" / "config" / "AGENTS.md").write_text("# mine\n")
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        (root / name).symlink_to(V1_INTERNAL)  # relative v1 links
-    status = ensure_agents_chain(_ctx(tmp_path), root)
-    assert status == "created"
-    target = distribution_agents_md().resolve()
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        assert (root / name).resolve() == target
-    assert not internal.exists()  # v1 file retired
-    assert not internal.parent.exists()  # empty .omc/internal removed
-    assert (root / ".omc" / "config" / "AGENTS.md").read_text() == "# mine\n"
+def test_configure_uninstall_round_trip_preserves_user_final_newline(tmp_path):
+    target = _target(tmp_path)
+    target.parent.mkdir()
+    original = b"# My instructions\nKeep this line.\n"
+    target.write_bytes(original)
+    agentsmd.ensure_global_section(_ctx(tmp_path), "claude")
+    assert agentsmd.remove_global_section(_ctx(tmp_path), "claude")
+    assert target.read_bytes() == original
 
 
-def test_dangling_v2_link_is_repaired_not_blocked(tmp_path):
-    root = tmp_path / "proj"
-    root.mkdir()
-    gone = tmp_path / "old-venv" / "omc" / "distribution" / "AGENTS.md"
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        (root / name).symlink_to(gone)  # previous install location, now deleted
-    status = ensure_agents_chain(_ctx(tmp_path), root)
-    assert status == "created"
-    target = distribution_agents_md().resolve()
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        assert (root / name).resolve() == target
+def test_configure_uninstall_normalizes_unterminated_user_text(tmp_path):
+    target = _target(tmp_path)
+    target.parent.mkdir()
+    target.write_bytes(b"user")
+    agentsmd.ensure_global_section(_ctx(tmp_path), "claude")
+    assert agentsmd.remove_global_section(_ctx(tmp_path), "claude")
+    assert target.read_bytes() == b"user\n"
 
 
-def test_regular_root_file_is_never_replaced(tmp_path, capsys):
-    root = tmp_path / "proj"
-    root.mkdir()
-    (root / "AGENTS.md").write_text("# handwritten\n")
-    status = ensure_agents_chain(_ctx(tmp_path), root)
-    assert status == "blocked"
-    assert not (root / "AGENTS.md").is_symlink()
-    assert (root / "AGENTS.md").read_text() == "# handwritten\n"
-    err = capsys.readouterr().err
-    assert ".omc/config/AGENTS.md" in err  # migration steps named
-    assert not (root / "CLAUDE.md").exists()  # nothing half-created
-    assert not (root / ".gitignore").exists()  # blocked mutates NOTHING
+def test_remove_section_only_deletes_file(tmp_path):
+    agentsmd.ensure_global_section(_ctx(tmp_path), "claude")
+    assert agentsmd.remove_global_section(_ctx(tmp_path), "claude")
+    assert not _target(tmp_path).exists()
 
 
-def test_foreign_symlink_is_warned_not_touched(tmp_path, capsys):
-    root = tmp_path / "proj"
-    root.mkdir()
-    (root / "other.md").write_text("x")
-    (root / "AGENTS.md").symlink_to("other.md")
-    status = ensure_agents_chain(_ctx(tmp_path), root)
-    assert status == "blocked"
-    assert (root / "AGENTS.md").resolve() == (root / "other.md").resolve()
+def test_remove_deletes_file_when_only_whitespace_surrounds_section(tmp_path):
+    target = _target(tmp_path)
+    target.parent.mkdir()
+    target.write_bytes(b" \n" + _section() + b"\t\n")
+    assert agentsmd.remove_global_section(_ctx(tmp_path), "claude")
+    assert not target.exists()
 
 
-def test_chain_healthy_is_a_cheap_read_only_probe(tmp_path):
-    root = tmp_path / "proj"
-    root.mkdir()
-    assert not chain_healthy(root)
-    ensure_agents_chain(_ctx(tmp_path), root)
-    assert chain_healthy(root)
-    (root / "AGENTS.md").unlink()
-    assert not chain_healthy(root)
+def test_remove_foreign_only_or_absent_file_leaves_it_alone(tmp_path):
+    target = _target(tmp_path)
+    assert agentsmd.remove_global_section(_ctx(tmp_path), "claude") is None
+    target.parent.mkdir()
+    target.write_bytes(b"mine\n")
+    assert agentsmd.remove_global_section(_ctx(tmp_path), "claude") is None
+    assert target.read_bytes() == b"mine\n"
+
+
+def test_atomic_write_failure_preserves_original_and_cleans_temp(tmp_path, monkeypatch):
+    target = _target(tmp_path)
+    target.parent.mkdir()
+    target.write_bytes(b"foreign instructions\n")
+
+    def refuse_replace(source, destination):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(agentsmd.os, "replace", refuse_replace)
+    with pytest.raises(OmcError, match=r"CLAUDE.md.*rename failed"):
+        agentsmd.ensure_global_section(_ctx(tmp_path), "claude")
+    assert target.read_bytes() == b"foreign instructions\n"
+    assert list(target.parent.iterdir()) == [target]

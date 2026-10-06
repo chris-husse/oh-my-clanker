@@ -37,6 +37,7 @@ from .wtconfig import (
 
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] | wt-template | design-record"
+    " | global-instructions PROVIDER"
     " | notify --provider NAME [payload]"
     " | gitnexus [--git REF] <ensure|status|refresh [--enable-documentation]"
     "|query|context|impact|cypher> [args…]"
@@ -304,6 +305,18 @@ def run_internal(argv: list[str]) -> int:
             print(_USAGE, file=sys.stderr)
             return 2
         return _design_record(ToolContext.from_env())
+    if cmd == "global-instructions":
+        if len(rest) != 1:
+            print(_USAGE, file=sys.stderr)
+            return 2
+        from .agentsmd import ensure_global_section
+
+        try:
+            ensure_global_section(ToolContext.from_env(), rest[0])
+        except OmcError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if cmd == "rebase-main":
         parser = argparse.ArgumentParser(prog="omc internal rebase-main", add_help=False)
         parser.add_argument("--base", default=None)

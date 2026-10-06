@@ -1,13 +1,14 @@
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from omc.agentsmd import distribution_agents_md
+from omc import agentsmd
 from omc.cli import main
 from omc.config import store
-from omc.config.schema import GlobalConfig
+from omc.config.schema import GlobalConfig, ProviderConfig
 from omc.toolctx import ToolContext
 
 from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub
@@ -17,6 +18,8 @@ def _home(tmp_path, monkeypatch, *, plugins=HEALTHY_PLUGINS, install_rc=0):
     home = tmp_path / "omchome"
     monkeypatch.setenv("OMC_HOME", str(home))
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     # configure now installs the claude plugin — a stub MUST shadow the real
     # `claude` (a real one would install plugins over the network into the
     # temp HOME). The real PATH stays behind it: the chain step needs git.
@@ -194,24 +197,86 @@ def test_interactive_requires_tty(tmp_path, monkeypatch, capsys):
     assert "TTY" in capsys.readouterr().err
 
 
-def test_configure_in_repo_creates_agents_chain(tmp_path, monkeypatch):
+def test_configure_in_repo_seeds_project_and_writes_global_section(tmp_path, monkeypatch):
     _home(tmp_path, monkeypatch)
     repo = _repo(tmp_path, monkeypatch)
+    (repo / "AGENTS.md").write_bytes(b"root instructions\n")
+    (repo / "legacy.md").write_bytes(b"old symlink target\n")
+    (repo / "CLAUDE.md").symlink_to("legacy.md")
+    legacy_internal = repo / ".omc/internal/AGENTS.md"
+    legacy_internal.parent.mkdir(parents=True)
+    legacy_internal.write_bytes(b"old internal layer\n")
+    (repo / ".gitignore").write_bytes(b"existing ignore\n")
     assert main(["configure", "--defaults"]) == 0
-    assert (repo / "AGENTS.md").is_symlink()
+    assert (tmp_path / ".claude/CLAUDE.md").read_bytes().count(agentsmd.BEGIN_MARKER) == 1
+    assert (
+        agentsmd.distribution_agents_md().read_bytes()
+        in (tmp_path / ".claude/CLAUDE.md").read_bytes()
+    )
+    assert (repo / ".omc/config/AGENTS.md").is_file()
+    assert (repo / "AGENTS.md").read_bytes() == b"root instructions\n"
+    assert (repo / ".gitignore").read_bytes() == b"existing ignore\n"
     assert (repo / "CLAUDE.md").is_symlink()
-    assert (repo / "AGENTS.md").resolve() == distribution_agents_md().resolve()
-    assert not (repo / ".omc" / "internal" / "AGENTS.md").exists()
-    assert (repo / ".omc" / "config" / "AGENTS.md").is_file()
+    assert (repo / "CLAUDE.md").readlink() == Path("legacy.md")
+    assert (repo / "legacy.md").read_bytes() == b"old symlink target\n"
+    assert legacy_internal.read_bytes() == b"old internal layer\n"
 
 
-def test_configure_outside_repo_skips_chain(tmp_path, monkeypatch):
+def test_configure_outside_repo_still_writes_global_section(tmp_path, monkeypatch):
     _home(tmp_path, monkeypatch)
     outside = tmp_path / "nowhere"
     outside.mkdir()
     monkeypatch.chdir(outside)
     assert main(["configure", "--defaults"]) == 0
+    assert agentsmd.BEGIN_MARKER in (tmp_path / ".claude/CLAUDE.md").read_bytes()
     assert not (outside / "AGENTS.md").exists()
+
+
+def test_configure_writes_all_providers_when_one_global_file_is_malformed(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    repo = _repo(tmp_path, monkeypatch)
+    claude_file = tmp_path / ".claude/CLAUDE.md"
+    claude_file.parent.mkdir()
+    claude_file.write_bytes(agentsmd.BEGIN_MARKER + b"\nmissing end\n")
+    assert main(["configure", "--defaults", "--set", "llm.providers.codex.model="]) == 0
+    assert claude_file.read_bytes() == agentsmd.BEGIN_MARKER + b"\nmissing end\n"
+    assert agentsmd.BEGIN_MARKER in (tmp_path / ".codex/AGENTS.md").read_bytes()
+    assert (repo / ".omc/config/AGENTS.md").exists()
+
+
+def test_configure_set_mode_writes_all_configured_global_sections(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    assert main(["configure", "--set", "llm.providers.codex.model="]) == 0
+    for path in (tmp_path / ".claude/CLAUDE.md", tmp_path / ".codex/AGENTS.md"):
+        assert agentsmd.BEGIN_MARKER in path.read_bytes()
+
+
+def test_configure_writes_default_provider_even_without_provider_entry(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    cfg = GlobalConfig()
+    cfg.llm.default = "codex"
+    store.save_global(home, cfg)
+    assert "codex" not in cfg.llm.providers
+
+    assert main(["configure", "--set", "llm.default=codex"]) == 0
+    assert agentsmd.BEGIN_MARKER in (tmp_path / ".codex/AGENTS.md").read_bytes()
+    assert (tmp_path / ".claude/CLAUDE.md").read_bytes().count(agentsmd.BEGIN_MARKER) == 1
+
+
+def test_configure_interactive_mode_writes_global_sections(tmp_path, monkeypatch):
+    from omc import configure
+
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def choose_providers(ctx, gcfg, scfg):
+        gcfg.llm.providers["codex"] = ProviderConfig()
+
+    monkeypatch.setattr(configure, "_walkthrough_global", choose_providers)
+    monkeypatch.setattr(configure, "_ensure_plugins", lambda ctx, cfg: None)
+    assert main(["configure"]) == 0
+    assert agentsmd.BEGIN_MARKER in (tmp_path / ".claude/CLAUDE.md").read_bytes()
+    assert agentsmd.BEGIN_MARKER in (tmp_path / ".codex/AGENTS.md").read_bytes()
 
 
 def test_configure_installs_missing_claude_plugin(tmp_path, monkeypatch, capsys):

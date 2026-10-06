@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shlex
+from collections.abc import Mapping
+from pathlib import Path
 
 from .base import Provider
 
@@ -18,6 +20,11 @@ _API_FAMILIES = {"fable": "claude-fable-", "opus": "claude-opus-", "sonnet": "cl
 
 class ClaudeProvider(Provider):
     name = "claude"
+
+    def instructions_file(self, env: Mapping[str, str]) -> Path:
+        # Claude Code loads user CLAUDE.md in every session, including projects
+        # whose own instruction file is named AGENTS.md.
+        return self._instruction_dir(env, "CLAUDE_CONFIG_DIR", ".claude") / "CLAUDE.md"
 
     def models(self):
         # CLI aliases — resolved to the latest model in each family by the

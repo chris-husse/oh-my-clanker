@@ -52,8 +52,8 @@ def _scan_disk(home: Path) -> list[Path]:
 
     def walk(d: Path) -> None:
         # Contain OSError per-directory: concurrent dependency work can delete a
-        # dir between iterdir() and the child stats below. Doctrine (watch.py
-        # _chain_tick): a tick failure must warn and skip, never crash the loop.
+        # dir between iterdir() and the child stats below. A tick failure must
+        # warn and skip, never crash the loop.
         try:
             children = sorted(d.iterdir())
         except OSError as exc:
@@ -81,7 +81,7 @@ def _scan_disk(home: Path) -> list[Path]:
 def _spawn(ctx: ToolContext, argv: list[str]) -> None:
     _say(f"→ {' '.join(argv)}")
     # Contain a missing/unlaunchable omc (FileNotFoundError is an OSError): the
-    # loop must warn and continue, never crash (watch.py _chain_tick doctrine).
+    # loop must warn and continue, never crash the watch loop.
     try:
         cp = ctx.run(argv)
     except OSError as exc:
@@ -149,7 +149,7 @@ def _tick(ctx: ToolContext, attempted: set[tuple[str, str]]) -> int:
                 if ("ensure", f"{key}@{commit}") in attempted:
                     continue
                 # Warn-and-skip a malformed entry rather than KeyError out of the
-                # loop (watch.py _chain_tick doctrine: warn and skip, never crash).
+                # loop: warn and skip, never crash.
                 url = dep.get("url")
                 if not url:
                     _say(f"· {key}@{commit} has no url in the manifest; skipping")

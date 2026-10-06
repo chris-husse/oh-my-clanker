@@ -12,7 +12,7 @@ from .errors import OmcError
 from .fish_integration import is_owned, managed_fish_path, remove_owned_hook
 from .plugin import ensure_plugin, marketplace_source
 from .probe import require_tools
-from .providers.registry import get_provider
+from .providers.registry import get_provider, provider_names
 from .toolctx import ToolContext, tool_version
 
 _UV_MISSING = (
@@ -158,6 +158,36 @@ def run_update(ctx: ToolContext) -> int:
     if cfg is None:
         print("· no config — skipping plugin updates (run `omc configure`)", file=sys.stderr)
         return _finish_update(post, dep_rc)
+    # The process still running here may contain the pre-upgrade package. Ask
+    # the fresh executable to render its own installed behavior layer.
+    fresh_exe = _fresh_cli(ctx)
+    for name in dict.fromkeys((*cfg.llm.providers, cfg.llm.default)):
+        if fresh_exe is None:
+            print(
+                f"✗ {name}: global instructions: installed omc executable not found — continuing",
+                file=sys.stderr,
+            )
+            continue
+        try:
+            cp = ctx.run_bounded(
+                [str(fresh_exe), "internal", "global-instructions", name], timeout=30
+            )
+        except TimeoutError:
+            print(
+                f"✗ {name}: global instructions timed out after 30s — continuing", file=sys.stderr
+            )
+            continue
+        except OSError as exc:
+            print(
+                f"✗ {name}: global instructions: {fresh_exe} not runnable ({exc}) — continuing",
+                file=sys.stderr,
+            )
+            continue
+        if cp.returncode != 0:
+            detail = (cp.stderr or cp.stdout or "").strip()[:200]
+            print(f"✗ {name}: global instructions failed: {detail} — continuing", file=sys.stderr)
+        elif cp.stderr:
+            sys.stderr.write(cp.stderr if cp.stderr.endswith("\n") else cp.stderr + "\n")
     source = marketplace_source(ctx.env)
     for name in cfg.llm.providers:
         if name == "claude":
@@ -209,6 +239,18 @@ def _is_unsafe_home(home: Path, env) -> bool:
 
 
 def run_uninstall(ctx: ToolContext) -> int:
+    # Owned sections can outlive config changes or provider overrides. Scan
+    # every supported path independently, even when config is absent or invalid.
+    from .agentsmd import remove_global_section
+
+    for name in provider_names():
+        try:
+            note = remove_global_section(ctx, name)
+        except (OmcError, OSError) as exc:
+            print(f"✗ {name}: {exc} — continuing", file=sys.stderr)
+            continue
+        if note:
+            print(f"· {name}: {note}", file=sys.stderr)
     # Every platform: `shell-integration fish enable` works anywhere, so ownership (not the
     # OS) decides. Owned file only; anything else stays, with a note.
     had_hook = is_owned(managed_fish_path(ctx))

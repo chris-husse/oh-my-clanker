@@ -1,7 +1,7 @@
 # oh-my-clanker — project agent instructions
 
-(Reached via omc's AGENTS.md control chain — the root AGENTS.md/CLAUDE.md
-symlinks send you here.) Deeper truth map: `.omc/skills/explain-context/SKILL.md`.
+(Read after omc's global behavior layer when working in this repository.)
+Deeper truth map: `.omc/skills/explain-context/SKILL.md`.
 
 This repo is a uv-installed Python CLI (`src/omc/`) plus a skills plugin
 (`skills/`, installable in Claude Code / Codex from this repo).

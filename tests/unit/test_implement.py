@@ -172,3 +172,50 @@ def test_override_probes_the_overridden_provider(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "→ probing tools (git, wt, codex)" in err
     assert "→ omc plugin for codex: unverified" in err
+
+
+def test_implement_override_ensures_global_section_before_launch(tmp_path, monkeypatch):
+    import omc.implement as impl
+    from omc.agentsmd import BEGIN_MARKER
+
+    repo = _worktree(tmp_path)
+    ctx = _ctx(tmp_path, repo, monkeypatch)
+    cfg = Config()
+    cfg.llm.default = "codex"
+    target = tmp_path / ".codex" / "AGENTS.md"
+
+    def fake_headless(*args, **kwargs):
+        assert BEGIN_MARKER in target.read_bytes()
+        return 0
+
+    monkeypatch.setattr(impl, "run_headless", fake_headless)
+    assert run_implement(ctx, cfg, headless=True) == 0
+
+
+def test_implement_continues_when_global_section_is_malformed(tmp_path, monkeypatch, capsys):
+    import omc.implement as impl
+    from omc.agentsmd import BEGIN_MARKER
+
+    repo = _worktree(tmp_path)
+    ctx = _ctx(tmp_path, repo, monkeypatch)
+    cfg = Config()
+    cfg.llm.default = "codex"
+    target = tmp_path / ".codex" / "AGENTS.md"
+    target.parent.mkdir()
+    malformed = BEGIN_MARKER + b"\nunterminated section\n"
+    target.write_bytes(malformed)
+    monkeypatch.setattr(impl, "run_headless", lambda *args, **kwargs: 0)
+
+    assert run_implement(ctx, cfg, headless=True) == 0
+    assert target.read_bytes() == malformed
+    assert "✗ codex global instructions:" in capsys.readouterr().err
+
+
+def test_implement_record_refusal_does_not_write_global_section(tmp_path, monkeypatch):
+    repo = _worktree(tmp_path, record=False)
+    ctx = _ctx(tmp_path, repo, monkeypatch)
+    cfg = Config()
+    cfg.llm.default = "codex"
+    with pytest.raises(Refusal):
+        run_implement(ctx, cfg, headless=True)
+    assert not (tmp_path / ".codex" / "AGENTS.md").exists()

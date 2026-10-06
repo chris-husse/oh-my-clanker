@@ -126,7 +126,7 @@ def test_tick_adopt_skips_file_origin(tmp_path):
 
 def test_tick_survives_missing_omc_binary(tmp_path):
     # omc absent from PATH must warn-and-continue, never crash the loop
-    # (watch.py _chain_tick doctrine + the module docstring's never-crash cite).
+    # The watch loop must warn and skip, never crash.
     ctx, calls = _ctx(tmp_path)
     _seed_manifest(ctx.home, indexed=True, documented=False)  # triggers a document spawn
     (tmp_path / "bin" / "omc").unlink()  # remove the stub
@@ -146,7 +146,7 @@ def test_tick_skips_the_managed_gitnexus_clone(tmp_path):
 
 def test_tick_skips_manifest_entry_without_url(tmp_path):
     # A malformed entry (no "url") must warn-and-skip, not KeyError out of the
-    # loop (watch.py _chain_tick doctrine: warn and skip, never crash).
+    # loop must warn and skip, never crash.
     from omc.dependency import load_manifest, save_manifest
 
     ctx, calls = _ctx(tmp_path)

@@ -249,3 +249,25 @@ def test_api_backend_adapter_defaults_and_claude_values():
 def test_claude_api_model_family(alias, prefix):
     assert get_provider("claude").api_model_family(alias) == prefix
     assert get_provider("codex").api_model_family(alias) == ""
+
+
+@pytest.mark.parametrize(
+    "name,override,filename,default_dir",
+    [
+        ("claude", "CLAUDE_CONFIG_DIR", "CLAUDE.md", ".claude"),
+        ("codex", "CODEX_HOME", "AGENTS.md", ".codex"),
+    ],
+)
+def test_global_instruction_path_uses_supplied_env(tmp_path, name, override, filename, default_dir):
+    provider = get_provider(name)
+    env = {"HOME": str(tmp_path)}
+    assert provider.instructions_file(env) == tmp_path / default_dir / filename
+    env[override] = str(tmp_path / "alternate")
+    assert provider.instructions_file(env) == tmp_path / "alternate" / filename
+    env[override] = "~/elsewhere"
+    assert provider.instructions_file(env) == tmp_path / "elsewhere" / filename
+
+
+def test_global_instruction_path_requires_home_when_no_override():
+    with pytest.raises(OmcError, match="HOME"):
+        get_provider("claude").instructions_file({})
