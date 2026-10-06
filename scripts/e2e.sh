@@ -43,6 +43,19 @@ ensure_image() {
         echo "built $image" >&2
     fi
 }
+hold_image() {
+    # Pin an image with an idle container so an external image GC cannot
+    # remove it mid-run (Docker Desktop's kubelet under disk pressure deleted
+    # every container-less image every ~10 s, observed 2026-10-06; see
+    # tests/e2e/stages.py:hold_image, which does the same for snapshots).
+    # Holders live until `prune`, like the images they pin.
+    [ "$no_docker" = 1 ] && return 0
+    local name="omc-e2e-holder-base-${source_id}"
+    if ! docker container inspect "$name" >/dev/null 2>&1; then
+        docker run -d --name "$name" --label omc.e2e=holder \
+            --label "omc.e2e.source=${source_id}" "$image" sleep infinity >/dev/null
+    fi
+}
 sweep() {
     # Only containers a crashed run left behind: never a running one, so a
     # concurrent run on this host (same or another checkout) is untouched.
@@ -68,15 +81,19 @@ run_rest() {
 prune() {
     # Explicit housekeeping, never automatic: a concurrent run on another
     # checkout may be using an image this checkout considers stale.
+    # Holders first: a running holder blocks even `rmi -f` of its image.
+    docker ps -aq --filter label=omc.e2e=holder \
+        | xargs docker inspect --format '{{.Id}} {{index .Config.Labels "omc.e2e.source"}}' 2>/dev/null \
+        | awk -v id="${source_id}" '$2 != id {print $1}' | xargs docker rm -f >/dev/null 2>&1 || true
     docker images --format '{{.Repository}}:{{.Tag}}' \
         | grep -E '^omc-e2e(:|-stage:)' | grep -v -- "${source_id}\$" \
         | xargs docker rmi -f >/dev/null 2>&1 || true
     echo "kept images for ${source_id}; removed the rest" >&2
 }
 case "$mode" in
-    golden) ensure_image; sweep; run_golden "$@" ;;
-    rest) ensure_image; run_rest "$@" ;;
-    all) ensure_image; sweep; run_golden "$@"; run_rest "$@" ;;
+    golden) ensure_image; hold_image; sweep; run_golden "$@" ;;
+    rest) ensure_image; hold_image; run_rest "$@" ;;
+    all) ensure_image; hold_image; sweep; run_golden "$@"; run_rest "$@" ;;
     prune) prune ;;
     *) echo "usage: scripts/e2e.sh [golden|rest|all|prune] [pytest args]" >&2; exit 2 ;;
 esac

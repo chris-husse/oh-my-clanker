@@ -185,6 +185,12 @@ def set_api_key(cfg: SecretsConfig, name: str, value: str) -> None:
     cfg.api_keys[name] = validate_api_key(value, f"llm.providers.{name}.api_key")
 
 
+def remove_provider(cfg: GlobalConfig, name: str) -> None:
+    """Remove a configured provider; defaults and docs may still name it."""
+    _validate_provider(name, "llm.providers")
+    cfg.llm.providers.pop(name, None)
+
+
 def load_secrets(home: Path) -> SecretsConfig:
     """Missing file → empty. Strict otherwise. Plain leaves are hydrated TYPED
     here (unlike _hydrate) because a hand-edited `claude: 0x1F` reads as int."""
