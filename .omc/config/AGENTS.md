@@ -2,6 +2,7 @@
 
 (Read after omc's global behavior layer when working in this repository.)
 Deeper truth map: `.omc/skills/explain-context/SKILL.md`.
+`README.md` is generated: change `.claude/skills/regenerate-readme/SKILL.md` or its sources and run `/regenerate-readme`; never hand-edit it.
 
 This repo is a uv-installed Python CLI (`src/omc/`) plus a skills plugin
 (`skills/`, installable in Claude Code / Codex from this repo).

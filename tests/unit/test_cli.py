@@ -211,8 +211,8 @@ def test_shell_integration_is_quiet_unconfigured_and_refuses_with_exit_2(
     assert hook.read_bytes() == b"user content\n"
 
 
-def test_readme_documents_every_user_facing_title_surface():
-    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+def test_shell_integration_documents_every_user_facing_title_surface():
+    readme = (Path(__file__).resolve().parents[2] / "docs" / "shell-integration.md").read_text()
     for needle in (
         "omc shell-integration fish reconcile",
         "omc shell-integration fish disable",
@@ -238,6 +238,66 @@ def test_readme_documents_every_user_facing_title_surface():
     assert "retried on the next branch or directory change" not in readme
     assert "if that lands inside the cooldown it is dropped" not in readme
     assert "omc title reconcile" not in readme  # the dropped first attempt's command
+
+
+def test_readme_links_to_shell_integration():
+    import re
+
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    assert re.search(r"\[[^\]]+\]\(docs/shell-integration\.md\)", readme)
+
+
+def test_readme_documents_every_watch_option():
+    import argparse
+
+    from omc.cli import build_parser
+
+    parser = build_parser()
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    options = {
+        option
+        for action in subparsers.choices["watch"]._actions
+        if not isinstance(action, argparse._HelpAction)
+        for option in action.option_strings
+    }
+    assert options
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    for option in sorted(options):
+        assert any(line.startswith(f"| `{option}`") for line in readme.splitlines()), option
+
+
+def test_readme_starts_with_regeneration_banner():
+    import re
+
+    root = Path(__file__).resolve().parents[2]
+    readme = (root / "README.md").read_text()
+    assert re.fullmatch(r"<!-- .*generat.* -->", readme.splitlines()[0], re.IGNORECASE)
+    title = re.search(r"^# ", readme, re.MULTILINE)
+    assert title is not None
+    banner = readme[: title.start()]
+    link = re.search(
+        r"^> .*\[/regenerate-readme\]\((\.claude/skills/regenerate-readme/SKILL\.md)\)",
+        banner,
+        re.MULTILINE,
+    )
+    assert link is not None
+    assert "do not edit by hand" in banner.lower()
+    assert (root / link.group(1)).is_file()
+
+
+def test_readme_headings_match_regeneration_skill():
+    root = Path(__file__).resolve().parents[2]
+    headings = [
+        line for line in (root / "README.md").read_text().splitlines() if line.startswith("## ")
+    ]
+    assert headings
+    skill_path = root / ".claude/skills/regenerate-readme/SKILL.md"
+    assert skill_path.is_file()
+    skill = skill_path.read_text()
+    for heading in headings:
+        assert heading in skill, heading
 
 
 def test_design_is_canonical_and_start_is_an_alias():
