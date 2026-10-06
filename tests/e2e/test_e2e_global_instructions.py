@@ -16,6 +16,7 @@ _HEADING_PROMPT = (
     "Quote only the Markdown heading immediately after the omc:begin marker "
     "in your preloaded global instructions. Do not use tools."
 )
+_NONFATAL_CODEX_FEATURE_WARNING = "Ignoring unknown `features` requirement `ultrafast_mode`"
 
 
 def _run(container, argv, *, cwd=None, timeout=300):
@@ -189,6 +190,14 @@ assert settings.get('project_doc_max_bytes', 32768) >= len(data)
     events = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
     items = [event["item"] for event in events if isinstance(event.get("item"), dict)]
     assert items, output
-    assert all(item["type"] in {"agent_message", "reasoning"} for item in items), items
+    assert all(
+        item.get("type") in {"agent_message", "reasoning"}
+        or (
+            item.get("type") == "error"
+            and isinstance(item.get("message"), str)
+            and item["message"].startswith(_NONFATAL_CODEX_FEATURE_WARNING)
+        )
+        for item in items
+    ), items
     answer = "\n".join(item["text"] for item in items if item["type"] == "agent_message")
     assert "omc behavior layer" in answer.lower(), output

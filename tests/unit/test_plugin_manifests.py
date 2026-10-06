@@ -349,6 +349,11 @@ def test_implement_skill_contract():
         "/omc:check",
         "before dispatching the next task",
         "plan already exists",
+        "## Phase 2b — milestone gate",
+        "stage-gate rule",
+        "bounded fix-forward, then a CRITICAL stop",
+        '"passed": true',
+        '"configured": false',
     ):
         assert needle in text, f"implement skill missing {needle!r}"
     assert "Invoke the internal `spec` skill" not in text
@@ -356,9 +361,15 @@ def test_implement_skill_contract():
         text.index("omc internal design-record"),
         text.index("writing-plans"),
         text.index("subagent-driven-development"),
+        text.index("## Phase 2b — milestone gate"),
+        text.index("/omc:build", text.index("## Phase 2b — milestone gate")),
+        text.index("/omc:verify", text.index("## Phase 2b — milestone gate")),
         text.index("## Phase 3 — hand off"),
     ]
-    assert order == sorted(order), "implement must order record gate -> plan -> build -> handoff"
+    assert order == sorted(order), (
+        "implement must order record gate -> plan -> build -> milestone gate -> handoff"
+    )
+    assert "finish runs it" not in text
     assert "Invoke the `finish` skill" not in text
 
 
@@ -380,6 +391,11 @@ def test_audit_skill_contract():
         "record is stale",
         "CRITICAL",
         "/omc:check",
+        "/omc:build",
+        "/omc:verify",
+        "stage-gate rule",
+        "bounded fix-forward, then a CRITICAL stop",
+        "tracked product files",
         "Implementation review",
         "## Deliberate complexity",
         "provider",
@@ -391,6 +407,10 @@ def test_audit_skill_contract():
         assert needle in text, f"audit skill missing {needle!r}"
     assert text.index("## Phase 0") < text.index("## Phase 1") < text.index("## Phase 3")
     assert text.index("## Phase 2b") < text.index("## Phase 3")
+    gate = text[
+        text.index("## Phase 2 — disposition") : text.index("## Phase 2b — trace and commit")
+    ]
+    assert gate.index("/omc:check") < gate.index("/omc:build") < gate.index("/omc:verify")
     assert text.index("commit", text.index("## Phase 2b")) < text.index("Invoke `finish`")
     prose = " ".join(text.split())
     assert "immediately before the terminal `## Deliberate complexity`" in prose
@@ -500,6 +520,24 @@ def test_distribution_agents_validation_cadence():
         assert needle in text, f"behavior layer missing {needle!r}"
     # finish bullet lists all four stage gates in order
     assert "`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review`" in text
+    prose = " ".join(text.split())
+    for needle in (
+        "end of `/omc:implement`",
+        "`/omc:audit`",
+        "stage-gate rule",
+        '"passed": false',
+        "no verdict",
+        '"configured": false',
+        "heavy coding tier",
+        "at most two fix-and-rerun cycles",
+        "three gate runs",
+        "restart from `/omc:build`",
+        "failed `/omc:check`",
+        "CRITICAL",
+        "no handoff commit",
+        "no `finish`",
+    ):
+        assert needle in prose, f"behavior layer missing stage-gate contract {needle!r}"
 
 
 def test_explain_dependency_skill_contract():

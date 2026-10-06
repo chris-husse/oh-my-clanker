@@ -58,3 +58,7 @@ def test_lifecycle_full_collects_the_monolithic_runs():
 
 def test_default_golden_collects_through_implemented_without_audited():
     assert _collected("golden") == GOLDEN
+
+
+def test_default_e2e_collects_measured_failing_verify_variation():
+    assert "test_failing_verify_blocks_implementation_handoff" in _collected("e2e-tests")

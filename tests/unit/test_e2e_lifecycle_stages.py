@@ -2,11 +2,58 @@
 
 import pytest
 
+from tests.e2e import lifecycle_helpers
 from tests.e2e.lifecycle_helpers import (
     _assert_finish_stage_order,
     _assert_recorded,
     _assert_reviewed_record,
 )
+
+
+@pytest.mark.parametrize(
+    "markers",
+    [
+        "check\nbuild\nverify\n",
+        "check\ncheck\nreview\ncheck\nbuild\nverify\n",
+        "check\nbuild\nverify\ncheck\nbuild\nverify\nreview\n",
+    ],
+    ids=["milestone", "preceding-checks-and-review", "later-finish-block"],
+)
+def test_implementation_stages_require_ordered_milestone(markers):
+    lifecycle_helpers._assert_implement_stage_order(markers)
+
+
+@pytest.mark.parametrize(
+    "markers",
+    [
+        "",
+        "build\nverify\n",
+        "verify\ncheck\nbuild\n",
+        "check\nverify\nbuild\n",
+        "check\nbuild\nreview\nverify\n",
+        "check\nbuild\ncheck\nverify\n",
+        "check\nbuild\n",
+    ],
+    ids=[
+        "empty",
+        "no-check",
+        "check-after-build",
+        "reversed",
+        "interleaved-review",
+        "interleaved-check",
+        "missing-verify",
+    ],
+)
+def test_implementation_stages_reject_missing_or_separated_milestone(markers):
+    with pytest.raises(AssertionError):
+        lifecycle_helpers._assert_implement_stage_order(markers)
+
+
+def test_audit_verify_count_only_applies_to_explicit_drift_repair():
+    lifecycle_helpers._assert_audit_verify_count("check\nbuild\nverify\n", drift_repair=False)
+    with pytest.raises(AssertionError):
+        lifecycle_helpers._assert_audit_verify_count("verify\nverify\n", drift_repair=True)
+    lifecycle_helpers._assert_audit_verify_count("verify\nverify\nverify\n", drift_repair=True)
 
 
 @pytest.mark.parametrize(
