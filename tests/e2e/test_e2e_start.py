@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from .harness import PROVIDERS, configure_omc, make_work_repo, require_token, run_in, wire_mcp
@@ -24,6 +26,38 @@ def test_start_headless_creates_worktree_and_seeds(container, provider):
     # the busy-lock probe ran: filelock touched the lock file in the shared .git
     rc3, lockout = run_in(container, ["test", "-f", ".git/omc-watch-busy.lock"], cwd=repo)
     assert rc3 == 0, f"busy-lock file missing in primary .git: {lockout}"
+
+    if provider == "claude":
+        decoder = json.JSONDecoder()
+        entries = None
+        for offset, char in enumerate(wtout):
+            if char != "[":
+                continue
+            try:
+                parsed, _ = decoder.raw_decode(wtout, offset)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, list):
+                entries = parsed
+                break
+        assert entries is not None, wtout
+        matches = [
+            entry
+            for entry in entries
+            if (entry.get("branch") or "") == "feature/proj-1"
+            or (entry.get("branch") or "").startswith("feature/proj-1-")
+        ]
+        assert len(matches) == 1 and matches[0].get("path"), wtout
+        rc4, settings_text = run_in(
+            container, ["cat", f"{matches[0]['path']}/.claude/settings.local.json"]
+        )
+        assert rc4 == 0, settings_text
+        settings = json.loads(settings_text)
+        assert settings["preferredNotifChannel"] == "auto"
+        assert "omc internal notify --provider claude" not in settings_text
+    else:
+        rc4, plan = run_in(container, ["omc", "start", "PROJ-1", "--dry-run"], cwd=repo)
+        assert rc4 == 0 and "tui.notifications=true" in plan, plan
 
     verdict = judge(
         container,

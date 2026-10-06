@@ -139,7 +139,7 @@ def test_configure_migrates_legacy_json(tmp_path, monkeypatch, capsys):
     cfg = store.load_global(home)
     assert cfg.llm.default == "codex"  # seeded from legacy
     assert cfg.llm.providers["codex"].model == "gpt-y"  # then --set applied
-    assert cfg.notifications.enabled is True
+    assert "\nnotifications:" not in (home / "config.yaml").read_text()
     assert not (home / "config.json").exists()  # deleted after global YAML written
     assert "Migrated legacy" in capsys.readouterr().out
     pcfg = store.load_project(repo)
@@ -459,7 +459,7 @@ def test_cli_not_logged_in_fails_without_writing(tmp_path, monkeypatch, capsys):
         ["configure", "--defaults"],
         ["configure", "--set", "llm.default=codex"],
         ["configure", "--set", "llm.providers.claude.model=fable"],
-        ["configure", "--set", "notifications.enabled=true"],
+        ["configure", "--set", "llm.providers.claude.notifications=false"],
     ],
 )
 def test_non_documentation_changes_run_no_probe(tmp_path, monkeypatch, argv):
@@ -542,7 +542,7 @@ def test_stale_api_config_without_key_blocks_unrelated_sets(tmp_path, monkeypatc
     g.llm.docs.backend = "api"
     g.llm.providers["claude"].docs_model = "claude-sonnet-5-5"
     store.save_global(home, g)
-    assert main(["configure", "--set", "notifications.enabled=true"]) == 1
+    assert main(["configure", "--set", "llm.providers.claude.notifications=false"]) == 1
     assert "llm.providers.claude.api_key is required" in capsys.readouterr().err
     assert main(["configure", "--set", "llm.docs.backend=cli"]) == 0  # the escape hatch
 
@@ -551,3 +551,57 @@ def test_malformed_api_key_routing_key_is_unknown(tmp_path, monkeypatch, capsys)
     _home(tmp_path, monkeypatch)
     assert main(["configure", "--set", "llm.providers.api_key=x"]) == 1
     assert "unknown config key" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "initial,answer,want",
+    [(True, False, False), (False, True, True), (True, None, True), (False, None, False)],
+)
+def test_walkthrough_native_notifications_follow_model_and_preserve_dismissal(
+    tmp_path, monkeypatch, initial, answer, want
+):
+    import questionary
+
+    from omc import configure, docsllm
+    from omc.config.schema import ProviderConfig, SecretsConfig
+    from omc.toolctx import ToolContext
+
+    calls = []
+
+    class Prompt:
+        def __init__(self, value):
+            self.value = value
+
+        def ask(self):
+            return self.value
+
+    def checkbox(label, **kwargs):
+        calls.append(label)
+        return Prompt(["claude"])
+
+    def select(label, **kwargs):
+        calls.append(label)
+        if label == "Documentation backend":
+            return Prompt("cli")
+        return Prompt("sonnet")
+
+    def confirm(label, **kwargs):
+        calls.append((label, kwargs["default"]))
+        return Prompt(answer)
+
+    monkeypatch.setattr(questionary, "checkbox", checkbox)
+    monkeypatch.setattr(questionary, "select", select)
+    monkeypatch.setattr(questionary, "confirm", confirm)
+    monkeypatch.setattr(docsllm, "cli_connection_probe", lambda *a: (True, "ok"))
+    monkeypatch.setattr(docsllm, "cli_model_probe", lambda *a: (True, "ok"))
+    cfg = GlobalConfig()
+    cfg.llm.providers["claude"] = ProviderConfig(notifications=initial)
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "omc")})
+    configure._walkthrough_global(ctx, cfg, SecretsConfig())
+    assert cfg.llm.providers["claude"].notifications is want
+    assert calls.index("claude model") + 1 == calls.index(
+        ("Enable native notifications for claude?", initial)
+    )
+    assert not any(
+        "backend" in str(call).lower() and "notification" in str(call).lower() for call in calls
+    )

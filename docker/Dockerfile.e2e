@@ -85,6 +85,16 @@ RUN set -eux; \
 
 # the repo under test + omc installed from it
 COPY . /repo
+# Built from a worktree, /repo/.git is a pointer file to a host path that does
+# not exist here, and every git-dependent step (omc's gitnexus proxy, wt)
+# refuses the tree. Re-root it as a standalone repo with a main branch and an
+# origin/main ref, the shape a primary checkout has.
+RUN if [ -f /repo/.git ]; then \
+      rm /repo/.git && git -C /repo init -q -b main && git -C /repo add -A && \
+      git -C /repo -c user.email="e2e@omc.invalid" -c user.name="omc e2e" \
+        commit -qm "e2e source snapshot" && \
+      git -C /repo update-ref refs/remotes/origin/main HEAD; \
+    fi
 ENV UV_TOOL_BIN_DIR=/usr/local/bin
 RUN uv tool install /repo
 

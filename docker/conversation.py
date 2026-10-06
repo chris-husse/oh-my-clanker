@@ -251,6 +251,8 @@ class PTYSession:
         self.existing: set[Path] = set()
         self.debug_bytes = 0
         self.trust_answered = False
+        self.trust_attempts = 0
+        self.trust_answered_at = 0.0
         self.skill_reads = SkillReadTracker({})
         self.child_tails: dict[Path, EventTail] = {}
         self.child_read_trackers: dict[Path, SkillReadTracker] = {}
@@ -451,8 +453,14 @@ class PTYSession:
                 self.events.extend(tracker.events[previous:])
 
     def _maybe_answer_bootstrap_trust(self):
-        """Acknowledge only Codex's explicit disposable /work folder trust UI."""
-        if self.trust_answered or self.fd is None or self.tracker.ever_started:
+        """Acknowledge only Codex's explicit disposable /work folder trust UI.
+
+        One Enter is not always enough: the prompt can be drawn before the TUI
+        reads input, so the acknowledgement is repeated (a few times, spaced
+        out) while the prompt is still on screen and no turn has started."""
+        if self.fd is None or self.tracker.ever_started or self.trust_attempts >= 3:
+            return
+        if self.trust_answered and time.monotonic() - self.trust_answered_at < 3.0:
             return
         screen = bytes(self.output).decode(errors="replace")
         expected = str(self.cwd) if self.cwd is not None else ""
@@ -467,7 +475,10 @@ class PTYSession:
         ):
             os.write(self.fd, b"\r")
             self.trust_answered = True
-            self.events.append({"type": "bootstrap_trust", "scope": "/work"})
+            self.trust_attempts += 1
+            self.trust_answered_at = time.monotonic()
+            if self.trust_attempts == 1:
+                self.events.append({"type": "bootstrap_trust", "scope": "/work"})
 
     def wait_turn(self, timeout: float):
         if timeout <= 0 or timeout > 1800:

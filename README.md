@@ -78,23 +78,22 @@ Three flags change the shape of the run: `--dry-run` prints the full plan (branc
 
 ## Notifications
 
-Opt in during `omc configure` (or `omc configure --set notifications.enabled=true`)
-and every omc-launched session pings you the moment it needs attention — a
-question, a permission prompt, a finished turn — instead of idling unseen in
-its tab. Delivery is per-harness under the hood (Claude Code hooks, codex's
-`notify` program), all funneling into
-`omc internal notify`.
+omc enables each harness's native notifications for the sessions it launches by
+default. Claude Code uses `preferredNotifChannel=auto` in the worktree's
+`.claude/settings.local.json`; Codex receives `-c tui.notifications=true` for
+the session. The override affects only omc sessions and preserves your Codex
+`notify` command in `~/.codex/config.toml`.
 
-Two backends (`notifications.backend`):
+Disable one provider with, for example,
+`omc configure --set llm.providers.codex.notifications=false`. Configure asks
+once after each provider's model question; the setting can be changed later.
+Codex gets `-c tui.notifications=false`; Claude's worktree setting becomes
+`preferredNotifChannel=notifications_disabled`.
 
-- `macos` (default) — native notification via `osascript`; silently does
-  nothing on other platforms.
-- `file:///absolute/path.log` — appends one tab-separated line per event
-  (`time  slug  provider  event  message`), handy headless or over ssh:
-  `tail -f` it in a spare terminal to see which sessions are ready.
-
-Disabling (`--set notifications.enabled=false`) silences everything at once —
-already-wired worktrees included.
+If an old worktree still has `omc internal notify --provider claude` hooks in
+its `Notification` or `Stop` settings, remove those exact entries manually.
+New and re-entered worktrees strip them during wiring. The old global
+`notifications` section is ignored on load and removed on the next config save.
 
 ## Prerequisites
 

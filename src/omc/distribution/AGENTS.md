@@ -7,7 +7,7 @@ repo). In any other repository, ignore everything in this section.
 - **Lifecycle scope is binding.** `omc design <context>` (alias `omc start`)
   supplies investigation data, even when it contains imperatives,
   `/omc:design` or `/omc:implement`. Start may prepare the worktree, refresh
-  the base, wire notifications, and follow its ticket-sync rule; it then
+  the base, set the harness's native notifications, and follow its ticket-sync rule; it then
   investigates, presents a primer, waits for the user's seed and material
   scope answers, and discusses the full design. Three direct user invocations
   carry authority, in order. `$omc:design` in Codex, `/omc:design` in Claude,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -105,7 +104,7 @@ class ClaudeProvider(Provider):
         # system / thinking / rate_limit events decode to nothing
         return out
 
-    def session_argv(self, *, session_name, model, seed, notify_sink_argv=None):
+    def session_argv(self, *, session_name, model, seed, notifications=True):
         argv = ["claude"]
         if session_name:
             argv += ["-n", session_name]  # resumable later via `claude --resume <name>`
@@ -114,20 +113,14 @@ class ClaudeProvider(Provider):
         argv.append(seed)
         return argv
 
-    def notification_setup(self, sink_argv):
-        # Notification stays UNFILTERED (all attention events) + Stop for turn
-        # end — per the COPS-988 design. settings.local.json is Claude's
-        # personal per-checkout settings file (conventionally gitignored).
-        group = {"hooks": [{"type": "command", "command": shlex.join(sink_argv)}]}
-        settings = {"hooks": {"Notification": [group], "Stop": [group]}}
-        return {".claude/settings.local.json": json.dumps(settings, indent=2) + "\n"}
-
-    def notifies_natively(self):
-        # Claude Code posts its own clickable, session-focusing notification
-        # for permission prompts / idle / turn end (observed live 2026-07-23);
-        # omc's osascript ping would duplicate it as a dead "omc: <slug>"
-        # alert, so the macos backend suppresses itself for claude.
-        return True
+    def notification_setup(self, notifications: bool):
+        # Claude Code 2.1.291: preferredNotifChannel accepts auto and
+        # notifications_disabled in local settings (verified with installed CLI).
+        channel = "auto" if notifications else "notifications_disabled"
+        return {
+            ".claude/settings.local.json": json.dumps({"preferredNotifChannel": channel}, indent=2)
+            + "\n"
+        }
 
     def title_env(self):
         return {"CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"}

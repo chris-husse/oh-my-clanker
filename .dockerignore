@@ -9,3 +9,6 @@ dist
 
 # Live conversational E2E evidence (selected, sanitized only)
 tests/e2e/scenario-artifacts/
+
+# Personal per-checkout Claude settings: never part of the repo under test
+.claude/settings.local.json

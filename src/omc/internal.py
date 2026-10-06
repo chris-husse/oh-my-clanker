@@ -24,7 +24,6 @@ from .gitnexus import (
     snapshot_freshness,
 )
 from .mirror import mirror_snapshot
-from .providers.registry import provider_names
 from .toolctx import ToolContext
 from .watchlock import acquire_busy_narrated, busy_lock
 from .wtconfig import (
@@ -38,7 +37,6 @@ from .wtconfig import (
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] | wt-template | design-record"
     " | global-instructions PROVIDER"
-    " | notify --provider NAME [payload]"
     " | gitnexus [--git REF] <ensure|status|refresh [--enable-documentation]"
     "|query|context|impact|cypher> [args…]"
     " | dependency <ensure|document|list> [args…]"
@@ -326,18 +324,6 @@ def run_internal(argv: list[str]) -> int:
             print(_USAGE, file=sys.stderr)
             return 2
         return _rebase_main(ToolContext.from_env(), args.base)
-    if cmd == "notify":
-        parser = argparse.ArgumentParser(prog="omc internal notify", add_help=False)
-        parser.add_argument("--provider", required=True, choices=provider_names())
-        parser.add_argument("payload", nargs="?", default=None)  # codex's single JSON arg
-        try:
-            args = parser.parse_args(rest)
-        except SystemExit:
-            print(_USAGE, file=sys.stderr)
-            return 2
-        from .notify import run_notify
-
-        return run_notify(ToolContext.from_env(), args)
     if cmd == "gitnexus":
         return _gitnexus(ToolContext.from_env(), rest)
     if cmd == "dependency":

@@ -178,11 +178,16 @@ def configure_omc(container, provider: str) -> None:
 
 
 def make_work_repo(container, path="/work/repo") -> str:
-    """A throwaway git repo with an `origin` so wt + `git fetch origin` work."""
+    """A throwaway git repo with an `origin` so wt + `git fetch origin` work.
+
+    `.claude/settings.local.json` is ignored as in a real checkout: it is Claude
+    Code's personal per-checkout file, and omc writes the native-notification
+    channel into it for every worktree it launches."""
     script = (
         f"mkdir -p {path}-origin && cd {path}-origin && git init -q --bare && "
         f"cd / && git clone -q {path}-origin {path} && cd {path} && "
-        "echo hi > README.md && git add . && git commit -qm init && git push -q origin main"
+        "echo hi > README.md && echo .claude/settings.local.json > .gitignore && "
+        "git add . && git commit -qm init && git push -q origin main"
     )
     rc, out = run_in(container, ["bash", "-c", script])
     assert rc == 0, f"work repo setup failed:\n{out}"

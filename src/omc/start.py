@@ -44,7 +44,7 @@ def _print_plan(
     print(f"  title argv:   {shlex.join([*title_argv, branch])}")
     print(f"  session argv: {session_argv}")
     print(f"  shell argv:   {shell_argv}")
-    print(f"  notify:       {notify_desc}")
+    print(f"  notifications: {notify_desc}")
     print(f"  knowledge:    {knowledge_desc}")
 
 
@@ -162,12 +162,9 @@ def run_start(
             ctx.wt_bin, "switch", "--create", branch,
             "--base", f"origin/{base}", "--no-cd", "--yes", "--format=json",
         ]  # fmt: skip
-        if cfg.notifications.enabled:
-            files = provider.notification_setup(notify.sink_argv(name))
-            what = ", ".join(files) or "none (argv only)"
-            notify_desc = f"backend {cfg.notifications.backend}; files: {what}"
-        else:
-            notify_desc = "disabled"
+        pcfg = cfg.llm.providers.get(name)
+        notifications = pcfg.notifications if pcfg else True
+        notify_desc = notify.native_description(provider, notifications)
         if knowledge is None:
             knowledge_desc = "unknown (not in a repo)"
         elif knowledge.fresh:
@@ -193,10 +190,11 @@ def run_start(
         raise OmcError(f"could not create or switch to the worktree for {branch}")
     _say(f"✓ worktree: {path}")
 
-    if cfg.notifications.enabled:
-        wired = notify.wire_worktree(provider, Path(path))
-        if wired:
-            _say(f"✓ notification wiring: {', '.join(wired)}")
+    pcfg = cfg.llm.providers.get(name)
+    notifications = pcfg.notifications if pcfg else True
+    wired = notify.wire_worktree(provider, Path(path), notifications)
+    if wired:
+        _say(f"✓ notification wiring: {', '.join(wired)}")
 
     # Last thing on screen before the session takes over — the TUI may clear it,
     # which is why the seed carries the same verdict.

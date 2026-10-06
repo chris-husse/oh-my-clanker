@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from omc.config.schema import Config, NotificationsConfig
+from omc.config.schema import Config
 from omc.errors import Refusal
 from omc.implement import IMPLEMENT_ALLOWED_TOOLS
 from omc.review import REVIEW_SEED, run_review
@@ -73,15 +73,15 @@ def test_dry_run_prints_record_and_audit_session(tmp_path, monkeypatch, capsys):
         f"{SLUG}-audit",
         "/omc:audit",
     ]
-    assert "shell argv:" in out and "notify:       disabled" in out
+    assert "shell argv:" in out and "notifications: native, on" in out
 
 
 def test_dry_run_never_writes_notification_files(tmp_path, monkeypatch, capsys):
     repo = _worktree(tmp_path)
     ctx = _ctx(tmp_path, repo, monkeypatch)
-    cfg = Config(notifications=NotificationsConfig(enabled=True))
+    cfg = Config()
     assert run_review(ctx, cfg, dry_run=True) == 0
-    assert "notify:       backend" in capsys.readouterr().out
+    assert "notifications: native, on" in capsys.readouterr().out
     assert not (repo / ".claude" / "settings.local.json").exists()
 
 
@@ -133,14 +133,13 @@ def test_headless_wires_notifications_idempotently(tmp_path, monkeypatch):
     repo = _worktree(tmp_path)
     ctx = _ctx(tmp_path, repo, monkeypatch)
     monkeypatch.setattr(review, "run_headless", lambda *a, **k: 0)
-    cfg = Config(notifications=NotificationsConfig(enabled=True))
+    cfg = Config()
     assert run_review(ctx, cfg, headless=True) == 0
     settings = repo / ".claude" / "settings.local.json"
     first = settings.read_text()
     assert run_review(ctx, cfg, headless=True) == 0
-    assert settings.read_text() == first
-    hooks = json.loads(first)["hooks"]
-    assert "Notification" in hooks and "Stop" in hooks
+    assert settings.read_text() == first  # second launch merges, never duplicates
+    assert json.loads(first) == {"preferredNotifChannel": "auto"}
 
 
 def test_interactive_execs_in_worktree_with_slug_env(tmp_path, monkeypatch):
