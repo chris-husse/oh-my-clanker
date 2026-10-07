@@ -25,8 +25,8 @@ question deferred until after hardening. Resume at Step 0 once answered.
 
 ## Step 0 — externalize the flow (first action, no exceptions)
 
-**Write the remaining steps into the task list now**: record check → write
-→ per-section hardening → whole-record pass → iterate → commit and report →
+**Write the remaining steps into the task list now**: record check → Design
+worker writes → per-section hardening → whole-record pass → iterate → commit and report →
 wait for the implementation handoff. Mark each completed as you pass it. The
 last task is literally to wait: a committed record is an argument to the
 user's next command, not a destination. Reading the list is how you answer
@@ -45,6 +45,26 @@ line (never wrapped in markdown):
   for one slug is a human decision.
 - `"reason": "no-prefix"` → this is not an omc worktree; refuse with the
   message.
+
+Run `omc internal models` once and read its single `OMC_MODELS` verdict. An
+`"ok": false` verdict is a blocker; report its `message`. Dispatch a Design
+worker with `tasks.design.model` and, where the harness accepts it,
+`tasks.design.effort`. On Claude, start a fresh worker and supply the seed,
+all material answers, and the converged design text. On Codex, a model override
+requires a fresh or partial-history fork; supply that same materialized context
+when using a fresh fork. Do not request a model override on a full-history
+fork. If the harness cannot pin a worker model, run it on the orchestrator
+model and say so in one line; ignore effort where the harness has no worker
+effort control.
+
+The worker writes and hardens the record through Steps 1–4, returning its
+path, findings and any CRITICAL questions to the main session. The main
+session owns the user conversation and asks any returned questions in one
+batch. After the answers arrive, send them back to the Design worker to
+complete hardening; the main session then commits in Step 5 and posts the
+Step 5 report and closing statement itself, in full — the worker's return is
+input to that report, never a substitute for it. Workers never ask the user
+or commit.
 
 Write the design doc per repo conventions:
 `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` (topic = the `slug` field of the
@@ -100,18 +120,17 @@ single user.
 Repeat steps 2–3 until neither explain nor grug surfaces real issues. Every
 Important grug finding is dispositioned in this order — fix first, ask last:
 
-1. **Fix, by the top tier.** The top-tier model (the behavior layer's
-   model-tier policy, `AGENTS.md` Model selection) rewrites the section with
-   the simpler alternative when that keeps the converged design. Dispatch it
-   as a top-tier subagent where the harness can pick a model per subagent;
-   otherwise the session model does it — never a cheaper tier.
+1. **Fix, by Design.** The Design worker rewrites the section with the
+   simpler alternative when that keeps the converged design. Use the
+   `OMC_MODELS` Design choice for any replacement worker.
 2. **Waive by record.** A finding the rewrite rejects because it contradicts
    an entry in the record's "Decisions taken during brainstorm" table is
    waived into "Deliberate complexity" citing that decision — the
    brainstorm already settled it, so it is not a CRITICAL question.
-3. **Ask, batched.** Only what survives both goes to the user, as ONE
-   numbered list of CRITICAL follow-up questions at the end of the pass —
-   never one dialog per finding, never a silent choice on their behalf.
+3. **Ask, batched.** The worker returns only what survives both to the main
+   session as ONE numbered list of CRITICAL follow-up questions at the end
+   of the pass. The main session asks the user — never one dialog per
+   finding, never a silent choice on their behalf.
    What the user waives goes into "Deliberate complexity" with its reason.
    A CRITICAL question is a required answer: wait for it, then resume.
 

@@ -11,7 +11,7 @@ from omc.errors import Refusal
 from omc.implement import IMPLEMENT_ALLOWED_TOOLS, IMPLEMENT_SEED, run_implement
 from omc.toolctx import ToolContext
 
-from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, stub_env
+from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, seed_codex_model_cache, stub_env
 
 SLUG = "proj-1-fix-login"
 RECORD = f"docs/superpowers/specs/2026-10-02-{SLUG}-design.md"
@@ -43,6 +43,7 @@ def _worktree(tmp_path, *, branch=f"feature/{SLUG}", record=True, commit=True):
 def _ctx(tmp_path, repo, monkeypatch, *, provider_stdout=""):
     """Real git on PATH (the gate runs real git), stubbed claude/codex/wt."""
     bindir = tmp_path / "bin"
+    seed_codex_model_cache(tmp_path)
     make_claude_stub(bindir, plugins=HEALTHY_PLUGINS, stdout=provider_stdout)
     make_stub(bindir, "wt", stdout="wt 0.1")
     make_stub(bindir, "codex", stdout="codex 0.156.1")
@@ -200,7 +201,7 @@ def test_implement_continues_when_global_section_is_malformed(tmp_path, monkeypa
     cfg = Config()
     cfg.llm.default = "codex"
     target = tmp_path / ".codex" / "AGENTS.md"
-    target.parent.mkdir()
+    target.parent.mkdir(exist_ok=True)
     malformed = BEGIN_MARKER + b"\nunterminated section\n"
     target.write_bytes(malformed)
     monkeypatch.setattr(impl, "run_headless", lambda *args, **kwargs: 0)

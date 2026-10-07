@@ -186,11 +186,19 @@ def cli_connection_probe(ctx: ToolContext, provider: str) -> tuple[bool, str]:
     return True, f"{provider} is logged in"
 
 
-def cli_model_probe(ctx: ToolContext, provider: str, model: str) -> tuple[bool, str]:
+def cli_model_probe(
+    ctx: ToolContext,
+    provider: str,
+    model: str,
+    *,
+    prompt: str = HEADLESS_PROBE_PROMPT,
+    effort: str = "",
+    return_output: bool = False,
+) -> tuple[bool, str]:
     """One headless turn on the user's login. run_bounded, not run: `claude -p`
     spawns MCP grandchildren that a plain subprocess timeout would orphan."""
     p = get_provider(provider)
-    argv = p.headless_argv(HEADLESS_PROBE_PROMPT, model=model)
+    argv = p.headless_argv(prompt, model=model, effort=effort)
     shown = model or "default model"
     try:
         # cwd=ctx.home: run the probe OUTSIDE whatever project the user typed
@@ -213,7 +221,7 @@ def cli_model_probe(ctx: ToolContext, provider: str, model: str) -> tuple[bool, 
         return False, f"{provider} rejected model {shown!r}: {tail}"
     if not (cp.stdout or "").strip():
         return False, f"{provider} returned no output for model {shown!r}"
-    return True, f"{shown} works"
+    return True, cp.stdout.strip() if return_output else f"{shown} works"
 
 
 def _step(say: Say, ok: bool, detail: str) -> None:

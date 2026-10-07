@@ -14,7 +14,7 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 
-from .config import resolve
+from .config import resolve, store
 from .errors import OmcError
 from .gitnexus import (
     ensure_gitnexus,
@@ -24,6 +24,7 @@ from .gitnexus import (
     snapshot_freshness,
 )
 from .mirror import mirror_snapshot
+from .taskmodels import TASKS, task_choice
 from .toolctx import ToolContext
 from .watchlock import acquire_busy_narrated, busy_lock
 from .wtconfig import (
@@ -35,7 +36,7 @@ from .wtconfig import (
 )
 
 _USAGE = (
-    "usage: omc internal {rebase-main [--base BRANCH] | wt-template | design-record"
+    "usage: omc internal {rebase-main [--base BRANCH] | wt-template | design-record | models"
     " | global-instructions PROVIDER"
     " | gitnexus [--git REF] <ensure|status|refresh [--enable-documentation]"
     "|query|context|impact|cypher> [args…]"
@@ -345,6 +346,28 @@ def _skills_list(ctx: ToolContext, name: str) -> int:
     return 0
 
 
+def _models(ctx: ToolContext) -> int:
+    """Expose all resolved task choices as one machine-readable verdict."""
+    try:
+        cfg = store.load_global(ctx.home)
+        if cfg is None:
+            raise OmcError("omc is not configured — run omc configure first")
+        name = ctx.env.get("OMC_PROVIDER") or cfg.llm.default
+        choices = {task: task_choice(ctx, cfg, task, provider=name) for task in TASKS}
+        payload = {
+            "ok": True,
+            "provider": name,
+            "tasks": {
+                task: {"model": choice.model_arg, "effort": choice.effort}
+                for task, choice in choices.items()
+            },
+        }
+    except OmcError as exc:
+        payload = {"ok": False, "message": str(exc)}
+    print(f"OMC_MODELS {json.dumps(payload)}", flush=True)
+    return 0 if payload["ok"] else 2
+
+
 def run_internal(argv: list[str]) -> int:
     if not argv:
         print(_USAGE, file=sys.stderr)
@@ -358,6 +381,11 @@ def run_internal(argv: list[str]) -> int:
             print(_USAGE, file=sys.stderr)
             return 2
         return _design_record(ToolContext.from_env())
+    if cmd == "models":
+        if rest:
+            print(_USAGE, file=sys.stderr)
+            return 2
+        return _models(ToolContext.from_env())
     if cmd == "global-instructions":
         if len(rest) != 1:
             print(_USAGE, file=sys.stderr)

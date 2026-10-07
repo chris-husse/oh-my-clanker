@@ -33,7 +33,8 @@ def test_distribution_layer_has_global_scope_and_project_pointer():
         body.split()
     )
     assert "it takes precedence over this layer" in body
-    assert "rebase-main" in body and "model-tier policy" in body
+    assert "rebase-main" in body and "omc internal models" in body
+    assert "OMC_MODELS" in body and "Orchestrator" in body
 
 
 def test_absent_global_file_created_with_exact_inline_body(tmp_path):

@@ -14,18 +14,41 @@ diff — on every project, configured or not.
 1. Resolve the project root: `git rev-parse --show-toplevel`; if not in a
    git repo, use the current directory.
 2. Look for `<project-root>/.omc/skills/review/SKILL.md`.
+   Before any review pass, run `omc internal models` once
+   and read its `OMC_MODELS` verdict. Use `tasks.review` (Review) for reviewer
+   workers, including the project's reviewers; an `"ok": false` verdict
+   blocks dispatch with its `message`.
    - **Missing** → report "no project `review` stage configured —
      nothing to do for the project stage; the omc grug lens still runs". The project
      half is a PASS. Continue to step 3.
-   - **Present** → read it and follow its instructions, running commands from
-     the project root. The project skill decides what passing means; take its
-     instructions at face value and judge the outcome honestly.
+   - **Present** → read it. Dispatch a Review worker with
+     `tasks.review.model` and, where supported, `tasks.review.effort` to run
+     its instructions and judge the project stage from the project root.
+     Give a fresh worker the full project skill, project root, branch diff and
+     relevant design record context; Codex model overrides require a fresh or
+     partial-history fork. Dispatch even when the diff appears clean and no
+     fix worker will be needed. Do not perform the project review judgment
+     inline in the main session. If the harness cannot pin the worker model,
+     use the orchestrator model and say so in one line; ignore effort where
+     unsupported. If no worker can be dispatched, the project stage fails.
+     The project skill decides what passing means; the worker returns its
+     findings and outcome to the main session, which owns disposition and
+     the final stage verdict.
      - Project stage **failed** → skip step 3 (the stage is already failing)
        and go to step 4.
      - Project stage **passed** → continue to step 3.
 3. **Grug lens.** Determine the base branch the way `finish` does
    (`worktree.base_branch` in `.omc/config.yaml`, else the remote's HEAD
-   branch) and invoke the internal `grug` skill with `grug diff <base>`.
+   branch). Dispatch a grug judge worker with `tasks.review.model` and,
+   where supported, `tasks.review.effort` from the `OMC_MODELS` verdict in
+   step 2. The worker invokes the internal `grug` skill with
+   `grug diff <base>` and returns its `grug summary:` block and any invocation
+   failure to the main session. Give a fresh worker the base branch, branch
+   diff and design record context; a Codex model override requires a fresh or
+   partial-history fork. If the harness cannot pin the judge's model, use
+   the orchestrator model and say so in one line; ignore effort where the
+   worker harness cannot set it. The main session owns disposition and the
+   final `OMC_STAGE` verdict.
    - **Grug unavailable.** If the `grug` skill cannot be invoked (unknown
      skill, not listed, or it answers a well-formed payload with its usage
      line), the lens did NOT run. Go straight to step 4 with
@@ -35,12 +58,14 @@ diff — on every project, configured or not.
 
    Otherwise read its `grug summary:` block and disposition every Important
    finding in this order, then apply the two rules below:
-   - **Fix first, top tier** (the "fix now" path, done by the best model).
-     Before any waive, the top-tier model (the behavior layer's model-tier
-     policy, `AGENTS.md` Model selection) attempts the behavior-preserving
-     simplification: the code does the same thing with less of it. Dispatch
-     it as a top-tier subagent where the harness can pick a model per
-     subagent; otherwise the session model does it — never a cheaper tier.
+   - **Fix first, Review** (the "fix now" path). Before any waive, a worker
+     using the configured Review choice attempts the behavior-preserving
+     simplification: the code does the same thing with less of it. Use
+     `tasks.review.model` and, where supported, `tasks.review.effort`.
+     Codex model overrides need a fresh or partial-history fork with the
+     finding and diff supplied as context. If the harness cannot pin a
+     worker model, use the orchestrator model and say so in one line; ignore
+     effort where the worker harness cannot set it.
      After the fix, invoke `/omc:check` once; a failing check means the fix
      is wrong: revert it. Only a finding whose fix failed check, or whose fix
      would change behavior, proceeds.

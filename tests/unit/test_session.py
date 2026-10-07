@@ -1,6 +1,6 @@
 import pytest
 
-from omc.config.schema import Config
+from omc.config.schema import Config, ProviderConfig
 from omc.session import session_plan
 from omc.toolctx import ToolContext
 
@@ -19,10 +19,11 @@ def test_session_plan_is_pure_and_names_the_session():
         title="feature/proj-1",
         cwd="<worktree>",
     )
-    assert plan.session_argv[0] == "claude" and "--model" not in plan.session_argv
+    assert plan.session_argv[0] == "claude" and plan.session_argv[4:5] == ["opus"]
     assert plan.session_argv[plan.session_argv.index("-n") + 1] == "proj-1-implement"
     assert plan.session_argv[-1] == "/omc:implement"
     assert plan.env["OMC_SLUG"] == "proj-1"  # the slug, not the session name
+    assert plan.env["OMC_PROVIDER"] == "claude"
     assert plan.env["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] == "1"
     assert plan.title_seq == "\033]0;feature/proj-1\007"
     assert plan.title_argv[-2:] == ["-m", "omc.terminal_title"]
@@ -32,13 +33,14 @@ def test_session_plan_is_pure_and_names_the_session():
 def test_session_plan_wires_notifications_for_the_provider_that_takes_argv():
     cfg = Config()
     cfg.llm.default = "codex"
+    cfg.llm.providers["codex"] = ProviderConfig(model="gpt-6-sol:high")
     plan = session_plan(
         _ctx(), cfg, seed="/omc:start", slug="s", session_name="s", title="t", cwd="."
     )
     assert plan.session_argv[0] == "codex"
     joined = " ".join(plan.session_argv)
     assert "tui.notifications=true" in joined and "notify=" not in joined
-    assert plan.env == {"OMC_SLUG": "s"}  # codex suppresses titles via argv, not env
+    assert plan.env == {"OMC_SLUG": "s", "OMC_PROVIDER": "codex"}
 
 
 def test_run_headless_keeps_its_shape_and_defaults():
@@ -82,18 +84,24 @@ def test_run_headless_keeps_its_shape_and_defaults():
 
 @pytest.mark.parametrize("configured,expected", [(True, "true"), (False, "false"), (None, "true")])
 def test_codex_session_native_flag_for_each_config_state(configured, expected):
-    from omc.config.schema import ProviderConfig
-
     cfg = Config()
     cfg.llm.default = "codex"
     if configured is not None:
-        cfg.llm.providers["codex"] = ProviderConfig(notifications=configured)
+        cfg.llm.providers["codex"] = ProviderConfig(
+            model="gpt-6-sol:high", notifications=configured
+        )
+    else:
+        cfg.llm.providers["codex"] = ProviderConfig(model="gpt-6-sol:high")
     plan = session_plan(_ctx(), cfg, seed="seed", slug="s", session_name="s", title="t", cwd=".")
     assert plan.session_argv == [
         "codex",
         "-c",
         "tui.terminal_title=[]",
+        "-m",
+        "gpt-6-sol",
         "-c",
         f"tui.notifications={expected}",
+        "-c",
+        "model_reasoning_effort=high",
         "seed",
     ]

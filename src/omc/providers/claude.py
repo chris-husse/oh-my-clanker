@@ -20,6 +20,27 @@ _API_FAMILIES = {"fable": "claude-fable-", "opus": "claude-opus-", "sonnet": "cl
 class ClaudeProvider(Provider):
     name = "claude"
 
+    def families(self) -> list[str]:
+        return ["fable", "opus", "sonnet"]
+
+    def effort_levels(self) -> list[str]:
+        return ["low", "medium", "high", "xhigh", "max"]
+
+    def default_task_model(self, task: str) -> str:
+        defaults = {
+            "orchestrator": "opus",
+            "design": "fable",
+            "plan": "fable",
+            "review": "fable",
+            "simple": "sonnet",
+            "medium": "opus",
+            "high": "fable",
+        }
+        try:
+            return defaults[task]
+        except KeyError as exc:
+            raise ValueError(f"unknown task: {task}") from exc
+
     def instructions_file(self, env: Mapping[str, str]) -> Path:
         # Claude Code loads user CLAUDE.md in every session, including projects
         # whose own instruction file is named AGENTS.md.
@@ -44,7 +65,7 @@ class ClaudeProvider(Provider):
         # apiProvider (verified live on 2.1.286, 2026-10-01).
         return ["claude", "auth", "status"]
 
-    def headless_argv(self, prompt, *, model, allowed_tools=None, session_name=""):
+    def headless_argv(self, prompt, *, model, effort="", allowed_tools=None, session_name=""):
         # Prompt must come RIGHT AFTER -p: --allowed-tools is variadic and would
         # swallow a trailing positional as a tool name. Keep --allowed-tools LAST
         # and omit it entirely when empty (an empty value parses as a bogus tool).
@@ -53,11 +74,13 @@ class ClaudeProvider(Provider):
             argv += ["-n", session_name]  # -p sessions persist; resumable by name
         if model:
             argv += ["--model", model]
+        if effort:
+            argv += ["--effort", effort]
         if allowed_tools:
             argv += ["--allowed-tools", *allowed_tools]
         return argv
 
-    def headless_stream_argv(self, prompt, *, model, allowed_tools=None):
+    def headless_stream_argv(self, prompt, *, model, effort="", allowed_tools=None):
         # stream-json + --verbose emits one JSON event per line AS IT HAPPENS
         # (verified 2026-07-19: tool_use/tool_result arrive live; plain
         # `--output-format text` prints only at exit). Same flag-ordering
@@ -65,6 +88,8 @@ class ClaudeProvider(Provider):
         argv = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose"]
         if model:
             argv += ["--model", model]
+        if effort:
+            argv += ["--effort", effort]
         if allowed_tools:
             argv += ["--allowed-tools", *allowed_tools]
         return argv
@@ -104,12 +129,14 @@ class ClaudeProvider(Provider):
         # system / thinking / rate_limit events decode to nothing
         return out
 
-    def session_argv(self, *, session_name, model, seed, notifications=True):
+    def session_argv(self, *, session_name, model, seed, notifications=True, effort=""):
         argv = ["claude"]
         if session_name:
             argv += ["-n", session_name]  # resumable later via `claude --resume <name>`
         if model:
             argv += ["--model", model]
+        if effort:
+            argv += ["--effort", effort]
         argv.append(seed)
         return argv
 

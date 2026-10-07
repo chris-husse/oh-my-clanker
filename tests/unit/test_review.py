@@ -13,7 +13,7 @@ from omc.implement import IMPLEMENT_ALLOWED_TOOLS
 from omc.review import REVIEW_SEED, run_review
 from omc.toolctx import ToolContext
 
-from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, stub_env
+from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, seed_codex_model_cache, stub_env
 
 SLUG = "proj-1-fix-login"
 RECORD = f"docs/superpowers/specs/2026-10-02-{SLUG}-design.md"
@@ -45,6 +45,7 @@ def _worktree(tmp_path, *, branch=f"feature/{SLUG}", record=True, commit=True):
 def _ctx(tmp_path, repo, monkeypatch):
     """Real git for the record gate; stubbed provider and worktree tool."""
     bindir = tmp_path / "bin"
+    seed_codex_model_cache(tmp_path)
     make_claude_stub(bindir, plugins=HEALTHY_PLUGINS)
     make_stub(bindir, "wt", stdout="wt 0.1")
     make_stub(bindir, "codex", stdout="codex 0.156.1")
@@ -71,6 +72,8 @@ def test_dry_run_prints_record_and_audit_session(tmp_path, monkeypatch, capsys):
         "claude",
         "-n",
         f"{SLUG}-audit",
+        "--model",
+        "opus",
         "/omc:audit",
     ]
     assert "shell argv:" in out and "notifications: native, on" in out
@@ -157,8 +160,16 @@ def test_interactive_execs_in_worktree_with_slug_env(tmp_path, monkeypatch):
     assert run_review(ctx, Config()) == 0
     assert os.path.realpath(seen[0]["cwd"]) == os.path.realpath(str(repo))
     assert seen[0]["title"] == f"feature/{SLUG}"
-    assert seen[0]["startup_argv"] == ["claude", "-n", f"{SLUG}-audit", "/omc:audit"]
+    assert seen[0]["startup_argv"] == [
+        "claude",
+        "-n",
+        f"{SLUG}-audit",
+        "--model",
+        "opus",
+        "/omc:audit",
+    ]
     assert review.os.environ["OMC_SLUG"] == SLUG
+    assert review.os.environ["OMC_PROVIDER"] == "claude"
 
 
 def test_override_probes_the_overridden_provider(tmp_path, monkeypatch, capsys):
@@ -200,7 +211,7 @@ def test_review_continues_and_reports_malformed_global_section(tmp_path, monkeyp
     cfg = Config()
     cfg.llm.default = "codex"
     target = tmp_path / ".codex" / "AGENTS.md"
-    target.parent.mkdir()
+    target.parent.mkdir(exist_ok=True)
     malformed = BEGIN_MARKER + b"\nunterminated section\n"
     target.write_bytes(malformed)
     monkeypatch.setattr(review, "run_headless", lambda *args, **kwargs: 0)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import sys
 import tempfile
 from dataclasses import asdict, fields, is_dataclass
@@ -19,6 +20,7 @@ from .schema import (
     ProjectConfig,
     ProviderConfig,
     SecretsConfig,
+    TaskModelsConfig,
     WorktreeConfig,
 )
 
@@ -126,6 +128,16 @@ def validate_llm(cfg: LLMConfig) -> None:
     _validate_provider(cfg.default, "llm.default")
     for name in cfg.providers:
         _validate_provider(name, "llm.providers")
+        pcfg = cfg.providers[name]
+        try:
+            validate_task_model(name, pcfg.model)
+        except ConfigError as exc:
+            raise ConfigError(f"llm.providers.{name}.model: {exc}") from exc
+        for task in fields(TaskModelsConfig):
+            try:
+                validate_task_model(name, getattr(pcfg.tasks, task.name))
+            except ConfigError as exc:
+                raise ConfigError(f"llm.providers.{name}.tasks.{task.name}: {exc}") from exc
     _validate_docs_leaf("provider", cfg.docs.provider)
     _validate_docs_leaf("backend", cfg.docs.backend)
     if cfg.docs.backend == "api":
@@ -154,6 +166,42 @@ def validate_worktree_value(name: str, value: object) -> str:
     if any(c.isspace() or not c.isprintable() for c in value):
         raise ConfigError(
             f"invalid worktree.{name} {value!r}: must not contain whitespace or control characters"
+        )
+    return value
+
+
+# Claude's long-context ids carry a bracketed suffix (`claude-sonnet-4-5[1m]`).
+_MODEL_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?\Z")
+_BANNED_FAMILIES = {"claude": {"haiku"}, "codex": {"luna"}}
+
+
+def validate_task_model(provider: str, value: object) -> str:
+    """Static family/effort validation; no provider I/O or live model lookup."""
+    _validate_provider(provider, "llm.providers")
+    if not isinstance(value, str):
+        raise ConfigError(f"invalid {provider} task model {value!r}: expected a string")
+    if value == "":
+        return value
+    model, separator, effort = value.partition(":")
+    adapter = get_provider(provider)
+    if not _MODEL_TOKEN.fullmatch(model) or (separator and not effort):
+        raise ConfigError(f"invalid {provider} task model {value!r}: malformed model token")
+    if separator and effort not in adapter.effort_levels():
+        raise ConfigError(
+            f"invalid {provider} task model {value!r}: effort must be one of "
+            f"{', '.join(adapter.effort_levels())}"
+        )
+    if any(part.lower() in _BANNED_FAMILIES[provider] for part in re.split(r"[-_.]", model)):
+        raise ConfigError(
+            f"invalid {provider} task model {value!r}: cheap/fast family is not allowed"
+        )
+    # Codex also has compact full ids such as o3; do not mistake them for
+    # unknown bare family aliases.
+    compact_codex_id = provider == "codex" and re.fullmatch(r"o[0-9]+", model)
+    if model not in adapter.families() and "-" not in model and not compact_codex_id:
+        raise ConfigError(
+            f"invalid {provider} task model {value!r}: choose "
+            f"{', '.join(adapter.families())} or a full model id"
         )
     return value
 
@@ -258,16 +306,29 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
     head, _, tail = dotted.partition(".")
     if isinstance(cfg, LLMConfig) and head == "providers":
         name, _, leaf = tail.partition(".")
-        if leaf not in ("model", "docs_model", "notifications"):
+        attr, separator, nested = leaf.partition(".")
+        provider_fields = {f.name: f for f in fields(ProviderConfig)}
+        if attr not in provider_fields or (separator and attr != "tasks"):
             raise ConfigError(f"unknown config key: providers.{tail}")
         _validate_provider(name, "llm.providers")
-        if leaf == "notifications":
+        if attr == "tasks":
+            task_fields = {f.name for f in fields(TaskModelsConfig)}
+            if not nested:
+                raise ConfigError(f"llm.providers.{name}.tasks is a section, not a settable key")
+            if nested not in task_fields:
+                raise ConfigError(f"unknown config key: providers.{tail}")
+            checked = validate_task_model(name, value)
+            setattr(cfg.providers.setdefault(name, ProviderConfig()).tasks, nested, checked)
+            return
+        if attr == "notifications":
             if value not in ("true", "false"):
                 raise ConfigError(f"llm.providers.{name}.notifications expects true or false")
             value = value == "true"
         elif not isinstance(value, str):
-            raise ConfigError(f"llm.providers.{name}.{leaf} expects a string")
-        setattr(cfg.providers.setdefault(name, ProviderConfig()), leaf, value)
+            raise ConfigError(f"llm.providers.{name}.{attr} expects a string")
+        if attr == "model":
+            validate_task_model(name, value)
+        setattr(cfg.providers.setdefault(name, ProviderConfig()), attr, value)
         return
     if isinstance(cfg, LLMConfig) and head == "docs":
         if not tail:
@@ -342,13 +403,17 @@ def _hydrate(cls: type, data: dict, path: str, unknown: list[str] | None = None,
         validate_llm(obj)
     if cls is ProviderConfig:
         provider_path = prefix.rstrip(".")
-        for fname in ("model", "docs_model"):
+        for fname in (f.name for f in fields(ProviderConfig) if f.type is str):
             if not isinstance(getattr(obj, fname), str):
                 raise ConfigError(f"invalid {provider_path}.{fname} in {path}: expected a string")
         if not isinstance(obj.notifications, bool):
             raise ConfigError(
                 f"invalid {provider_path}.notifications in {path}: expected true/false"
             )
+    if cls is TaskModelsConfig:
+        for f in fields(TaskModelsConfig):
+            if not isinstance(getattr(obj, f.name), str):
+                raise ConfigError(f"invalid {prefix}{f.name} in {path}: expected a string")
     if cls is WorktreeConfig:
         for fname in ("branch_prefix", "base_branch"):
             try:

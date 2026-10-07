@@ -2,9 +2,35 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import stat
 from pathlib import Path
+
+
+def seed_codex_model_cache(home: Path) -> None:
+    """Give isolated launch tests the same model-list shape as Codex's picker."""
+    cache = home / ".codex" / "models_cache.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": f"gpt-6-{family}",
+                        "display_name": f"GPT-6-{family.title()}",
+                        "visibility": "list",
+                        "priority": 1,
+                        "supported_reasoning_levels": [
+                            {"effort": effort, "description": effort.title()}
+                            for effort in ("medium", "high")
+                        ],
+                    }
+                    for family in ("astra", "sol")
+                ]
+            }
+        )
+    )
 
 
 def make_stub(
@@ -158,7 +184,7 @@ if args[:2] == ["auth", "status"]:
     print(json.dumps({{"loggedIn": {auth_logged_in!r}, "authMethod": "claude.ai",
                       "apiProvider": "firstParty"}}))
     sys.exit(0)
-if args[:2] == ["-p", {probe_prompt!r}]:
+if args[:2] in (["-p", {probe_prompt!r}], ["-p", "Reply with only your exact model id"]):
     sys.stdout.write({headless_reply!r} + "\\n"); sys.exit({headless_rc})
 if args[:2] == ["plugin", "list"]:
     entries = json.loads(state.read_text())

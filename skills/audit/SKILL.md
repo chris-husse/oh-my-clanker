@@ -42,16 +42,28 @@ truth when the plan and record differ.
 
 ## Phase 1 — conformance
 
-Walk the record and the branch diff against `origin/<base>` together. Check
-promised behavior, decisions, exclusions and observable tests. `/omc:explain`
-is available when a code path needs locating; it is optional per finding.
+Run `omc internal models` once and read its `OMC_MODELS` verdict before the
+conformance pass. An `"ok": false` verdict blocks dispatch with its `message`.
+Dispatch a Review worker with `tasks.review.model` and, where supported,
+`tasks.review.effort` to walk the record and branch diff against
+`origin/<base>` together. Supply the worker the record, plan when present, diff
+and base branch. It checks promised behavior, decisions, exclusions and
+observable tests; `/omc:explain` is available when a code path needs locating.
+Dispatch this worker even when the implementation appears clean and no fix
+worker will be needed. Do not perform the conformance judgment inline in the
+main session. For Codex model overrides use a fresh or partial-history fork
+with the needed context. If the harness cannot pin a worker model, use the
+orchestrator model and say so in one line; apply effort only when supported.
+If a worker cannot be dispatched at all, the conformance pass has not run and
+the audit cannot proceed to disposition.
 
-For each finding, name its kind: **code deviates from the record** (a promise
-is missing, a decision was implemented differently, or excluded work was
-added), or **record is stale** (the implementation is right but the record no
-longer describes it). Cite the record section and the relevant `file:line`.
-Classify it Important or Minor, using the same severity scale as `grug`.
-Minor findings are listed and do not gate publication.
+The Review worker returns findings to the main session. Have it name each
+finding's kind: **code deviates from the record** (a promise is missing, a
+decision was implemented differently, or excluded work was added), or
+**record is stale** (the implementation is right but the record no longer
+describes it). It cites the record section and relevant `file:line`, and
+classifies each finding Important or Minor using the same severity scale as
+`grug`. Minor findings are listed and do not gate publication.
 
 ## Phase 2 — disposition
 
@@ -87,6 +99,18 @@ batched CRITICAL question. Do not invoke `finish` while the gate is red. If a
 gate repair itself changes tracked product files, run verify too. A required
 answer resumes this gate and the remaining phases under the same `/omc:audit`
 authorization.
+
+Reuse the `OMC_MODELS` verdict from Phase 1 for audit fix workers.
+The auditor labels each fix worker `Complexity: simple | medium | high` using
+the same coding judgment as the implementation plan (multi-file, tricky or
+ambiguous work is `high`; missing labels use `medium`). Dispatch that worker
+with the corresponding `tasks.simple`, `tasks.medium`, or `tasks.high`
+model and effort. The conformance pass already ran on Review in Phase 1.
+For Codex model overrides use fresh or partial-history forks and supply the
+needed record and finding context. If the harness cannot pin a worker model,
+use the orchestrator model and say so in one line; apply effort only when
+supported. Workers return CRITICAL questions to the main session, which
+batches and asks them before resuming disposition.
 
 Before invoking `finish`, read `git status --porcelain` and classify every
 remaining path against the implementation, known stage/configuration work, and

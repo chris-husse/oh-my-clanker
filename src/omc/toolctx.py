@@ -52,6 +52,10 @@ class ToolContext:
     def child_env(self) -> dict[str, str]:
         return {**self.env, **self.uv_env}
 
+    def read_text(self, path: Path) -> str:
+        """Read provider-owned state through the same runtime I/O boundary."""
+        return path.read_text(encoding="utf-8")
+
     def run(
         self,
         argv: Sequence[str],
