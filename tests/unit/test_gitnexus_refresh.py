@@ -63,7 +63,9 @@ def test_stale_index_heals_with_one_incremental_analyze(tmp_path):
     v, said = _run(ctx, repo, documentation=False, reset=False)
     assert v.fresh
     recorded = calls.read_text()
-    assert recorded.count("analyze --skip-agents-md --skip-skills") == 1
+    assert [line.split()[1:] for line in recorded.splitlines() if " analyze " in line] == [
+        ["analyze", "--skip-agents-md", "--skip-skills", "--branch", "main"]
+    ]
     assert "clean --force" not in recorded
     assert "→ refreshing GitNexus index (incremental)" in said and "✓ index refreshed" in said
 
@@ -85,7 +87,8 @@ def test_analyze_that_leaves_it_stale_escalates_to_clean(tmp_path):
     assert "✗ index still stale after rebuild: index-foreign" in said
 
 
-def test_failed_analyze_exit_code_is_narrated_but_verdict_decides(tmp_path):
+@pytest.mark.parametrize("still_stale", [False, True])
+def test_failed_analyze_exit_code_is_narrated_but_verdict_decides(tmp_path, still_stale):
     """Exit codes are narrated, never trusted: a non-zero analyze that DID fix the
     metadata ends fresh; one that did not escalates like any other stale result."""
     _, repo = _repo_with_origin(tmp_path)
@@ -93,10 +96,12 @@ def test_failed_analyze_exit_code_is_narrated_but_verdict_decides(tmp_path):
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     node = tmp_path / "bin" / "node"
     node.write_text(node.read_text().replace("echo ok\nexit 0\n", "echo ok\nexit 7\n"))
+    if still_stale:
+        _foreign_stamping_stub(tmp_path)
     v, said = _run(ctx, repo, documentation=False, reset=False)
     assert any(s.startswith("✗ analyze failed") for s in said)
-    assert v.fresh  # the stub wrote fresh metadata despite exit 7
-    assert "clean --force" not in calls.read_text()
+    assert v.fresh is not still_stale
+    assert ("clean --force" in calls.read_text()) is still_stale
 
 
 def test_inverted_store_destroys_first_exactly_one_analyze(tmp_path):
@@ -108,7 +113,9 @@ def test_inverted_store_destroys_first_exactly_one_analyze(tmp_path):
     v, said = _run(ctx, repo, documentation=False, reset=False)
     recorded = calls.read_text()
     assert recorded.index("clean --force") < recorded.index("analyze")
-    assert recorded.count("analyze --skip-agents-md --skip-skills") == 1
+    assert [line.split()[1:] for line in recorded.splitlines() if " analyze " in line] == [
+        ["analyze", "--skip-agents-md", "--skip-skills", "--branch", "main"]
+    ]
     assert "✓ index rebuilt for main" in said and v.fresh
 
 
@@ -455,7 +462,9 @@ def test_shared_store_legacy_index_converges_locally(tmp_path):
     recorded = calls.read_text()
     assert recorded.count("analyze --skip-agents-md --skip-skills") == 1
     assert "clean --force" not in recorded
-    assert _commands(calls) == [["analyze", "--skip-agents-md", "--skip-skills"]]
+    assert _commands(calls) == [
+        ["analyze", "--skip-agents-md", "--skip-skills", "--branch", "main"]
+    ]
     assert POINTER_NOTICE not in said
     again, _ = _run(ctx, repo, documentation=False, reset=False)
     assert again.fresh
@@ -497,7 +506,7 @@ def test_pointer_converges_and_gc_is_best_effort(tmp_path, gc_exit, gc_output):
     assert v.fresh
     assert said.count(POINTER_NOTICE) == 1
     assert _commands(calls) == [
-        ["analyze", "--skip-agents-md", "--skip-skills"],
+        ["analyze", "--skip-agents-md", "--skip-skills", "--branch", "main"],
         ["clean", "--gc", "--force"],
     ]
     assert not shared.exists() and not (repo / ".gitnexus/store.json").exists()
@@ -528,7 +537,7 @@ def test_pointer_analyze_failure_before_registration_preserves_stale_legacy(tmp_
     assert (repo / ".gitnexus/meta.json").read_text() == old
     assert any("clean did not remove the index" in line for line in said)
     assert _commands(calls) == [
-        ["analyze", "--skip-agents-md", "--skip-skills"],
+        ["analyze", "--skip-agents-md", "--skip-skills", "--branch", "main"],
         ["clean", "--force"],
     ]
 
@@ -544,3 +553,55 @@ def test_pointer_gc_runs_before_documentation_completes(tmp_path):
     assert commands[1] == ["clean", "--gc", "--force"]
     assert commands[2][0] == "wiki"
     assert commands.count(["clean", "--gc", "--force"]) == 1
+
+
+@pytest.mark.parametrize("observed", ["HEAD", None])
+def test_require_base_refuses_detached_or_unreadable(tmp_path, monkeypatch, observed):
+    import omc.gitnexus as gn
+
+    _, repo = _repo_with_origin(tmp_path)
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    monkeypatch.setattr(gn, "current_branch", lambda *args: observed)
+    with pytest.raises(gn.CheckoutMoved) as exc:
+        gn._require_base(ctx, repo, "main")
+    assert exc.value.branch == (observed or "")
+    assert exc.value.base == "main"
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize("writer", ["reset", "rebuild"])
+def test_detached_writer_preserves_snapshot(tmp_path, writer):
+    import omc.gitnexus as gn
+
+    _, repo = _repo_with_origin(tmp_path)
+    docs = _seed_wiki_and_mirror(repo)
+    meta = repo / ".gitnexus/meta.json"
+    before = meta.read_bytes()
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    _git("checkout", "--detach", cwd=repo)
+    with pytest.raises(gn.CheckoutMoved):
+        if writer == "reset":
+            _run(ctx, repo, documentation=True, reset=True)
+        else:
+            gn._destroy_and_rebuild(ctx, repo, "main", lambda line: None)
+    assert not calls.exists()
+    assert meta.read_bytes() == before
+    assert (docs / "index.md").read_text() == "page"
+
+
+def test_custom_base_pins_analyze(tmp_path):
+    _, repo = _repo_with_origin(tmp_path)
+    _git("switch", "-c", "trunk", cwd=repo)
+    _stale_index(repo)
+    meta = repo / ".gitnexus/meta.json"
+    meta.write_text(meta.read_text().replace('"main"', '"trunk"'))
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    v = refresh_knowledge(ctx, Config(), repo, "trunk", documentation=False, reset=False)
+    assert v.fresh
+    assert calls.read_text().split()[1:] == [
+        "analyze",
+        "--skip-agents-md",
+        "--skip-skills",
+        "--branch",
+        "trunk",
+    ]

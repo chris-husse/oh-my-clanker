@@ -84,6 +84,11 @@ clone first-indexed on a feature branch). Steps:
    then on the watcher's incremental updates land where the MCP server,
    staleness checks, and `wiki` all read, and the registry's top-level
    `lastCommit` advances on every run.
+
+   **2026-10-07 amendment:** analyze now carries `--branch <base>`;
+   `ANALYZE_ARGS` became `analyze_argv`, and checkout movement aborts the
+   heal. See [the ownership-flap design](2026-10-07-fix-watch-index-ownership-flap-design.md).
+
 4. Docs: **always** delete the stale mirror `.omc/docs/gitnexus/docs` (stale
    docs are worse than absent docs — they cite deleted files as current; the
    path is gitignored, so deletion cannot dirty the tree and block the

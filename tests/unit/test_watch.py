@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -112,11 +113,11 @@ def _ctx_with_node_stub(tmp_path, home):
         "#!/bin/sh\n"
         f'echo "$@" >> "{calls}"\n'
         'case "$*" in\n'
-        '  *" clean --force") rm -rf .gitnexus ;;\n'
-        '  *" analyze --skip-agents-md --skip-skills") mkdir -p .gitnexus; '
+        '  *" clean --force") /bin/rm -rf .gitnexus ;;\n'
+        '  *" analyze --skip-agents-md --skip-skills"*) /bin/mkdir -p .gitnexus; '
         'printf \'{"branch":"main","lastCommit":"%s","repoPath":"%s"}\' '
         '"$(/usr/bin/git rev-parse HEAD)" "$PWD" > .gitnexus/meta.json ;;\n'
-        '  *" wiki --provider"*) mkdir -p .gitnexus/wiki; '
+        '  *" wiki --provider"*) /bin/mkdir -p .gitnexus/wiki; '
         'printf \'{"fromCommit":"%s","moduleFiles":{}}\' "$(/usr/bin/git rev-parse HEAD)" '
         "> .gitnexus/wiki/meta.json; printf 'page' > .gitnexus/wiki/index.md ;;\n"
         "esac\n"
@@ -976,26 +977,53 @@ def _seed_docs_mirror(repo):
     return docs
 
 
-def _ctx_with_healing_node_stub(tmp_path, home, *, clean_removes=True, analyze_stamps="main"):
-    """Like _ctx_with_node_stub, but `node` simulates GitNexus side effects:
-    clean removes .gitnexus, analyze writes a meta stamped `analyze_stamps`,
-    wiki generates .gitnexus/wiki (so the docs-mirror tail has something real
-    to mirror). Knobs simulate the failure modes (clean that silently fails,
-    analyze that stamps the wrong branch)."""
+def _analyze_side_effects(*, move_to: str | None = None, rogue_stamp: str | None = None):
+    """GitNexus refuses a mismatched explicit label before writing anything."""
+    move = (
+        "if [ ! -f .git/analyze-moved ]; then : > .git/analyze-moved; "
+        f"/usr/bin/git switch -q {shlex.quote(move_to)} || exit 90; fi; "
+        if move_to
+        else ""
+    )
+    return (
+        move + 'label=""; while [ "$#" -gt 0 ]; do '
+        'if [ "$1" = --branch ]; then shift; label="$1"; fi; shift; done; '
+        "actual=$(/usr/bin/git rev-parse --abbrev-ref HEAD); "
+        'if [ -n "$label" ] && [ "$label" != "$actual" ]; then '
+        'printf \'%s\\n\' "--branch \\"$label\\" does not match the checked-out branch '
+        '\\"$actual\\". Check out \\"$label\\" before indexing it, or omit --branch '
+        'to index the current branch." >&2; exit 1; fi; '
+        "stamp=${label:-$actual}; "
+        + (f"stamp={shlex.quote(rogue_stamp)}; " if rogue_stamp else "")
+        + "/bin/mkdir -p .gitnexus; "
+        'printf \'{"branch":"%s","lastCommit":"%s","repoPath":"%s"}\' '
+        '"$stamp" "$(/usr/bin/git rev-parse HEAD)" "$PWD" > .gitnexus/meta.json'
+    )
+
+
+def _ctx_with_healing_node_stub(
+    tmp_path,
+    home,
+    *,
+    clean_removes=True,
+    move_to: str | None = None,
+    rogue_stamp: str | None = None,
+):
+    """Faithful pinned analyze, with one-shot checkout movement or rogue writes."""
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     calls = bindir / "node.calls"
-    clean_cmd = "rm -rf .gitnexus" if clean_removes else ":"
+    clean_cmd = "/bin/rm -rf .gitnexus" if clean_removes else ":"
     node = bindir / "node"
     node.write_text(
         "#!/bin/sh\n"
         f'echo "$@" >> "{calls}"\n'
         'case "$*" in\n'
         f'  *" clean --force") {clean_cmd} ;;\n'
-        '  *" analyze --skip-agents-md --skip-skills") mkdir -p .gitnexus; '
-        f'printf \'{{"branch":"{analyze_stamps}","lastCommit":"%s","repoPath":"%s"}}\' '
-        '"$(/usr/bin/git rev-parse HEAD)" "$PWD" > .gitnexus/meta.json ;;\n'
-        '  *" wiki --provider"*) mkdir -p .gitnexus/wiki; '
+        '  *" analyze --skip-agents-md --skip-skills"*) '
+        + _analyze_side_effects(move_to=move_to, rogue_stamp=rogue_stamp)
+        + " ;;\n"
+        '  *" wiki --provider"*) /bin/mkdir -p .gitnexus/wiki; '
         'printf \'{"fromCommit":"%s","moduleFiles":{}}\' "$(/usr/bin/git rev-parse HEAD)" '
         "> .gitnexus/wiki/meta.json; "
         "printf 'regenerated from the healed graph' > .gitnexus/wiki/index.md ;;\n"
@@ -1070,7 +1098,7 @@ def _ctx_with_shared_store_node_stub(
         'if [ "$GITNEXUS_SHARED_STORE" = off ] && [ ! -f .gitnexus/store.json ]; then '
         "/bin/rm -rf .gitnexus; else "
         f'/bin/rm -rf "{shared}" .gitnexus/store.json; fi ;;\n'
-        '  "analyze --skip-agents-md --skip-skills") '
+        '  "analyze --skip-agents-md --skip-skills"*) '
         + ('echo "registration failed"; exit 9; ' if analyze_fails else "")
         + "/bin/mkdir -p .gitnexus; "
         'if [ "$GITNEXUS_SHARED_STORE" = off ]; then '
@@ -1101,9 +1129,7 @@ def test_heal_clean_failure_warns_and_skips(tmp_path, capsys):
 def test_heal_wrong_stamp_never_claims_success(tmp_path, capsys):
     _, repo = _repo_with_origin(tmp_path)
     _seed_inverted_store(repo)
-    ctx, _ = _ctx_with_healing_node_stub(
-        tmp_path, tmp_path / "home", analyze_stamps="feature/omc-v1"
-    )
+    ctx, _ = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", rogue_stamp="feature/omc-v1")
     assert _run_once(repo, ctx) == 0
     err = capsys.readouterr().err
     assert "✗ rebuilt index is not owned by 'main' — not claiming success" in err
@@ -1255,8 +1281,8 @@ def test_reset_flag_consumed_after_sync_once(tmp_path, capsys):
 
 
 def test_failed_reset_is_not_rerun_next_tick(tmp_path, capsys):
-    """A reset whose rebuild stays stale returns knowledge-stale:<codes>; run_watch
-    clears reset_pending on that token too, so the next tick does not re-clean."""
+    """A reset whose rebuild stays stale was still attempted; the next tick
+    must not reset and clean the snapshot again."""
     _, repo = _repo_with_origin(tmp_path)
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     _foreign_stamping_stub(tmp_path)
@@ -1396,3 +1422,249 @@ def test_shared_store_watch_convergence_and_quiet_failure(tmp_path, capsys, monk
     else:
         assert len(recorded.splitlines()) == 1
         assert recorded.startswith("off|")
+
+
+def _move_on_fetch(ctx, tmp_path, repo):
+    wrapper = tmp_path / "bin" / "moving-git"
+    marker = tmp_path / "fetch-moved"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = fetch ] && [ ! -f "{marker}" ]; then '
+        f': > "{marker}"; /usr/bin/git -C "{repo}" switch -q feature/x || exit 90; fi\n'
+        'exec /usr/bin/git "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    ctx.git_bin = str(wrapper)
+
+
+def _movement_fixture(tmp_path, *, move_during_analyze=False):
+    _, repo = _repo_with_origin(tmp_path)
+    _git("branch", "feature/x", cwd=repo)
+    _seed_inverted_store(repo, owner="main")
+    docs = _seed_docs_mirror(repo)
+    _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" > hook-ran.txt\n')
+    ctx, calls = _ctx_with_healing_node_stub(
+        tmp_path, tmp_path / "home", move_to="feature/x" if move_during_analyze else None
+    )
+    return repo, docs, ctx, calls
+
+
+@pytest.mark.parametrize("force_refresh", [False, True])
+def test_move_after_guard_aborts_before_node(tmp_path, capsys, force_refresh):
+    from omc.watch import _tick
+
+    repo, docs, ctx, calls = _movement_fixture(tmp_path)
+    _move_on_fetch(ctx, tmp_path, repo)
+    token = _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=force_refresh)
+    assert token == "off-branch:feature/x"
+    assert not calls.exists()
+    assert capsys.readouterr().err.count("✗ primary moved") == 1
+    assert not (repo / "hook-ran.txt").exists()
+
+
+def test_move_during_incremental_preserves_snapshot(tmp_path, capsys):
+    repo, docs, ctx, calls = _movement_fixture(tmp_path, move_during_analyze=True)
+    meta = repo / ".gitnexus/meta.json"
+    before = meta.read_bytes()
+    sentinel = (docs / "stale.md").read_bytes()
+    assert _run_once(repo, ctx, enable_documentation=True) == 0
+    assert meta.read_bytes() == before
+    assert (docs / "stale.md").read_bytes() == sentinel
+    recorded = calls.read_text()
+    err = capsys.readouterr().err
+    assert "✗ primary moved" in err
+    assert " clean " not in recorded and " wiki " not in recorded
+    for line in ("destroying and rebuilding", "✓ knowledge is current", "✓ docs mirror restored"):
+        assert line not in err
+    assert not (repo / "hook-ran.txt").exists()
+
+
+def test_move_during_rebuild_warns_without_success(tmp_path, capsys):
+    repo, docs, ctx, calls = _movement_fixture(tmp_path, move_during_analyze=True)
+    _seed_inverted_store(repo)
+    assert _run_once(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "✗ primary moved" in err
+    assert "✓ index rebuilt" not in err and "not owned by" not in err
+    assert calls.read_text().count(" analyze ") == 1
+    assert not (repo / "hook-ran.txt").exists()
+
+
+def test_reset_move_before_write_remains_pending(tmp_path, capsys):
+    repo, docs, ctx, calls = _movement_fixture(tmp_path)
+    meta = repo / ".gitnexus/meta.json"
+    before = meta.read_bytes()
+    sentinel = (docs / "stale.md").read_bytes()
+    _move_on_fetch(ctx, tmp_path, repo)
+
+    def between(i):
+        if i <= 2:
+            assert meta.read_bytes() == before
+            assert (docs / "stale.md").read_bytes() == sentinel
+            assert " clean " not in calls.read_text()
+        if i == 2:
+            _git("switch", "main", cwd=repo)
+
+    assert _run_loop(repo, ctx, ticks=4, between=between, reset_gitnexus=True) == 0
+    assert capsys.readouterr().err.count("· reset pending") == 1
+    assert calls.read_text().count(" clean --force") == 1
+    assert json.loads(meta.read_text())["lastCommit"] == _git_out(repo, "rev-parse", "HEAD")
+    assert not docs.exists()
+    assert not (repo / "hook-ran.txt").exists()
+
+
+def test_move_before_wiki_aborts(tmp_path, capsys, monkeypatch):
+    import omc.gitnexus as gn
+
+    repo, docs, ctx, calls = _movement_fixture(tmp_path)
+    _seed_fresh_index(repo)
+    run_wiki = gn._run_wiki
+
+    def move_then_wiki(*args, **kw):
+        _git("switch", "feature/x", cwd=repo)
+        return run_wiki(*args, **kw)
+
+    monkeypatch.setattr(gn, "_run_wiki", move_then_wiki)
+    assert _run_once(repo, ctx, enable_documentation=True) == 0
+    err = capsys.readouterr().err
+    assert "✗ primary moved" in err
+    assert " wiki " not in calls.read_text()
+    assert "✓ knowledge is current" not in err and "✓ docs mirror restored" not in err
+    assert (docs / "stale.md").read_text() == "cites deleted files"
+    assert not (repo / "hook-ran.txt").exists()
+
+
+@pytest.mark.parametrize("rebase", [False, True])
+def test_synced_move_keeps_hook_and_auto_build(tmp_path, capsys, rebase):
+    origin, repo = _repo_with_origin(tmp_path)
+    _git("branch", "feature/x", cwd=repo)
+    _push_remote_commit(origin, tmp_path)
+    _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" > hook-ran.txt\n')
+    _seed_build_stage(repo)
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", move_to="feature/x")
+    _stub_claude(
+        tmp_path, 'OMC_STAGE {"stage":"build","configured":true,"passed":true,"summary":"ok"}'
+    )
+    claude = tmp_path / "bin/claude"
+    claude.write_text(
+        claude.read_text().replace("#!/bin/sh\n", "#!/bin/sh\nprintf built > build-ran.txt\n")
+    )
+    old = os.getcwd()
+    os.chdir(repo)
+    try:
+        rc = run_watch(ctx, Config(), interval=1, once=True, auto_build=True, rebase=rebase)
+    finally:
+        os.chdir(old)
+    assert rc == 0
+    assert "✗ primary moved" in capsys.readouterr().err
+    assert (repo / "hook-ran.txt").read_text().strip() == "synced"
+    assert (repo / "build-ran.txt").read_text() == "built"
+
+
+@pytest.mark.parametrize("rebase", [False, True])
+@pytest.mark.parametrize("once", [False, True])
+def test_synced_move_before_reset_keeps_reset_pending(tmp_path, capsys, monkeypatch, rebase, once):
+    import omc.watch as watch
+
+    origin, repo = _repo_with_origin(tmp_path)
+    _git("branch", "feature/x", cwd=repo)
+    _push_remote_commit(origin, tmp_path)
+    docs = _seed_docs_mirror(repo)
+    meta = repo / ".gitnexus/meta.json"
+    before = meta.read_bytes()
+    _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" >> hook-ran.txt\n')
+    _seed_build_stage(repo)
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    _stub_claude(
+        tmp_path, 'OMC_STAGE {"stage":"build","configured":true,"passed":true,"summary":"ok"}'
+    )
+    claude = tmp_path / "bin/claude"
+    claude.write_text(
+        claude.read_text().replace("#!/bin/sh\n", "#!/bin/sh\nprintf built > build-ran.txt\n")
+    )
+    refresh = watch.refresh_knowledge
+    moved = False
+
+    def move_before_reset(*args, **kwargs):
+        nonlocal moved
+        if not moved:
+            moved = True
+            _git("switch", "feature/x", cwd=repo)
+        return refresh(*args, **kwargs)
+
+    monkeypatch.setattr(watch, "refresh_knowledge", move_before_reset)
+
+    def between(i):
+        if i == 1:
+            assert meta.read_bytes() == before
+            assert (docs / "stale.md").read_text() == "cites deleted files"
+            assert " clean " not in calls.read_text()
+            assert (repo / "hook-ran.txt").read_text().strip() == "synced"
+            assert (repo / "build-ran.txt").read_text() == "built"
+            _git("switch", "main", cwd=repo)
+
+    kwargs = dict(reset_gitnexus=True, auto_build=True, rebase=rebase)
+    if once:
+        with monkeypatch.context() as cwd_patch:
+            cwd_patch.chdir(repo)
+            assert run_watch(ctx, Config(), interval=1, once=True, **kwargs) == 0
+        between(1)
+    else:
+        assert _run_loop(repo, ctx, ticks=3, between=between, **kwargs) == 0
+    err = capsys.readouterr().err
+    assert "✗ primary moved" in err
+    if once:
+        assert "· reset not applied" in err
+    else:
+        assert calls.read_text().count(" clean --force") == 1
+        assert err.count("· reset pending") == 1
+        assert json.loads(meta.read_text())["lastCommit"] == _git_out(repo, "rev-parse", "HEAD")
+        assert not docs.exists()
+    assert (repo / "hook-ran.txt").read_text().strip() == "synced"
+
+
+@pytest.mark.parametrize("sync", ["up-to-date", "merge", "rebase"])
+def test_move_after_reset_does_not_repeat_reset(tmp_path, capsys, sync):
+    origin, repo = _repo_with_origin(tmp_path)
+    _git("branch", "feature/x", cwd=repo)
+    if sync != "up-to-date":
+        _push_remote_commit(origin, tmp_path)
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", move_to="feature/x")
+
+    def between(i):
+        if i == 1:
+            assert calls.read_text().count(" clean --force") == 1
+            assert not (repo / ".gitnexus/meta.json").exists()
+            _git("switch", "main", cwd=repo)
+
+    assert (
+        _run_loop(repo, ctx, ticks=3, between=between, reset_gitnexus=True, rebase=sync == "rebase")
+        == 0
+    )
+    err = capsys.readouterr().err
+    assert "✗ primary moved" in err
+    assert calls.read_text().count(" clean --force") == 1
+    assert "· reset pending" not in err
+    assert json.loads((repo / ".gitnexus/meta.json").read_text())["lastCommit"] == _git_out(
+        repo, "rev-parse", "HEAD"
+    )
+
+
+def test_mid_tick_warning_deduplicates_until_base_returns(tmp_path, capsys):
+    repo, docs, ctx, calls = _movement_fixture(tmp_path, move_during_analyze=True)
+
+    def between(i):
+        if i <= 2:
+            err = capsys.readouterr().err
+            assert err.count("✗ primary moved") == (1 if i == 1 else 0)
+            assert "· not on main" not in err
+        if i == 2:
+            _git("switch", "main", cwd=repo)
+
+    assert _run_loop(repo, ctx, ticks=3, between=between) == 0
+    assert "✓ index refreshed" in capsys.readouterr().err
+    assert calls.read_text().count(" analyze ") == 2
+    assert json.loads((repo / ".gitnexus/meta.json").read_text())["lastCommit"] == _git_out(
+        repo, "rev-parse", "HEAD"
+    )
+    assert not (repo / "hook-ran.txt").exists()

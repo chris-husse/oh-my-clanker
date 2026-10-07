@@ -25,15 +25,12 @@ from .wikirun import (
     PageCountTracker,
     wiki_failure_excerpt,
 )
+from .wtconfig import current_branch
 
 if TYPE_CHECKING:  # annotation-only; ToolContext stays the subprocess boundary
     import subprocess
 
     from .config.schema import Config
-
-# Index-only analyze: no AGENTS.md/CLAUDE.md writes, no agent-skill installs —
-# same flags the gitnexus-index skill prescribes.
-ANALYZE_ARGS = ("analyze", "--skip-agents-md", "--skip-skills")
 
 # The ONLY source ever updated — mirrors the gitnexus-ensure skill's rule.
 GITNEXUS_ORIGIN = "https://github.com/chris-husse/GitNexus.git"
@@ -46,6 +43,43 @@ def gitnexus_cli(ctx: ToolContext) -> Path:
 
 def gitnexus_argv(ctx: ToolContext, *args: str) -> list[str]:
     return ["node", str(gitnexus_cli(ctx)), *args]
+
+
+def analyze_argv(ctx: ToolContext, base: str) -> list[str]:
+    # Verified fork contract: --branch refuses a mismatched checkout before
+    # writing. Placement: no label -> flat; absent/unstamped flat -> adopt flat;
+    # same owner -> flat; foreign owner -> branch sub-slot. omc cleans inversion
+    # first and checks metadata absence, so it can only reach flat placement.
+    # Keep index-only behavior: no AGENTS.md/CLAUDE.md or agent-skill writes.
+    return gitnexus_argv(ctx, "analyze", "--skip-agents-md", "--skip-skills", "--branch", base)
+
+
+class CheckoutMoved(Exception):
+    def __init__(self, branch: str, base: str):
+        super().__init__(branch, base)
+        self.branch = branch
+        self.base = base
+
+
+@dataclass
+class ResetProgress:
+    """Whether a requested reset entered destructive work, even if repair aborts."""
+
+    attempted: bool = False
+
+
+def _require_base(ctx: ToolContext, root: Path, base: str) -> None:
+    branch = current_branch(ctx, str(root)) or ""
+    if branch != base:
+        raise CheckoutMoved(branch, base)
+
+
+def _run_analyze(ctx: ToolContext, root: Path, base: str) -> subprocess.CompletedProcess[str]:
+    _require_base(ctx, root, base)
+    cp = ctx.run(analyze_argv(ctx, base), cwd=str(root))
+    if cp.returncode != 0:
+        _require_base(ctx, root, base)
+    return cp
 
 
 def gitnexus_root(ctx: ToolContext) -> Path:
@@ -329,10 +363,11 @@ def _destroy_and_rebuild(ctx: ToolContext, root: Path, base: str, say) -> tuple[
     Narrates only FAILURE. Getting the branch stamp right is a necessary step,
     not the goal — the recomputed verdict is the goal, so `✓ index rebuilt` is
     the CALLER's line, printed only once that verdict is clean (spec §2)."""
+    _require_base(ctx, root, base)
     mirror_cleared = _clear_mirror(root, say)
     if not _destroy(ctx, root, say):
         return False, mirror_cleared
-    cp = ctx.run(gitnexus_argv(ctx, *ANALYZE_ARGS), cwd=str(root))
+    cp = _run_analyze(ctx, root, base)
     if cp.returncode != 0:
         say(f"✗ full analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
     if flat_store_branch(root) != base:
@@ -341,7 +376,8 @@ def _destroy_and_rebuild(ctx: ToolContext, root: Path, base: str, say) -> tuple[
     return True, mirror_cleared
 
 
-def _run_wiki(ctx: ToolContext, cfg: Config, root: Path, say) -> bool:
+def _run_wiki(ctx: ToolContext, cfg: Config, root: Path, base: str, say) -> bool:
+    _require_base(ctx, root, base)
     # Lazy like docs_llm_for below: a module-level import of omc.cli.* from here
     # is a cycle (omc.cli → start → gitnexus). wikirun.render() does the same.
     from .cli.progress_bar import BarThread
@@ -404,6 +440,7 @@ def refresh_knowledge(
     reset: bool,
     ref: str = "HEAD",
     say=_say,
+    reset_progress: ResetProgress | None = None,
 ) -> Freshness:
     """The ONLY code that repairs the knowledge snapshot (spec §2). Cheapest
     step first, escalate only when the recomputed verdict says so. Exit codes
@@ -434,6 +471,9 @@ def refresh_knowledge(
         return v
 
     if reset:
+        _require_base(ctx, rootp, base)
+        if reset_progress is not None:
+            reset_progress.attempted = True
         say("→ resetting the knowledge snapshot (--reset-gitnexus)")
         did_anything = True
         mirror_cleared = _clear_mirror(rootp, say)
@@ -460,7 +500,7 @@ def refresh_knowledge(
             rebuilt = True
         else:
             say("→ refreshing GitNexus index (incremental)")
-            cp = ctx.run(gitnexus_argv(ctx, *ANALYZE_ARGS), cwd=str(rootp))
+            cp = _run_analyze(ctx, rootp, base)
             if cp.returncode != 0:
                 # Narrate only — the verdict below decides whether to escalate.
                 say(f"✗ analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
@@ -497,7 +537,7 @@ def refresh_knowledge(
 
     if v.wiki_codes():
         did_anything = True
-        if not _run_wiki(ctx, cfg, rootp, say):
+        if not _run_wiki(ctx, cfg, rootp, base, say):
             return finish(verdict())
         v = verdict()
         if v.wiki_codes():

@@ -17,6 +17,7 @@ from pathlib import Path
 from .config import resolve, store
 from .errors import OmcError
 from .gitnexus import (
+    CheckoutMoved,
     ensure_gitnexus,
     gitnexus_argv,
     gitnexus_cli,
@@ -118,10 +119,24 @@ def _knowledge_refresh(ctx: ToolContext, rest: list[str]) -> int:
     lock = busy_lock(ctx, cwd=primary)
     # Held for the WHOLE repair so `omc design` never snapshots a half-written
     # index/wiki; the context manager releases it on exceptions too.
-    with acquire_busy_narrated(lock, _say) if lock is not None else nullcontext():
-        v = refresh_knowledge(
-            ctx, cfg, primary, base, documentation=args.enable_documentation, reset=False, say=_say
+    try:
+        with acquire_busy_narrated(lock, _say) if lock is not None else nullcontext():
+            v = refresh_knowledge(
+                ctx,
+                cfg,
+                primary,
+                base,
+                documentation=args.enable_documentation,
+                reset=False,
+                say=_say,
+            )
+    except CheckoutMoved as moved:
+        print(
+            f"error: refresh requires the primary checkout to be on {moved.base} "
+            f"(currently {moved.branch})",
+            file=sys.stderr,
         )
+        return 1
     behind = ctx.run([ctx.git_bin, "rev-list", "--count", f"HEAD..origin/{base}"], cwd=primary)
     n = (behind.stdout or "").strip()
     if behind.returncode == 0 and n.isdigit() and int(n) > 0:

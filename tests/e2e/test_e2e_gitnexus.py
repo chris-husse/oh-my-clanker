@@ -84,6 +84,36 @@ def test_index_then_explain_on_real_repo(container):
         f"repo not in gitnexus registry:\n{listed[:800]}"
     )
 
+    metadata_bytes = (
+        "from pathlib import Path; root=Path('/repo/.gitnexus'); "
+        "meta=root/'gitnexus.json'; meta=meta if meta.exists() else root/'meta.json'; "
+        "print(meta.read_bytes().hex())"
+    )
+    rc, before = run_in(container, ["python3", "-c", metadata_bytes])
+    assert rc == 0, before
+    rc, out = run_in(container, ["git", "-C", "/repo", "switch", "-c", "e2e-analyze-mismatch"])
+    assert rc == 0, out
+    try:
+        rc, out = run_in(
+            container,
+            ["node", _CLI, "analyze", "--skip-agents-md", "--skip-skills", "--branch", "main"],
+            cwd="/repo",
+        )
+        assert rc != 0, out
+        assert '--branch "main" does not match the checked-out branch "e2e-analyze-mismatch"' in out
+        rc, after = run_in(container, ["python3", "-c", metadata_bytes])
+        assert rc == 0, after
+        assert after == before
+        assert json.loads(bytes.fromhex(after.strip()))["lastCommit"] == head.strip(), after
+        rc, out = run_in(container, ["test", "!", "-e", "/repo/.gitnexus/branches"])
+        assert rc == 0, "analyze created a branch slot for a mismatched label"
+        rc, out = run_in(container, ["omc", "internal", "gitnexus", "refresh"], cwd="/repo")
+        assert rc == 1, out
+        assert "requires the primary checkout to be on main (currently e2e-analyze-mismatch)" in out
+    finally:
+        rc, out = run_in(container, ["git", "-C", "/repo", "switch", "main"])
+        assert rc == 0, out
+
     question = "how does omc start derive the branch slug?"
     rc, answer = _claude_skill(container, f"/omc:explain {question}", cwd="/repo")
     assert rc == 0, answer
