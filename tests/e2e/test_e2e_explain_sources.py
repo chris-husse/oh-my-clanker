@@ -102,6 +102,19 @@ def _write_global_sources(container) -> None:
         assert rc == 0, f"writing fixture source {name} failed:\n{out}"
 
 
+def _assert_source_statuses(answer: str) -> None:
+    # A prose heading such as "Source conflict:" is not an availability report.
+    statuses = [
+        ln
+        for ln in answer.splitlines()
+        if re.match(r"\W*Source \w+:\W*(?:available|unavailable)\b", ln)
+    ]
+    assert len(statuses) == 2, statuses
+    assert re.search(r"Source echo:\W*available", statuses[0]), statuses
+    assert re.search(r"Source vanished:\W*unavailable", statuses[1]), statuses
+    assert "not registered" in statuses[1], statuses
+
+
 def test_global_sources_feed_explain_and_fail_independently(container):
     require_token("claude")
     configure_omc(container, "claude")
@@ -131,11 +144,7 @@ def test_global_sources_feed_explain_and_fail_independently(container):
     # has exactly one status line — echo available, vanished unavailable with
     # the fixture's reason — in resolver order.
     assert "echo-fixture" in answer or _ECHO_MARKER in answer, "echo evidence missing"
-    statuses = [ln for ln in answer.splitlines() if re.match(r"\W*Source \w+:", ln)]
-    assert len(statuses) == 2, statuses
-    assert re.search(r"Source echo:\W*available", statuses[0]), statuses
-    assert re.search(r"Source vanished:\W*unavailable", statuses[1]), statuses
-    assert "not registered" in statuses[1], statuses
+    _assert_source_statuses(answer)
 
     verdict = judge(
         container,

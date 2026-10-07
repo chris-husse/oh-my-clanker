@@ -2,6 +2,7 @@
 Judged by recomputing the verdict, never by exit codes."""
 
 import json
+import shutil
 
 import pytest
 
@@ -11,6 +12,8 @@ from omc.gitnexus import refresh_knowledge
 from .test_watch import (
     _ctx_with_healing_node_stub,
     _ctx_with_node_stub,
+    _ctx_with_shared_store_node_stub,
+    _git,
     _git_out,
     _repo_with_origin,
 )
@@ -163,17 +166,48 @@ def test_reset_with_failed_clean_restores_the_docs_mirror(tmp_path):
     assert "✓ docs mirror restored" in said
 
 
-def test_documentation_off_leaves_the_cleared_mirror_to_the_hint(tmp_path):
-    """documentation=False never mirrors — the `run omc watch --once
-    --enable-documentation` hint is the whole contract there."""
+def test_documentation_off_restores_the_cleared_mirror(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     docs = _seed_wiki_and_mirror(repo)
-    ctx, _calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", clean_removes=False)
+    ctx, _ = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", clean_removes=False)
     v, said = _run(ctx, repo, documentation=False, reset=True)
-    assert v.fresh and not docs.exists()
+    assert v.fresh
+    assert (docs / "index.md").read_text() == "page"
+    assert said.count("✓ docs mirror restored") == 1
+    assert not any("docs mirror cleared" in line for line in said)
+
+
+@pytest.mark.parametrize("meta", [None, "{", '{"fromCommit":"old"}'])
+def test_documentation_off_missing_mirror_requires_readable_metadata(tmp_path, meta):
+    _, repo = _repo_with_origin(tmp_path)
+    docs = _seed_wiki_and_mirror(repo)
+    shutil.rmtree(docs)
+    path = repo / ".gitnexus/wiki/meta.json"
+    if meta is None:
+        path.unlink()
+    else:
+        path.write_text(meta)
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    v, said = _run(ctx, repo, documentation=False, reset=False)
+    assert v.fresh and not calls.exists()
+    assert docs.exists() == (meta == '{"fromCommit":"old"}')
+    assert ("✓ docs mirror restored" in said) == docs.exists()
+
+
+@pytest.mark.parametrize("documentation", [False, True])
+def test_initially_fresh_restores_only_absent_mirror(tmp_path, documentation):
+    _, repo = _repo_with_origin(tmp_path)
+    docs = _seed_wiki_and_mirror(repo)
+    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    (docs / "index.md").write_text("preserve")
+    v, said = _run(ctx, repo, documentation=documentation, reset=False)
+    assert v.fresh and (docs / "index.md").read_text() == "preserve"
     assert "✓ docs mirror restored" not in said
-    hint = "· docs mirror cleared — run omc watch --once --enable-documentation to regenerate"
-    assert hint in said
+    shutil.rmtree(docs)
+    v, said = _run(ctx, repo, documentation=documentation, reset=False)
+    assert v.fresh and not calls.exists()
+    assert (docs / "index.md").read_text() == "page"
+    assert said.count("✓ docs mirror restored") == 1
 
 
 def test_documentation_off_never_computes_wiki_reasons(tmp_path):
@@ -403,3 +437,110 @@ def test_wiki_failure_excerpt_is_the_tail_where_the_error_is(tmp_path):
     failed = next(s for s in said if s.startswith("✗ wiki failed (exit 1): "))
     assert "LLM API error: boom" in failed
     assert "private progress" not in failed
+
+
+def test_shared_store_legacy_index_converges_locally(tmp_path):
+    _, repo = _repo_with_origin(tmp_path)
+    # Leave the local legacy index at its genuine ancestor while HEAD advances.
+    (repo / "f.txt").write_text("two\n")
+    _git("add", "f.txt", cwd=repo)
+    _git("commit", "-qm", "c2", cwd=repo)
+    ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
+    verdict, said = _run(ctx, repo, documentation=False, reset=False)
+    assert verdict.fresh, said
+    metadata = json.loads((repo / ".gitnexus" / "meta.json").read_text())
+    assert metadata["lastCommit"] == _git_out(repo, "rev-parse", "HEAD")
+    assert not (repo / ".gitnexus" / "store.json").exists()
+    assert not (tmp_path / "shared-store").exists()
+    recorded = calls.read_text()
+    assert recorded.count("analyze --skip-agents-md --skip-skills") == 1
+    assert "clean --force" not in recorded
+    assert _commands(calls) == [["analyze", "--skip-agents-md", "--skip-skills"]]
+    assert POINTER_NOTICE not in said
+    again, _ = _run(ctx, repo, documentation=False, reset=False)
+    assert again.fresh
+    assert calls.read_text() == recorded
+
+
+POINTER_NOTICE = (
+    "· GitNexus shared-store pointer found — re-indexing locally; sharing is off under omc"
+)
+
+
+def _pointer(repo, tmp_path):
+    shared = tmp_path / "shared-store"
+    shared.mkdir()
+    (shared / "meta.json").write_text("{}")
+    (repo / ".gitnexus/store.json").write_text(json.dumps({"storePath": str(shared)}))
+    return shared
+
+
+def _commands(calls):
+    import shlex
+
+    rows = [line.split("|", 1) for line in calls.read_text().splitlines()]
+    assert all(env == "off" for env, _ in rows)
+    return [shlex.split(argv)[1:] for _, argv in rows]
+
+
+@pytest.mark.parametrize(
+    "gc_exit,gc_output", [(0, "skipped locked slot"), (17, "x" * 500 + " failure")]
+)
+def test_pointer_converges_and_gc_is_best_effort(tmp_path, gc_exit, gc_output):
+    _, repo = _repo_with_origin(tmp_path)
+    _stale_index(repo)
+    shared = _pointer(repo, tmp_path)
+    ctx, calls = _ctx_with_shared_store_node_stub(
+        tmp_path, tmp_path / "home", gc_exit=gc_exit, gc_output=gc_output
+    )
+    v, said = _run(ctx, repo, documentation=False, reset=False)
+    assert v.fresh
+    assert said.count(POINTER_NOTICE) == 1
+    assert _commands(calls) == [
+        ["analyze", "--skip-agents-md", "--skip-skills"],
+        ["clean", "--gc", "--force"],
+    ]
+    assert not shared.exists() and not (repo / ".gitnexus/store.json").exists()
+    assert "→ collecting orphaned GitNexus shared stores (clean --gc)" in said
+    expected = f"✗ clean --gc failed (exit {gc_exit}): {gc_output[-400:]}"
+    assert (expected if gc_exit else f"· {gc_output[-400:]}") in said
+
+
+def test_already_fresh_pointer_does_not_run_gc(tmp_path):
+    _, repo = _repo_with_origin(tmp_path)
+    _pointer(repo, tmp_path)
+    ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
+    v, said = _run(ctx, repo, documentation=False, reset=False)
+    assert v.fresh and not calls.exists()
+    assert POINTER_NOTICE not in said
+
+
+def test_pointer_analyze_failure_before_registration_preserves_stale_legacy(tmp_path):
+    _, repo = _repo_with_origin(tmp_path)
+    (repo / "f.txt").write_text("two\n")
+    _git("add", "f.txt", cwd=repo)
+    _git("commit", "-qm", "c2", cwd=repo)
+    old = (repo / ".gitnexus/meta.json").read_text()
+    _pointer(repo, tmp_path)
+    ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home", analyze_fails=True)
+    v, said = _run(ctx, repo, documentation=False, reset=False)
+    assert v.codes() == ["index-behind"]
+    assert (repo / ".gitnexus/meta.json").read_text() == old
+    assert any("clean did not remove the index" in line for line in said)
+    assert _commands(calls) == [
+        ["analyze", "--skip-agents-md", "--skip-skills"],
+        ["clean", "--force"],
+    ]
+
+
+def test_pointer_gc_runs_before_documentation_completes(tmp_path):
+    _, repo = _repo_with_origin(tmp_path)
+    _stale_index(repo)
+    _pointer(repo, tmp_path)
+    ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
+    v, said = _run(ctx, repo, documentation=True, reset=False)
+    assert not v.index_codes() and v.wiki_codes() == ["wiki-missing"]
+    commands = _commands(calls)
+    assert commands[1] == ["clean", "--gc", "--force"]
+    assert commands[2][0] == "wiki"
+    assert commands.count(["clean", "--gc", "--force"]) == 1

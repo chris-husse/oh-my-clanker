@@ -1051,6 +1051,41 @@ def test_refresh_healthy_store_stays_incremental(tmp_path, capsys):
     assert "destroying and rebuilding" not in capsys.readouterr().err
 
 
+def _ctx_with_shared_store_node_stub(
+    tmp_path, home, *, gc_exit=0, gc_output="collected", analyze_fails=False
+):
+    """Simulate pointer routing and local registration on a restricted PATH."""
+    import shlex
+
+    ctx, calls = _ctx_with_healing_node_stub(tmp_path, home)
+    node = tmp_path / "bin" / "node"
+    shared = tmp_path / "shared-store"
+    node.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s|%s\\n" "$GITNEXUS_SHARED_STORE" "$*" >> "{calls}"\n'
+        'shift\ncase "$*" in\n'
+        '  "clean --gc --force") '
+        f'/bin/rm -rf "{shared}"; printf %s {shlex.quote(gc_output)}; exit {gc_exit} ;;\n'
+        '  "clean --force") '
+        'if [ "$GITNEXUS_SHARED_STORE" = off ] && [ ! -f .gitnexus/store.json ]; then '
+        "/bin/rm -rf .gitnexus; else "
+        f'/bin/rm -rf "{shared}" .gitnexus/store.json; fi ;;\n'
+        '  "analyze --skip-agents-md --skip-skills") '
+        + ('echo "registration failed"; exit 9; ' if analyze_fails else "")
+        + "/bin/mkdir -p .gitnexus; "
+        'if [ "$GITNEXUS_SHARED_STORE" = off ]; then '
+        "/bin/rm -f .gitnexus/store.json; target=.gitnexus/meta.json; else "
+        f'/bin/mkdir -p "{shared}"; target="{shared}/meta.json"; '
+        f"printf '%s' '{{\"storePath\":\"{shared}\"}}' > .gitnexus/store.json; fi; "
+        'printf \'{"branch":"main","lastCommit":"%s","repoPath":"%s"}\' '
+        '"$(/usr/bin/git rev-parse HEAD)" "$PWD" > "$target" ;;\n'
+        "esac\necho ok\n"
+    )
+    ctx.env = {**ctx.env, "PATH": str(tmp_path / "bin"), "GITNEXUS_SHARED_STORE": "on"}
+    ctx.git_bin = "/usr/bin/git"
+    return ctx, calls
+
+
 def test_heal_clean_failure_warns_and_skips(tmp_path, capsys):
     _, repo = _repo_with_origin(tmp_path)
     _seed_inverted_store(repo)
@@ -1335,3 +1370,29 @@ def test_watch_reset_gitnexus_flag_dispatches(monkeypatch):
     monkeypatch.setattr(watch_mod, "run_watch", lambda ctx, cfg, **kw: seen.update(kw) or 0)
     assert cli.main(["watch", "--once", "--reset-gitnexus"]) == 0
     assert seen["reset_gitnexus"] is True and seen["once"] is True
+
+
+@pytest.mark.parametrize("policy", [True, False])
+def test_shared_store_watch_convergence_and_quiet_failure(tmp_path, capsys, monkeypatch, policy):
+    from omc.watch import _tick
+
+    _, repo = _repo_with_origin(tmp_path)
+    (repo / "f.txt").write_text("two\n")
+    _git("add", "f.txt", cwd=repo)
+    _git("commit", "-qm", "c2", cwd=repo)
+    ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
+    if not policy:
+        monkeypatch.setattr(ctx, "child_env", lambda: dict(ctx.env))
+    first = _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False)
+    assert first == ("healed" if policy else "knowledge-stale:index-behind")
+    recorded = calls.read_text()
+    if not policy:
+        assert "clean did not remove the index" in capsys.readouterr().err
+        second = _tick(
+            ctx, Config(), str(repo), enable_documentation=False, force_refresh=False, last=first
+        )
+        assert second == first
+        assert calls.read_text() == recorded
+    else:
+        assert len(recorded.splitlines()) == 1
+        assert recorded.startswith("off|")

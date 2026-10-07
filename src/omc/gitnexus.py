@@ -421,23 +421,14 @@ def refresh_knowledge(
         index work and nothing downstream is guaranteed to run, so the promise
         "a fresh verdict implies a present mirror" has to be kept on the way
         out — including from the early aborts."""
-        if not documentation:
-            if mirror_cleared:
-                # Only when the mirror ACTUALLY went away — never contradict a warning.
-                say(
-                    "· docs mirror cleared — run omc watch --once "
-                    "--enable-documentation to regenerate"
-                )
-        elif v.fresh:
-            wiki_dir = rootp / ".gitnexus" / "wiki"
-            if wiki_dir.is_dir() and not (rootp / DOCS_MIRROR_REL).is_dir():
-                # A fresh verdict carries no wiki reason, so the step-3 mirror
-                # never runs: a reset that cleared the mirror and then failed to
-                # `clean` (index and wiki intact ⇒ fresh), or a hand-deleted
-                # mirror, would leave /omc:explain and rebase-main with nothing
-                # while every surface reported fresh.
-                mirror_dir(wiki_dir, rootp / DOCS_MIRROR_REL)
+        mirror = rootp / DOCS_MIRROR_REL
+        if v.fresh and not mirror.is_dir() and read_wiki_meta(rootp) is not None:
+            # Surviving readable wiki content is useful even when documentation
+            # freshness is deliberately excluded from this refresh's verdict.
+            if mirror_dir(rootp / ".gitnexus" / "wiki", mirror):
                 say("✓ docs mirror restored")
+        if not documentation and mirror_cleared and not mirror.is_dir():
+            say("· docs mirror cleared — run omc watch --once --enable-documentation to regenerate")
         if not did_anything:
             say("✓ knowledge is current")
         return v
@@ -451,6 +442,12 @@ def refresh_knowledge(
 
     v = verdict()
     if v.index_codes():
+        had_shared_pointer = (rootp / ".gitnexus" / "store.json").exists()
+        if had_shared_pointer:
+            say(
+                "· GitNexus shared-store pointer found — re-indexing locally; "
+                "sharing is off under omc"
+            )
         did_anything = True
         rebuilt = False
         if "store-inverted" in v.index_codes():
@@ -486,6 +483,14 @@ def refresh_knowledge(
             # Earned only here: the rebuild's branch stamp was necessary, the
             # clean verdict is what makes it a success.
             say(f"✓ index rebuilt for {base}")
+        if had_shared_pointer:
+            say("→ collecting orphaned GitNexus shared stores (clean --gc)")
+            cp = ctx.run(gitnexus_argv(ctx, "clean", "--gc", "--force"), cwd=str(rootp))
+            excerpt = (cp.stderr or cp.stdout or "").strip()[-400:]
+            if cp.returncode != 0:
+                say(f"✗ clean --gc failed (exit {cp.returncode}): {excerpt}")
+            elif excerpt:
+                say(f"· {excerpt}")
 
     if not documentation:
         return finish(v)

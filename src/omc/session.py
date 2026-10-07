@@ -15,7 +15,7 @@ from .slug import MCP_TOOL_PATTERNS
 from .taskmodels import orchestrator
 from .terminal_title import terminal_title_argv
 from .terminals import detect_terminal
-from .toolctx import ToolContext
+from .toolctx import GITNEXUS_ENV, ToolContext
 
 START_ALLOWED_TOOLS = [*MCP_TOOL_PATTERNS, "Bash", "Read", "Glob", "Grep"]
 
@@ -23,7 +23,10 @@ START_ALLOWED_TOOLS = [*MCP_TOOL_PATTERNS, "Bash", "Read", "Glob", "Grep"]
 @dataclass(frozen=True)
 class SessionPlan:
     session_argv: list[str]
-    env: dict[str, str]  # provider title suppression + OMC_SLUG / OMC_PROVIDER
+    # Provider title suppression, session identity, and local GitNexus storage.
+    # GITNEXUS_ENV lives here because the interactive launch applies this dict
+    # with os.environ.update and execs the shell, bypassing ToolContext.child_env().
+    env: dict[str, str]
     title_seq: str
     title_argv: list[str]
     shell_argv: list[str]
@@ -61,7 +64,7 @@ def session_plan(
     )
     return SessionPlan(
         session_argv=session_argv,
-        env={**provider.title_env(), "OMC_SLUG": slug, "OMC_PROVIDER": name},
+        env={**provider.title_env(), "OMC_SLUG": slug, "OMC_PROVIDER": name, **GITNEXUS_ENV},
         title_seq=title_seq,
         title_argv=title_argv,
         shell_argv=shell_argv,
@@ -97,6 +100,8 @@ def run_headless(
         cp = ctx.run(
             argv,
             cwd=cwd,
+            # No GITNEXUS_ENV here: ctx.run merges extra_env over child_env(),
+            # which already carries GITNEXUS_SHARED_STORE=off.
             extra_env={**provider.title_env(), "OMC_SLUG": slug, "OMC_PROVIDER": name},
         )
     except OSError as exc:

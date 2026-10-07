@@ -24,6 +24,7 @@ def test_session_plan_is_pure_and_names_the_session():
     assert plan.session_argv[-1] == "/omc:implement"
     assert plan.env["OMC_SLUG"] == "proj-1"  # the slug, not the session name
     assert plan.env["OMC_PROVIDER"] == "claude"
+    assert plan.env["GITNEXUS_SHARED_STORE"] == "off"
     assert plan.env["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] == "1"
     assert plan.title_seq == "\033]0;feature/proj-1\007"
     assert plan.title_argv[-2:] == ["-m", "omc.terminal_title"]
@@ -40,7 +41,7 @@ def test_session_plan_wires_notifications_for_the_provider_that_takes_argv():
     assert plan.session_argv[0] == "codex"
     joined = " ".join(plan.session_argv)
     assert "tui.notifications=true" in joined and "notify=" not in joined
-    assert plan.env == {"OMC_SLUG": "s", "OMC_PROVIDER": "codex"}
+    assert plan.env == {"OMC_SLUG": "s", "OMC_PROVIDER": "codex", "GITNEXUS_SHARED_STORE": "off"}
 
 
 def test_run_headless_keeps_its_shape_and_defaults():
@@ -62,7 +63,11 @@ def test_run_headless_keeps_its_shape_and_defaults():
     argv = captured["argv"]
     assert argv[argv.index("-n") + 1] == "proj-1"
     assert argv[argv.index("--allowed-tools") + 1 :] == START_ALLOWED_TOOLS
-    assert captured["env"]["OMC_SLUG"] == "proj-1"
+    assert captured["env"] == {
+        "OMC_SLUG": "proj-1",
+        "OMC_PROVIDER": "claude",
+        "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+    }
 
     assert (
         _run_headless(
@@ -79,7 +84,11 @@ def test_run_headless_keeps_its_shape_and_defaults():
     argv = captured["argv"]
     assert argv[argv.index("-n") + 1] == "proj-1-implement"
     assert argv[argv.index("--allowed-tools") + 1 :] == ["Bash", "Edit"]
-    assert captured["env"]["OMC_SLUG"] == "proj-1"
+    assert captured["env"] == {
+        "OMC_SLUG": "proj-1",
+        "OMC_PROVIDER": "claude",
+        "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+    }
 
 
 @pytest.mark.parametrize("configured,expected", [(True, "true"), (False, "false"), (None, "true")])

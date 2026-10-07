@@ -296,7 +296,7 @@ def test_session_and_headless_launch_use_orchestrator_and_provider_env(tmp_path)
         "model_reasoning_effort=high",
         "/omc:start",
     ]
-    assert plan.env == {"OMC_SLUG": "s", "OMC_PROVIDER": "codex"}
+    assert plan.env == {"OMC_SLUG": "s", "OMC_PROVIDER": "codex", "GITNEXUS_SHARED_STORE": "off"}
 
     class CaptureCtx:
         env = _ctx(tmp_path).env
@@ -382,7 +382,11 @@ def test_claude_headless_and_slug_use_orchestrator_model_and_effort(tmp_path):
             "--allowed-tools",
             *START_ALLOWED_TOOLS,
         ],
-        {"CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1", "OMC_SLUG": "s", "OMC_PROVIDER": "claude"},
+        {
+            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+            "OMC_SLUG": "s",
+            "OMC_PROVIDER": "claude",
+        },
     )
     assert fetch_slug(ctx, cfg, "ISSUE-1") == "issue-1"
     slug_argv, slug_env = ctx.calls[1]
