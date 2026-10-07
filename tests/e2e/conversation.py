@@ -131,9 +131,15 @@ class Conversation:
 
 
 def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) -> dict:
-    """Require Claude's requested-turn result; retain only tool names and model ID."""
+    """Require Claude's requested-turn result; retain only tool names and model ID.
+
+    The turn's text is the LAST result `claude -p` emitted: when the model
+    backgrounds an Agent, the requested-turn result only says it is waiting,
+    and the answer the user actually reads arrives as a task-notification
+    result once the agent completes (observed live 2026-10-06)."""
     events = []
     result = None
+    final = None
     model = None
     pending_reads = {}
     agent_tools = {}
@@ -232,6 +238,7 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
                 if record.get("origin") is not None:
                     raise ValueError("Claude stream has no requested-turn result event")
                 result = record
+                final = record
                 if isinstance(record.get("uuid"), str):
                     result_uuids.add(record["uuid"])
             elif (
@@ -262,12 +269,14 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
                     raise ValueError("Claude notification result has repeated identity")
                 result_uuids.add(record["uuid"])
                 notification_results += 1
+                final = record
             else:
                 raise ValueError("repeated Claude result event")
     if result is None:
         raise ValueError("Claude stream missing result event")
+    assert final is not None
     return {
-        "text": result["result"],
+        "text": final["result"],
         "provider_session_id": result["session_id"],
         "model_observed": model,
         "events": events,

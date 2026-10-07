@@ -12,3 +12,10 @@ tests/e2e/scenario-artifacts/
 
 # Personal per-checkout Claude settings: never part of the repo under test
 .claude/settings.local.json
+
+# This checkout's GitNexus knowledge snapshot. Its meta.json names the HOST
+# path, so inside the image it is a "foreign" store that `analyze` refuses
+# and an unregistered `clean --force` cannot remove (observed 2026-10-06 with
+# the upstream storage-state guard). Tests index /repo themselves.
+.gitnexus/
+.omc/docs/

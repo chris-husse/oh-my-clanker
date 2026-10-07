@@ -35,6 +35,7 @@ from .wikirun import (  # noqa: F401
     _WIKI_STALL_SECONDS,
     GitNexusProgress,
     PageCountTracker,
+    wiki_failure_excerpt,
 )
 
 PIN_BRANCH = "omc-pin"
@@ -395,7 +396,7 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
         stall_after=_WIKI_STALL_SECONDS,
         poll=_WIKI_POLL_SECONDS,
         extra_env=run.extra_env,
-        on_line=gn.feed,  # GitNexus's stderr lines, parsed on the reader thread
+        on_line=lambda line: gn.feed(run.redact(line)),  # redact before progress stores detail
     )
     if stalled:
         print(
@@ -403,16 +404,17 @@ def run_document(ctx: ToolContext, ref_str: str) -> int:
             file=sys.stderr,
         )
         return 1
-    if cp.returncode != 0 or not wiki.is_dir():
-        # Exact-key redaction FIRST, the userinfo heuristic second (a key containing
-        # '@' would otherwise be mangled by _redact and escape run.redact), and
-        # truncation last — from the TAIL: GitNexus prints the error after its
-        # pino records and progress lines, so the head is noise.
+    if cp.returncode != 0:
+        # Exact-key redaction precedes the userinfo heuristic, then the helper
+        # removes progress noise and keeps the tail of the combined streams.
         print(
-            "error: gitnexus wiki failed: "
-            f"{_redact(run.redact((cp.stderr or cp.stdout or '').strip()))[-400:]}",
+            f"error: gitnexus wiki failed (exit {cp.returncode}): "
+            f"{wiki_failure_excerpt(cp, lambda s: _redact(run.redact(s)))}",
             file=sys.stderr,
         )
+        return 1
+    if not wiki.is_dir():
+        print(f"error: gitnexus wiki directory missing: {wiki}", file=sys.stderr)
         return 1
     # entry["docs"] is always set by run_ensure; the fallback derives the same
     # path straight from the key (host/owner/.../repo) without re-parsing a URL.
