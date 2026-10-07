@@ -105,6 +105,229 @@ def _run(args, cwd, tmp_path, capsys):
     return rc, verdict, out
 
 
+def _skill(root, name, text="# skill\n"):
+    path = root / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def _run_skills(args, cwd, home, monkeypatch, capsys):
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("OMC_HOME", str(home))
+    rc = run_internal(args)
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out) if captured.out else None
+    return rc, payload, captured.err
+
+
+def test_skills_list_plain_name_finds_project_only(tmp_path, monkeypatch, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    project = _skill(primary / ".omc" / "skills", "explain-context")
+
+    rc, paths, err = _run_skills(
+        ["skills", "list", "explain-context"],
+        primary,
+        tmp_path / "omc-home",
+        monkeypatch,
+        capsys,
+    )
+
+    assert rc == 0
+    assert paths == [str(project.resolve())]
+    assert err == ""
+
+
+def test_skills_list_plain_name_finds_global_only(tmp_path, monkeypatch, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    home = tmp_path / "omc-home"
+    global_skill = _skill(home / "skills", "explain-context")
+
+    rc, paths, _ = _run_skills(
+        ["skills", "list", "explain-context"], primary, home, monkeypatch, capsys
+    )
+
+    assert rc == 0
+    assert paths == [str(global_skill.resolve())]
+
+
+def test_skills_list_plain_name_orders_project_before_global(tmp_path, monkeypatch, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    home = tmp_path / "omc-home"
+    project = _skill(primary / ".omc" / "skills", "explain-context", "project")
+    global_skill = _skill(home / "skills", "explain-context", "global")
+
+    rc, paths, _ = _run_skills(
+        ["skills", "list", "explain-context"], primary, home, monkeypatch, capsys
+    )
+
+    assert rc == 0
+    assert paths == [str(project.resolve()), str(global_skill.resolve())]
+
+
+def test_skills_list_plain_name_orders_worktree_primary_global(tmp_path, monkeypatch, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    home = tmp_path / "omc-home"
+    worktree_skill = _skill(wt / ".omc" / "skills", "explain-context", "worktree")
+    primary_skill = _skill(primary / ".omc" / "skills", "explain-context", "primary")
+    global_skill = _skill(home / "skills", "explain-context", "global")
+
+    rc, paths, _ = _run_skills(["skills", "list", "explain-context"], wt, home, monkeypatch, capsys)
+
+    assert rc == 0
+    assert paths == [
+        str(worktree_skill.resolve()),
+        str(primary_skill.resolve()),
+        str(global_skill.resolve()),
+    ]
+
+
+def test_skills_list_deduplicates_shared_project_skill(tmp_path, monkeypatch, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    shared = tmp_path / "shared-omc"
+    skill = _skill(shared / "skills", "explain-context")
+    (primary / ".omc").symlink_to(shared, target_is_directory=True)
+    (wt / ".omc").symlink_to(shared, target_is_directory=True)
+
+    rc, paths, _ = _run_skills(
+        ["skills", "list", "explain-context"],
+        wt,
+        tmp_path / "omc-home",
+        monkeypatch,
+        capsys,
+    )
+
+    assert rc == 0
+    assert paths == [str(skill.resolve())]
+
+
+def test_skills_list_explain_sources_are_immediate_sorted_and_root_ordered(
+    tmp_path, monkeypatch, capsys
+):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    home = tmp_path / "omc-home"
+    wt_root = wt / ".omc" / "skills" / "explain-source"
+    primary_root = primary / ".omc" / "skills" / "explain-source"
+    global_root = home / "skills" / "explain-source"
+    wt_alpha = _skill(wt_root, "alpha", "worktree alpha")
+    wt_zulu = _skill(wt_root, "zulu")
+    _skill(wt_root / "nested", "too-deep")
+    _skill(wt_root, ".git")
+    primary_beta = _skill(primary_root, "beta")
+    global_alpha = _skill(global_root, "alpha", "global alpha")
+    global_gamma = _skill(global_root, "gamma")
+
+    rc, paths, _ = _run_skills(["skills", "list", "explain-source"], wt, home, monkeypatch, capsys)
+
+    assert rc == 0
+    assert paths == [
+        str(wt_alpha.resolve()),
+        str(wt_zulu.resolve()),
+        str(primary_beta.resolve()),
+        str(global_alpha.resolve()),
+        str(global_gamma.resolve()),
+    ]
+
+
+def test_skills_list_missing_name_is_empty(tmp_path, monkeypatch, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+
+    rc, paths, _ = _run_skills(
+        ["skills", "list", "absent"],
+        primary,
+        tmp_path / "omc-home",
+        monkeypatch,
+        capsys,
+    )
+
+    assert rc == 0
+    assert paths == []
+
+
+def test_skills_list_global_works_outside_repository(tmp_path, monkeypatch, capsys):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    home = tmp_path / "omc-home"
+    global_skill = _skill(home / "skills", "explain-context")
+
+    rc, paths, _ = _run_skills(
+        ["skills", "list", "explain-context"], outside, home, monkeypatch, capsys
+    )
+
+    assert rc == 0
+    assert paths == [str(global_skill.resolve())]
+
+
+def test_skills_list_rejects_malformed_cli_and_unsafe_names(tmp_path, monkeypatch, capsys):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    home = tmp_path / "omc-home"
+    malformed = [
+        ["skills"],
+        ["skills", "list"],
+        ["skills", "nope", "explain-context"],
+        ["skills", "list", "explain-context", "extra"],
+        ["skills", "list", "../explain-context"],
+        ["skills", "list", str(tmp_path / "explain-context")],
+    ]
+
+    for args in malformed:
+        rc, payload, err = _run_skills(args, outside, home, monkeypatch, capsys)
+        assert rc == 2, args
+        assert payload is None, args
+        assert "usage:" in err, args
+
+
+def test_skills_list_allows_resolved_root_but_rejects_escaping_candidates(
+    tmp_path, monkeypatch, capsys
+):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    home = tmp_path / "omc-home"
+    actual_skills = tmp_path / "actual-skills"
+    allowed = _skill(actual_skills, "allowed")
+    escaped = _skill(tmp_path / "escaped", "target")
+    actual_skills.mkdir(exist_ok=True)
+    (home / "skills").parent.mkdir(parents=True)
+    (home / "skills").symlink_to(actual_skills, target_is_directory=True)
+    (actual_skills / "escaping").symlink_to(escaped.parent, target_is_directory=True)
+    (actual_skills / "dangling").symlink_to(tmp_path / "missing", target_is_directory=True)
+    (actual_skills / "loop").symlink_to(actual_skills / "loop", target_is_directory=True)
+
+    rc, paths, _ = _run_skills(["skills", "list", "allowed"], outside, home, monkeypatch, capsys)
+    assert rc == 0
+    assert paths == [str(allowed.resolve())]
+
+    for name in ("escaping", "dangling", "loop"):
+        rc, paths, _ = _run_skills(["skills", "list", name], outside, home, monkeypatch, capsys)
+        assert rc == 0
+        assert paths == []
+
+
+def test_skills_list_explain_sources_skip_escaping_dangling_and_looping_symlinks(
+    tmp_path, monkeypatch, capsys
+):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    home = tmp_path / "omc-home"
+    sources = home / "skills" / "explain-source"
+    kept = _skill(sources, "kept")
+    escaped = _skill(tmp_path / "escaped", "source")
+    (sources / "escaping").symlink_to(escaped.parent, target_is_directory=True)
+    (sources / "dangling").symlink_to(tmp_path / "missing", target_is_directory=True)
+    (sources / "loop").symlink_to(sources / "loop", target_is_directory=True)
+
+    rc, paths, _ = _run_skills(
+        ["skills", "list", "explain-source"], outside, home, monkeypatch, capsys
+    )
+
+    assert rc == 0
+    assert paths == [str(kept.resolve())]
+
+
 def test_wt_template_prints_template(capsys):
     rc = run_internal(["wt-template"])
     assert rc == 0

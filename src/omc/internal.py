@@ -40,6 +40,7 @@ _USAGE = (
     " | gitnexus [--git REF] <ensure|status|refresh [--enable-documentation]"
     "|query|context|impact|cypher> [args…]"
     " | dependency <ensure|document|list> [args…]"
+    " | skills list NAME"
     " | build-progress LOGFILE}"
 )
 
@@ -290,6 +291,60 @@ def _design_record(ctx: ToolContext) -> int:
     return 0 if verdict.ok else 2
 
 
+def _skills_list(ctx: ToolContext, name: str) -> int:
+    """Print canonical skill paths in project, primary, global run order."""
+    part = Path(name)
+    if not name or part.is_absolute() or part.parts != (name,) or name in (".", ".."):
+        print(_USAGE, file=sys.stderr)
+        return 2
+
+    bases: list[Path] = []
+    root = repo_root(ctx)
+    if root is not None:
+        bases.append(Path(root) / ".omc" / "skills")
+        primary = primary_root(ctx)
+        if primary is not None and Path(primary).resolve() != Path(root).resolve():
+            bases.append(Path(primary) / ".omc" / "skills")
+    bases.append(ctx.home / "skills")
+
+    found: list[str] = []
+    seen: set[Path] = set()
+
+    def add(candidate: Path, skills_root: Path) -> None:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return
+        if not resolved.is_file() or not resolved.is_relative_to(skills_root):
+            return
+        if resolved not in seen:
+            seen.add(resolved)
+            found.append(str(resolved))
+
+    for base in bases:
+        try:
+            skills_root = base.resolve()
+        except (OSError, RuntimeError):
+            continue
+        if name != "explain-source":
+            add(skills_root / name / "SKILL.md", skills_root)
+            continue
+        family = skills_root / name
+        try:
+            resolved_family = family.resolve(strict=True)
+            if not resolved_family.is_dir() or not resolved_family.is_relative_to(skills_root):
+                continue
+            children = sorted(resolved_family.iterdir(), key=lambda path: path.name)
+        except (OSError, RuntimeError):
+            continue
+        for child in children:
+            if child.name != ".git":
+                add(child / "SKILL.md", skills_root)
+
+    print(json.dumps(found))
+    return 0
+
+
 def run_internal(argv: list[str]) -> int:
     if not argv:
         print(_USAGE, file=sys.stderr)
@@ -326,6 +381,11 @@ def run_internal(argv: list[str]) -> int:
         return _rebase_main(ToolContext.from_env(), args.base)
     if cmd == "gitnexus":
         return _gitnexus(ToolContext.from_env(), rest)
+    if cmd == "skills":
+        if len(rest) != 2 or rest[0] != "list":
+            print(_USAGE, file=sys.stderr)
+            return 2
+        return _skills_list(ToolContext.from_env(), rest[1])
     if cmd == "dependency":
         from .dependency import run_document, run_ensure, run_list
 

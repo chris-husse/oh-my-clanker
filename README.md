@@ -186,6 +186,20 @@ Useful in-session skills:
 | `/omc:finish` | Publish the branch, also available without an audit. |
 | `/omc:integrate` | Set up or revisit the project's omc integration. |
 
+`/omc:explain` also reads optional knowledge skills. A context map lives at
+`.omc/skills/explain-context/SKILL.md` in the project or at
+`~/.omc/skills/explain-context/SKILL.md` for every checkout on the machine;
+each extra evidence source lives at `.omc/skills/explain-source/<name>/SKILL.md`
+or `~/.omc/skills/explain-source/<name>/SKILL.md`. `omc internal skills list
+explain-context` and `omc internal skills list explain-source` print the
+resolved paths in project, primary-worktree, then global order. A source gets
+the question and the repository identity and reports availability, cited
+findings, freshness, unknowns and, optionally, dependency keys or a budgeted
+way to check selected citations. Sources add evidence to the local answer,
+never the answer itself; each is optional and fails on its own, and
+`/omc:explain` reports an unavailable source at the end while still answering
+from the local graph.
+
 Finish rebases and refreshes the snapshot, squashes to one commit, and runs **check → build → verify → review** before pushing with `--force-with-lease`. The commit message is the MR/PR description generated from the diff; **you open the MR/PR**. It then offers to close the worktree (the unmerged branch survives), address review comments with amend/re-push, or discuss the change.
 
 Project stages live in `.omc/skills/<stage>/SKILL.md`: check is the frequent unit gate, build builds the world without tests, verify is full E2E at major milestones, and review judges the diff. Each can run as `/omc:<stage>`; unconfigured project stages are no-ops. Review always adds omc's grug complexity lens: Important findings need a fix or a waiver in the design record's “Deliberate complexity” section. An unresolved finding or failed gate stops publication.

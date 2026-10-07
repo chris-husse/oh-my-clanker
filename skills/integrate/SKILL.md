@@ -44,6 +44,12 @@ the remaining slots. The interactive session is where files get written.
    - `.omc/skills/check` · `.omc/skills/build` · `.omc/skills/verify` ·
      `.omc/skills/review` · `.omc/skills/explain-context` ·
      `.omc/skills/investigation-context`
+   - Global knowledge skills: `~/.omc/skills/explain-context/SKILL.md` and
+     each `~/.omc/skills/explain-source/<name>/SKILL.md`. Use
+     `omc internal skills list explain-context` and
+     `omc internal skills list explain-source` to see resolved project,
+     primary, and global entries. Inventory availability, purpose, and
+     overlap; a missing global entry is optional, not a project stage gap.
    - `.omc/hooks/post-watch.sh` — optional CLI-side hook `omc watch` runs
      after action ticks (sync / forced refresh)
 2. **Mechanical fixes** via the existing machinery (with the user's go-ahead):

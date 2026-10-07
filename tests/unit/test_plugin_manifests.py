@@ -273,6 +273,48 @@ def test_explain_user_facing_contract():
         assert needle in text, f"explain missing {needle!r}"
 
 
+def test_explain_discovers_context_and_sources_in_order():
+    text = (ROOT / "skills" / "explain" / "SKILL.md").read_text()
+    assert "## Step 2b" in text
+    context = text.split("## Step 1", 1)[1].split("## Step 2", 1)[0]
+    sources = text.split("## Step 2b", 1)[1].split("## Step 3", 1)[0]
+
+    assert "omc internal skills list explain-context" in context
+    assert "project" in context and "primary" in context and "global" in context
+    assert "omc internal skills list explain-source" in sources
+    assert "question" in sources and "primary" in sources
+    assert "base" in sources and "repository key" in sources
+    assert text.index("## Step 1") < text.index("## Step 2") < text.index("## Step 2b")
+
+
+def test_explain_source_evidence_and_failure_contract():
+    text = (ROOT / "skills" / "explain" / "SKILL.md").read_text()
+    assert "## Step 2b" in text
+    sources = text.split("## Step 2b", 1)[1].split("## Step 3", 1)[0]
+    synthesis = text.split("## Step 4", 1)[1]
+
+    for needle in ("availability", "cited findings", "freshness", "unknowns"):
+        assert needle in sources
+    assert "non-fatal" in sources and "independently" in sources
+    assert "current repository" in synthesis and "conflict" in synthesis
+    assert "select evidence" in synthesis and "cite-back" in synthesis
+    assert "budget" in synthesis
+    dependency = text.split("## Step 3", 1)[1].split("## Step 4", 1)[0]
+    assert "dependency keys" in dependency and "named" in dependency
+    assert "exactly once" in synthesis and "end" in synthesis
+    assert "empty" in synthesis
+    assert "`/omc:index` first" in text and "and stop" in text
+    assert "FIRST line" in text and "fresh: false" in text
+
+
+def test_integrate_inventories_global_knowledge_sources():
+    text = (ROOT / "skills" / "integrate" / "SKILL.md").read_text()
+    inventory = text.split("## Phase 1", 1)[1].split("## Phase 2", 1)[0]
+    assert "~/.omc/skills/explain-context" in inventory
+    assert "~/.omc/skills/explain-source" in inventory
+    assert "omc internal skills list" in inventory
+
+
 def test_machine_contract_listings_include_knowledge():
     for rel in (
         "src/omc/distribution/AGENTS.md",
