@@ -6,7 +6,7 @@
     {
       "name": "omc",
       "description": "In-session skills for the omc CLI: /omc:start and /omc:slug",
-      "version": "0.1.28",
+      "version": "0.1.29",
       "source": "./",
       "author": { "name": "Chris Husse" }
     }
