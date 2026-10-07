@@ -155,6 +155,14 @@ Rules:
 
 ### 2. One repair function (`src/omc/gitnexus.py::refresh_knowledge`)
 
+**2026-10-07 amendment:** `refresh_knowledge` can raise `CheckoutMoved` at
+its writer boundaries. Watch warns and defers up-to-date repairs until the
+base returns, retaining pending resets; synced ticks still run their hook
+and auto-build. Internal refresh releases its busy lock and returns 1 with
+the off-base error, without an `OMC_KNOWLEDGE` verdict. The `_heal_store`
+name below is now `_destroy_and_rebuild`'s body. See
+[the ownership-flap design](2026-10-07-fix-watch-index-ownership-flap-design.md).
+
 ```python
 def refresh_knowledge(ctx, cfg, root, base, *, documentation: bool,
                       reset: bool, ref="HEAD", say=_say) -> Freshness

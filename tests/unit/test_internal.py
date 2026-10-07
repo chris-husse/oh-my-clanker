@@ -692,8 +692,8 @@ _HEALING_NODE = (
     "#!/bin/sh\n"
     'echo "$@" >> "{calls}"\n'
     'case "$*" in\n'
-    '  *" clean --force") rm -rf .gitnexus ;;\n'
-    '  *" analyze --skip-agents-md --skip-skills") mkdir -p .gitnexus; '
+    '  *" clean --force") /bin/rm -rf .gitnexus ;;\n'
+    '  *" analyze --skip-agents-md --skip-skills"*) /bin/mkdir -p .gitnexus; '
     'printf \'{{"branch":"main","lastCommit":"%s","repoPath":"%s"}}\' '
     '"$(/usr/bin/git rev-parse HEAD)" "$PWD" > .gitnexus/meta.json ;;\n'
     "esac\n"
@@ -981,3 +981,32 @@ def test_design_record_invalid_config_reaches_the_rc1_boundary(tmp_path, capsys,
     captured = capsys.readouterr()
     assert captured.err.startswith("error: ")
     assert "OMC_DESIGN_RECORD" not in captured.out
+
+
+def test_refresh_move_during_analyze_releases_lock(tmp_path, capsys, monkeypatch):
+    from ._mutexproc import flock_free
+    from .test_watch import _analyze_side_effects
+
+    repo, wt, calls, _ = _gitnexus_env_with_config(tmp_path, monkeypatch)
+    subprocess.run(["git", "-C", str(repo), "branch", "feature/x"], check=True)
+    node = tmp_path / "bin/node"
+    node.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{calls}"\n'
+        'case "$*" in\n*" analyze --skip-agents-md --skip-skills"*) '
+        + _analyze_side_effects(move_to="feature/x")
+        + " ;;\nesac\necho ok\n"
+    )
+    old = _chdir(repo)
+    try:
+        rc = run_internal(["gitnexus", "refresh"])
+    finally:
+        os.chdir(old)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert (
+        "error: refresh requires the primary checkout to be on main (currently feature/x)"
+        in captured.err
+    )
+    assert "OMC_KNOWLEDGE" not in captured.out
+    assert flock_free(repo / ".git/omc-watch-busy.lock")

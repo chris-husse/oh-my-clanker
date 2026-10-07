@@ -29,7 +29,14 @@ from .buildprogress import ProgressTracker, sentinel_line
 from .cli.progress_bar import BarThread
 from .config.schema import Config
 from .errors import OmcError
-from .gitnexus import Freshness, ensure_gitnexus, refresh_knowledge, snapshot_freshness
+from .gitnexus import (
+    CheckoutMoved,
+    Freshness,
+    ResetProgress,
+    ensure_gitnexus,
+    refresh_knowledge,
+    snapshot_freshness,
+)
 from .probe import require_tools
 from .providers.registry import get_provider
 from .skills_source import skill_prompt
@@ -217,18 +224,32 @@ def _auto_build(ctx: ToolContext, cfg: Config, root: str) -> None:
 
 
 def _refresh_index(
-    ctx: ToolContext, cfg: Config, root: str, enable_documentation: bool, *, reset: bool = False
-) -> Freshness:
+    ctx: ToolContext,
+    cfg: Config,
+    root: str,
+    enable_documentation: bool,
+    *,
+    reset: bool = False,
+    reset_progress: ResetProgress | None = None,
+) -> Freshness | CheckoutMoved:
     """Repair the knowledge snapshot — the ONE code path (gitnexus.refresh_knowledge)."""
-    return refresh_knowledge(
-        ctx,
-        cfg,
-        root,
-        cfg.worktree.base_branch,
-        documentation=enable_documentation,
-        reset=reset,
-        say=_say,
-    )
+    try:
+        return refresh_knowledge(
+            ctx,
+            cfg,
+            root,
+            cfg.worktree.base_branch,
+            documentation=enable_documentation,
+            reset=reset,
+            say=_say,
+            reset_progress=reset_progress,
+        )
+    except CheckoutMoved as moved:
+        _say(
+            f"✗ primary moved to '{moved.branch}' mid-tick — knowledge snapshot NOT updated; "
+            f"retrying when it is back on {moved.base}"
+        )
+        return moved
 
 
 def _tick(
@@ -241,6 +262,7 @@ def _tick(
     last: str | None = None,
     rebase: bool = False,
     reset: bool = False,
+    reset_progress: ResetProgress | None = None,
 ) -> str:
     """One tick; returns an outcome token. Repeatable QUIET outcomes (up to
     date, off-branch, dirty, diverged, fetch-fail, conflicted, rebase-failed,
@@ -278,7 +300,11 @@ def _tick(
             _say("· up to date")
             # --once is the "check now" button: repair whatever is stale (and a
             # pending reset), narrate "current" when nothing is.
-            _refresh_index(ctx, cfg, root, enable_documentation, reset=reset)
+            result = _refresh_index(
+                ctx, cfg, root, enable_documentation, reset=reset, reset_progress=reset_progress
+            )
+            if isinstance(result, CheckoutMoved):
+                return f"off-branch:{result.branch}"
             return "refreshed"
         verdict = snapshot_freshness(
             ctx, Path(root), base, ref="HEAD", documentation=enable_documentation
@@ -289,7 +315,11 @@ def _tick(
         if not reset and last == f"knowledge-stale:{codes}":
             return last  # same failure as last tick: no retry hammer, no extra line
         _say("· up to date")
-        after = _refresh_index(ctx, cfg, root, enable_documentation, reset=reset)
+        after = _refresh_index(
+            ctx, cfg, root, enable_documentation, reset=reset, reset_progress=reset_progress
+        )
+        if isinstance(after, CheckoutMoved):
+            return f"off-branch:{after.branch}"
         if after.fresh:
             return "healed"
         return "knowledge-stale:" + ",".join(sorted(after.codes()))
@@ -329,7 +359,9 @@ def _tick(
             )
         new = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
         _say(f"✓ rebased {base}: {old}..{new} ({behind} commits)")
-        _refresh_index(ctx, cfg, root, enable_documentation, reset=reset)
+        _refresh_index(
+            ctx, cfg, root, enable_documentation, reset=reset, reset_progress=reset_progress
+        )
         return "synced"
     if ahead not in ("", "0"):
         return quiet(
@@ -347,7 +379,7 @@ def _tick(
         return quiet("merge-failed", f"✗ ff-merge failed: {(cp.stderr or '').strip()[:200]}")
     new = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
     _say(f"✓ synced {base}: {old}..{new} ({behind} commits)")
-    _refresh_index(ctx, cfg, root, enable_documentation, reset=reset)
+    _refresh_index(ctx, cfg, root, enable_documentation, reset=reset, reset_progress=reset_progress)
     return "synced"
 
 
@@ -415,6 +447,7 @@ def run_watch(
         while True:
             # Busy lock held for the WHOLE busy portion (tick + hooks): free ⇔ idle.
             with acquire_busy_narrated(busy, _say) if busy is not None else nullcontext():
+                reset_progress = ResetProgress()
                 last = _tick(
                     ctx,
                     cfg,
@@ -424,10 +457,11 @@ def run_watch(
                     last=last,
                     rebase=rebase,
                     reset=reset_pending,
+                    reset_progress=reset_progress,
                 )
-                if reset_pending and (
-                    last in ("healed", "refreshed", "synced") or last.startswith("knowledge-stale:")
-                ):
+                # Sync and reset are independent: checkout movement can abort
+                # repair either before or after the destructive reset starts.
+                if reset_pending and reset_progress.attempted:
                     reset_pending = False  # applied — or failed honestly; never re-run blindly
                 elif reset_pending and once:
                     _say(
