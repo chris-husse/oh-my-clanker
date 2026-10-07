@@ -76,8 +76,8 @@ Three numbered steps: CLI installation, `omc configure`, plugin installation.
 Use `uv tool install git+https://github.com/chris-husse/oh-my-clanker` verbatim.
 Provide the two-row harness table: Claude marketplace add + plugin install;
 Codex marketplace add + `/plugins`. Claude users may skip manual installation:
-configure/update/design install, repair and refresh the plugin. Explain dry-run's
-stale-plugin report without implying it updates the plugin.
+configure/update/design/implement/review install, repair and refresh the plugin.
+Explain dry-run's stale/missing-plugin report without implying it changes the plugin.
 Superpowers is required: automatic for Claude Code, user-installed for Codex.
 Link the marketplace dependency pitfall in `docker/PLUGIN-NOTES.md` and
 `obra/superpowers`. Introduce `/omc:integrate`, including reruns after updates,
@@ -169,8 +169,8 @@ Shared flags table: provider overrides (`--claude`/`--codex`, no saved change),
 `--headless`, design-only `--no-mutex`. Codex direct syntax is `$omc:…`, not
 `/omc:…`; Claude resumes by name, repeated launch needs id; Codex lacks names.
 Nine one-line in-session skills: explain, index, document, explain-dependency,
-investigate (env-locked read-only evidence, required investigation-context and
-`envs/<env>.md`), rebase-main, check-wt-config, finish, integrate.
+investigate (env-locked read-only evidence; investigation-context is required and
+its `envs/<env>.md` briefings define the environments), rebase-main, check-wt-config, finish, integrate.
 Explain optional check/build/verify/review semantics, order, standalone forms,
 no-op unconfigured project stages, always-on grug review and Important
 fix/waiver into Deliberate complexity. Finish rebases/mirrors, squashes with
@@ -187,7 +187,8 @@ Exactly three Mermaid diagrams, each with a short explanatory paragraph:
    copy-ignored snapshot → worktree; rebase-main re-mirrors. Explicitly show
    explain's queries routing to PRIMARY graph via internal proxy, and primary
    docs as reference. A copied graph is not the live query source. Mention
-   GitNexus approved-source install under `~/.omc/dependencies/gitnexus`.
+   GitNexus approved-source install under `~/.omc/dependencies/gitnexus`; the
+   checkout tracks upstream `main` (no version pin), so never cite a GitNexus version.
 3. Sequence for a real internal contract (e.g. design-record): skill → internal
    command → single prefixed JSON verdict → caller continues. List exactly
    OMC_KNOWLEDGE, OMC_DESIGN_RECORD, OMC_STAGE, OMC_REBASE_MAIN, OMC_SQUASH,
@@ -205,12 +206,12 @@ claim that all skills spawn only through internal. Link Development as example.
 #### `## Prerequisites` — target 10 lines
 
 Retain git, Worktrunk/wt, uv, at least one provider CLI, superpowers. Explain
-real probes refuse with install hints. Keep existing project links.
+real probes stop with install hints (exit 1, not a refusal) and which commands run them. Keep existing project links.
 
 #### `## Other commands` — target 12 lines
 
-One-line rows for version, install, update, uninstall, dependency watch,
-dependency list, shell-integration, title, aws-credential-process. Lifecycle
+One-line rows for version, print-install-path, install, update, uninstall,
+dependency watch, dependency list, shell-integration, title, aws-credential-process. Lifecycle
 and watch sections are their references. Verify parser for auxiliary commands.
 
 #### `## Notifications` — target 15 lines
