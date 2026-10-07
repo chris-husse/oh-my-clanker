@@ -49,6 +49,34 @@ def test_index_then_explain_on_real_repo(container):
     )
     assert rc == 0, out
 
+    rc, original_head = run_in(container, ["git", "-C", "/repo", "rev-parse", "HEAD"])
+    assert rc == 0, original_head
+    submodule_source = make_work_repo(container)
+    for command in [
+        [
+            "python3",
+            "-c",
+            "from pathlib import Path; "
+            "Path('/repo/scope-untracked.py').write_text('def untracked(): return 1\\n'); "
+            f"Path('{submodule_source}/scope.py').write_text('def nested(): return 2\\n')",
+        ],
+        ["git", "-C", submodule_source, "add", "scope.py"],
+        ["git", "-C", submodule_source, "commit", "-qm", "add indexable submodule source"],
+        [
+            "git",
+            "-C",
+            "/repo",
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            submodule_source,
+            "scope-submodule",
+        ],
+    ]:
+        rc, out = run_in(container, command)
+        assert rc == 0, out
+
     rc, out = _claude_skill(container, "/omc:index", cwd="/repo")
     assert rc == 0, out
     rc, _ = run_in(container, ["test", "-d", "/repo/.gitnexus"])
@@ -72,6 +100,7 @@ def test_index_then_explain_on_real_repo(container):
     assert rc == 0, storage
     rc, head = run_in(container, ["git", "-C", "/repo", "rev-parse", "HEAD"])
     assert rc == 0, head
+    assert head.strip() == original_head.strip(), "scope setup/index moved /repo HEAD"
     artifacts = json.loads(storage)
     assert artifacts["metadata"] is not None, storage
     assert artifacts["metadata"]["lastCommit"] == head.strip(), storage
@@ -84,6 +113,35 @@ def test_index_then_explain_on_real_repo(container):
         f"repo not in gitnexus registry:\n{listed[:800]}"
     )
 
+    # Keep the CLI banner and freshness notice on stderr out of the JSON payload.
+    rc, files_json = run_in(
+        container,
+        [
+            "bash",
+            "-c",
+            "omc internal gitnexus cypher 'MATCH (f:File) RETURN f.filePath' "
+            "2>/tmp/scope-cypher.stderr; rc=$?; "
+            'if [ "$rc" -ne 0 ]; then cat /tmp/scope-cypher.stderr >&2; fi; exit "$rc"',
+        ],
+        cwd="/repo",
+    )
+    assert rc == 0, files_json
+    files = json.loads(files_json)
+    assert isinstance(files, dict), files
+    assert isinstance(files.get("row_count"), int) and files["row_count"] > 0, files
+    assert isinstance(files.get("markdown"), str), files
+    rows = files["markdown"].splitlines()
+    assert rows[:2] == ["| f.filePath |", "| --- |"], files
+    assert len(rows[2:]) == files["row_count"], files
+    assert all(row.startswith("| ") and row.endswith(" |") for row in rows[2:]), files
+    paths = {row[2:-2] for row in rows[2:]}
+    assert "src/omc/gitnexus.py" in paths, paths
+    unexpected = sorted(
+        path
+        for path in paths
+        if path == "scope-untracked.py" or path.startswith("scope-submodule/")
+    )
+    assert not unexpected, f"out-of-scope File nodes: {unexpected}"
     metadata_bytes = (
         "from pathlib import Path; root=Path('/repo/.gitnexus'); "
         "meta=root/'gitnexus.json'; meta=meta if meta.exists() else root/'meta.json'; "

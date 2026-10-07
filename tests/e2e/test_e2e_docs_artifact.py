@@ -13,6 +13,7 @@ Marked `expensive`: wiki generation is one LLM call per module. Run via
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,21 @@ def test_document_updates_artifact_and_docs_are_judged(container_with_artifacts)
         timeout=2400,
     )
     assert rc == 0, out
+
+    rc, meta_json = run_in(container, ["cat", "/repo/.gitnexus/wiki/meta.json"])
+    assert rc == 0, meta_json
+    module_files = json.loads(meta_json)["moduleFiles"]
+    assert isinstance(module_files, dict) and module_files, module_files
+    assert all(
+        isinstance(paths, list) and all(isinstance(path, str) for path in paths)
+        for paths in module_files.values()
+    ), module_files
+    module_paths = {path for paths in module_files.values() for path in paths}
+    assert module_paths, "wiki metadata contains no module files"
+    rc, tracked = run_in(container, ["git", "-C", "/repo", "ls-files", "-z"])
+    assert rc == 0, tracked
+    tracked_paths = set(tracked.split("\0")) - {""}
+    assert module_paths <= tracked_paths, sorted(module_paths - tracked_paths)
 
     # Sync the refreshed wiki back OUT into the permanent artifact.
     rc, sync_out = run_in(

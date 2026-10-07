@@ -48,10 +48,12 @@ ARG WORKTRUNK_VERSION=0.68.0
 ARG TARGETARCH
 # The fork merge the E2E image indexes with carries the wiki-regroup and
 # copied-index fixes (chris-husse/GitNexus PR #4), piped progress lines and
-# LLM heartbeat (PR #5), output-aware wiki grouping (PR #6) and split-on-truncation
-# grouping (PR #7). See
-# docs/superpowers/specs/2026-10-06-fix-watch-docs-grouping-huge-projects-design.md.
-ARG GITNEXUS_REF=24af4f6006f5ee05ebbeeb187bba4c6186d2d5ce
+# LLM heartbeat (PR #5), output-aware wiki grouping (PR #6), split-on-truncation
+# grouping (PR #7) and the tracked-only walker (PR #8: the index and wiki cover
+# `git ls-files` only, no untracked files or submodule trees). See
+# docs/superpowers/specs/2026-10-06-fix-watch-docs-grouping-huge-projects-design.md and
+# docs/superpowers/specs/2026-10-07-scope-wiki-generation-to-tracked-files-design.md.
+ARG GITNEXUS_REF=20c559d2ddd4bc99b15183d4c372806c2f3ee776
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) WT_TARGET=x86_64-unknown-linux-musl; \
