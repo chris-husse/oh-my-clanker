@@ -206,6 +206,12 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
     exists and falls back to the default store when the base branch IS the
     originally-indexed one — verify on a gitnexus upgrade.
 
+    GitNexus 1.6.12 routes linked-worktree checkouts to $GITNEXUS_HOME/stores
+    by default. omc forces GITNEXUS_SHARED_STORE=off in ToolContext.child_env,
+    overriding inherited sharing so .gitnexus/ remains a local snapshot.
+    GITNEXUS_STORAGE_PATH and GITNEXUS_STORAGE_ROOT overrides are unsupported
+    with omc and remain untouched — reverify storage routing on upgrades too.
+
     With --git REF (a URL or manifest key, optional @<hash>), queries scope to
     that dependency checkout pinned to omc-pin — READ-ONLY: unknown/unindexed
     refs error with the ensure hint, never clone.

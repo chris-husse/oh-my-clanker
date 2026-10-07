@@ -186,6 +186,7 @@ passes its own, the internal verb loads `resolve.load_effective`.
      `documentation=False` narrate once, only when the mirror actually went
      away: `· docs mirror cleared — run omc watch --once
      --enable-documentation to regenerate` (today's line).
+     Amendment: the whole-directory clean assumption requires `GITNEXUS_SHARED_STORE=off`, now set by omc; see the [storage-policy design](2026-10-07-fix-gitnexus-stale-index-clean-loop-design.md).
    - Shared-`.omc` layouts (see `mirror.py` docstring): `clear_docs_mirror`
      follows the symlinked parent and removes the shared docs for every
      checkout. That is today's heal behaviour and stays; the spec records it.

@@ -290,3 +290,54 @@ def test_supervised_raising_on_line_never_kills_an_active_child(tmp_path):
     assert stalled is False  # a reporter bug is contained, unlike stream()'s contract
     assert cp.returncode == 0
     assert cp.stdout.count("tick") == 6  # every line still captured after the callback raised
+
+
+@pytest.mark.parametrize("inherited", [None, "on", "off"])
+def test_child_env_forces_gitnexus_local_storage(tmp_path, inherited):
+    env = {
+        "HOME": str(tmp_path),
+        "GITNEXUS_STORAGE_PATH": "/custom/path",
+        "GITNEXUS_STORAGE_ROOT": "/custom/root",
+        "UNRELATED": "retained",
+        "UV_CACHE_DIR": "/old/cache",
+    }
+    if inherited is not None:
+        env["GITNEXUS_SHARED_STORE"] = inherited
+    ctx = ToolContext.from_env(env)
+    ctx.uv_env["UV_CACHE_DIR"] = "/new/cache"
+    child = ctx.child_env()
+    assert child["GITNEXUS_SHARED_STORE"] == "off"
+    assert child["GITNEXUS_STORAGE_PATH"] == "/custom/path"
+    assert child["GITNEXUS_STORAGE_ROOT"] == "/custom/root"
+    assert child["UNRELATED"] == "retained"
+    assert child["UV_CACHE_DIR"] == "/new/cache"
+
+
+@pytest.mark.parametrize("runner", ["run", "run_bounded", "run_supervised", "stream"])
+@pytest.mark.parametrize("override", [None, "on"])
+def test_runners_apply_local_storage_and_per_call_overrides(tmp_path, runner, override):
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "GITNEXUS_SHARED_STORE": "on"})
+    argv = [
+        sys.executable,
+        "-c",
+        "import os; print(os.environ['GITNEXUS_SHARED_STORE']); print(os.environ['CALLER_ONLY'])",
+    ]
+    extra = {"CALLER_ONLY": "arrived"}
+    if override is not None:
+        extra["GITNEXUS_SHARED_STORE"] = override
+    if runner == "stream":
+        lines = []
+        assert ctx.stream(argv, on_line=lines.append, extra_env=extra) == 0
+    else:
+        kwargs = {"extra_env": extra}
+        if runner == "run_bounded":
+            kwargs["timeout"] = 5
+        elif runner == "run_supervised":
+            kwargs.update(heartbeat=lambda: 0, poll=0.01)
+        result = getattr(ctx, runner)(argv, **kwargs)
+        if runner == "run_supervised":
+            result, stalled = result
+            assert not stalled
+        assert result.returncode == 0
+        lines = result.stdout.splitlines()
+    assert lines == [override or "off", "arrived"]

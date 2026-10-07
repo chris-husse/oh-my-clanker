@@ -44,10 +44,39 @@ def test_index_then_explain_on_real_repo(container):
     rc, _ = run_in(container, ["node", _CLI, "--version"])
     assert rc == 0, "pre-baked GitNexus CLI missing from image"
 
+    rc, out = run_in(
+        container, ["git", "-C", "/repo", "worktree", "add", "/tmp/wt-e2e", "-b", "e2e-wt"]
+    )
+    assert rc == 0, out
+
     rc, out = _claude_skill(container, "/omc:index", cwd="/repo")
     assert rc == 0, out
     rc, _ = run_in(container, ["test", "-d", "/repo/.gitnexus"])
     assert rc == 0, f"analyze produced no .gitnexus/ index:\n{out[:2000]}"
+    rc, storage = run_in(
+        container,
+        [
+            "python3",
+            "-c",
+            (
+                "import json, os; from pathlib import Path; "
+                "root=Path('/repo/.gitnexus'); "
+                "meta=root/'gitnexus.json'; meta=meta if meta.exists() else root/'meta.json'; "
+                "home=Path(os.environ.get('GITNEXUS_HOME', str(Path.home()/'.gitnexus'))); "
+                "print(json.dumps({'metadata': "
+                "json.loads(meta.read_text()) if meta.exists() else None, "
+                "'pointer': (root/'store.json').exists(), 'stores': (home/'stores').exists()}))"
+            ),
+        ],
+    )
+    assert rc == 0, storage
+    rc, head = run_in(container, ["git", "-C", "/repo", "rev-parse", "HEAD"])
+    assert rc == 0, head
+    artifacts = json.loads(storage)
+    assert artifacts["metadata"] is not None, storage
+    assert artifacts["metadata"]["lastCommit"] == head.strip(), storage
+    assert not artifacts["pointer"], storage
+    assert not artifacts["stores"], storage
     rc, listed = run_in(container, ["node", _CLI, "list"], cwd="/repo")
     # The registry prints `Path:    /repo` per entry; a bare "repo" also matched
     # the "No indexed repositories found" notice and let a broken index through.

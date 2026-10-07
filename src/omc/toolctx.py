@@ -13,6 +13,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# omc snapshots require local GitNexus storage, overriding inherited sharing.
+# GITNEXUS_STORAGE_PATH / GITNEXUS_STORAGE_ROOT are unsupported; leave them untouched.
+GITNEXUS_ENV = {"GITNEXUS_SHARED_STORE": "off"}
+
 _UV_KEYS = ("UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_CACHE_DIR")
 
 
@@ -50,7 +54,7 @@ class ToolContext:
         return [self.uv_bin, *args]
 
     def child_env(self) -> dict[str, str]:
-        return {**self.env, **self.uv_env}
+        return {**self.env, **self.uv_env, **GITNEXUS_ENV}
 
     def read_text(self, path: Path) -> str:
         """Read provider-owned state through the same runtime I/O boundary."""

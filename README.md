@@ -62,9 +62,22 @@ Run `omc configure` whenever settings change. Enter edits a field, Esc goes up o
 
 The menu sets:
 
-- **Default provider** and each provider's **Session model** (blank uses its default).
+- **Default provider** and each provider's **Orchestrator model**.
+- **Task models**: Design, Plan, Review, Simple Complexity Task, Medium Complexity Task and High Complexity Task. Each accepts `family[:effort]`, such as `sol:high`; blank follows the provider default.
 - **Documentation provider**, **Documentation backend** (`cli` or `api`) and **Documentation model**.
 - **Native notifications**, **Branch prefix** (default `feature/`) and **Base branch** (default `main`).
+
+Provider defaults are:
+
+| Task | Claude | Codex |
+|---|---|---|
+| Orchestrator | `opus` | `sol:high` |
+| Design, Plan, Review | `fable` | `astra` |
+| Simple Complexity Task | `sonnet` | `sol:medium` |
+| Medium Complexity Task | `opus` | `sol:high` |
+| High Complexity Task | `fable` | `astra` |
+
+Implementation plan tasks carry a `Complexity: simple | medium | high` label; a missing label means medium.
 
 For scripts, use `--defaults` or repeat `--set`:
 
@@ -73,11 +86,11 @@ omc configure --defaults
 omc configure --set llm.default=claude --set worktree.base_branch=main
 ```
 
-Documentation follows the default provider unless overridden with `llm.docs.provider`. Its model uses the standard coding tier, independently of the session model: Claude defaults to `sonnet` on CLI or the latest matching full API model id. Set `llm.providers.claude.docs_model` to override; API aliases such as `opus` resolve to a full id when saved.
+Documentation follows the default provider unless overridden with `llm.docs.provider`. Its model uses the standard coding tier, independently of the Orchestrator model: Claude defaults to `sonnet` on CLI or the latest matching full API model id. Set `llm.providers.claude.docs_model` to override; API aliases such as `opus` resolve to a full id when saved.
 
 The `api` documentation backend uses Anthropic's OpenAI-compatible endpoint. Paste the key once in the hidden prompt; later it displays as `******` plus its last four characters. Scripts can set `llm.providers.claude.api_key`, but a command-line key is visible in shell history and the process list.
 
-Before saving a changed key or documentation selection, configure makes the applicable real probes: models endpoint, `claude auth status`, and a short headless model call or per-model GET. A failing probe saves no settings. CLI is the default backend; set `llm.docs.backend=api` to switch.
+Before saving a changed key, task model or documentation selection, configure makes the applicable real probes: models endpoint, `claude auth status`, and a short headless model call or per-model GET. A failing probe saves no settings. CLI is the default backend; set `llm.docs.backend=api` to switch.
 
 Anthropic describes its compatibility layer as intended for testing/comparison. API generation failures leave knowledge stale with no silent fallback; watch avoids retrying an identical stale failure every tick. A bare `gitnexus wiki` opens its own setup wizard because omc supplies the key only to its child processes. `fable` may pass validation yet fail generation for zero-data-retention organisations.
 
@@ -223,6 +236,8 @@ flowchart LR
 
 Watch maintains the primary graph and docs. Worktrunk's `copy-ignored` copies every gitignored file—`.env`, caches, `.venv`, `.gitnexus/` and `.omc/docs/`—into new worktrees; `/omc:rebase-main` re-mirrors knowledge later. **Explain queries the primary graph**, scoped to the configured base branch, and reads primary docs; the copied graph is a workspace snapshot.
 
+GitNexus 1.6.12 normally routes linked-worktree checkouts to `$GITNEXUS_HOME/stores`. omc sets `GITNEXUS_SHARED_STORE=off` in `ToolContext.child_env`, which overrides inherited sharing settings and keeps `.gitnexus/` local for snapshots and whole-directory cleanup. `GITNEXUS_STORAGE_PATH` and `GITNEXUS_STORAGE_ROOT` are unsupported with omc and remain untouched.
+
 ```mermaid
 flowchart LR
     Watch["omc watch"] --> Primary["Primary .gitnexus/ and .omc/docs/"]
@@ -248,7 +263,7 @@ sequenceDiagram
     Note over Skill: Continue on success or surface refusal
 ```
 
-The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_REBASE_MAIN`, `OMC_SQUASH`, `OMC_SLUG` and `OMC_TICKET`. Some come from the CLI; stages, slug, squash and ticket-sync also have skill-emitted verdicts. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
+The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_REBASE_MAIN`, `OMC_SQUASH`, `OMC_SLUG`, `OMC_MODELS` and `OMC_TICKET`. The CLI emits knowledge, design-record, rebase-main and models verdicts (`omc internal models` resolves task choices); stage, slug, squash and ticket-sync verdicts come from skills. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
 
 The CLI handles mechanics and launches model work for slugging, docs, auto-build and sessions. Skills supply judgment and may run git or project commands directly. `ToolContext` centralizes the Python CLI's subprocess and network calls; provider adapters supply each harness's argv and settings. See [Development](#development) for this repo's project integration.
 

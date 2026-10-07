@@ -287,6 +287,16 @@ def test_readme_starts_with_regeneration_banner():
     assert (root / link.group(1)).is_file()
 
 
+def test_readme_documents_gitnexus_storage_contract():
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    architecture = readme.split("## How omc is put together", 1)[1].split("## Prerequisites", 1)[0]
+    assert "GITNEXUS_SHARED_STORE=off" in architecture
+    assert "overrides inherited" in architecture
+    for variable in ("GITNEXUS_STORAGE_PATH", "GITNEXUS_STORAGE_ROOT"):
+        assert variable in architecture
+    assert "unsupported" in architecture
+
+
 def test_readme_headings_match_regeneration_skill():
     root = Path(__file__).resolve().parents[2]
     headings = [
