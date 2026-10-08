@@ -13,7 +13,7 @@ flow; after it arrives, resume without asking for another command.
 
 ## Phase -1 — externalize the flow (first action, no exceptions)
 
-Write every remaining phase into the task list now: gates → conformance →
+Write every remaining phase into the task list now: gates → dependencies → conformance →
 disposition → post-fix gate → trace and commit → finish. Mark each completed
 as you pass it.
 The record verdict, findings and trace are arguments to the next phase, never
@@ -39,6 +39,74 @@ fixes; do not let unrelated dirty files become audit work.
 Read `docs/superpowers/plans/*-$OMC_SLUG-plan.md` when it exists. The plan is
 context; report its absence and continue. The committed design record is the
 truth when the plan and record differ.
+
+## Phase 0.5 — dependencies
+
+Run `omc internal workspace list` and read its single `OMC_WORKSPACE` verdict.
+An error or missing verdict blocks this phase; surface its message. Only
+`current_role == "master"` traverses dependencies. An empty workspace or a
+dependency role means no child launch: continue to local Phase 1. Walk entries
+with `role == "dependency"` in list order. Never launch the master as a child.
+The master orchestrates only; all dependency edits belong to that repository's
+own lifecycle session.
+
+Use a fresh `omc internal workspace list` verdict for the completion test.
+After a successful listing, apply these branches in order:
+
+- No upstream: publication remains; launch the dependency audit even though
+  `ahead` is `null` for this unpublished branch.
+- Upstream exists and `ahead` is unknown: block and resolve the inspection
+  failure before continuing. Unknown counts are never zero.
+- Upstream exists and integer `ahead == 0`: skip this pushed dependency.
+- Upstream exists and integer `ahead > 0`: launch the dependency audit.
+
+An inspection failure blocks the phase; never map it to zero. Re-read the
+listing after each child exits or manual recovery completes. The local
+product-change refusal in Phase 0 still applies before this phase.
+
+For each incomplete dependency, run `omc review --headless` from its exact
+`worktree` directory, using the harness's background/continuation mechanism.
+This is an ordinary foreground CLI process managed by the harness, not a daemon.
+On its own line, announce which repository is pending; retain its output and
+wait for process exit before inspecting artifacts. Poll through the harness's
+continuation handle, keeping the user informed during long waits. Do not treat
+transient dirt or a running child's output as a final outcome. After exit,
+recheck the completion predicate. A restarted master uses the same predicate to
+skip completed dependencies. Proceed to local Phase 1 only when all pass.
+Never auto-close a dependency child worktree; the master owns workspace closure.
+
+Inspect the final output for an unanswered CRITICAL question even when artifacts
+appear complete: relay it verbatim and wait for the answer. For a nonzero exit
+or early stop without completion, also relay the child's final output verbatim.
+Never guess an answer or start another child while that question is pending.
+A launch failure is an actionable failure, not evidence that a resumable session
+exists: report its command, directory and error, resolve the launch blocker, then
+retry. An early stop without a CRITICAL question needs an actionable diagnosis,
+not a fabricated question. A nonzero exit still requires disposition even if the
+artifacts look complete; inspect its error before progressing.
+
+Once the required answer arrives, resume the same child session as follows:
+
+- **Claude:** from that dependency directory, use print mode with
+  `claude -p <answer> --resume <slug>-audit --output-format text`, preserving
+  the child's configured model/effort, full provider environment (`OMC_SLUG`,
+  `OMC_PROVIDER=claude`, provider title settings, `GITNEXUS_SHARED_STORE=off`)
+  and implementation tool grants. Append `--allowed-tools` LAST with the complete
+  `IMPLEMENT_ALLOWED_TOOLS` list from `omc.implement` (including its MCP grants).
+  Pass the answer as one prompt argument immediately after `-p`; use an argv
+  API, or shell-quote every argument with `shlex.quote`, never interpolate the
+  answer into shell code. The initial resume handle is the name `<slug>-audit`.
+  If that name is ambiguous, require the exact session ID or manual dependency
+  resumption. Never substitute a fresh named session for a resume.
+- **Codex:** headless resume is unverified. Give the exact dependency directory
+  and `omc review` for manual recovery there. Wait for the user to finish that
+  recovery, then recheck artifacts; do not invent a Codex resume command or
+  claim live verification. The same manual fallback is available for an
+  ambiguous Claude session when no exact ID can be established.
+
+Keep resumed processes under the same background wait and artifact check loop.
+Required answers continue the existing authorization; they do not require a new
+master lifecycle invocation. No ledger completion flag is written.
 
 ## Phase 1 — conformance
 

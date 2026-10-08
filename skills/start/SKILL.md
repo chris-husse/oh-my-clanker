@@ -74,6 +74,13 @@ read tool the session has (Jira MCP, GitHub/GitLab MCP or CLI, …):
 
 If the input is a free-text description, it IS the context.
 
+Name each repository that will be modified explicitly as a **modification target**
+and retain those names in the context passed to plan. A repository consulted
+for read-only evidence is not a modification target. Keep this list current
+as the discussion discovers targets; `/omc:design` registers them later.
+Start does not clone repositories, create dependency worktrees, or call workspace
+verbs. With no second target, the ordinary single-repository flow is unchanged.
+
 **Context gate**: is there a clear problem + goal, specific enough to
 brainstorm from? If not, tell the user exactly what's missing and ask them to
 improve the ticket (or paste the missing context). Re-check when they say it's

@@ -1,5 +1,6 @@
 import os
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,8 @@ from omc.wtconfig import (
     branch_for,
     ensure_wt_config,
     find_design_record,
+    primary_root,
+    repo_root,
     resolve_design_record,
     sanitize_slug,
     slug_for,
@@ -127,6 +130,40 @@ def _commit_all(repo, msg="spec"):
 def _repo_ctx(repo, monkeypatch):
     monkeypatch.chdir(repo)
     return ToolContext.from_env({**os.environ, "HOME": str(repo.parent)})
+
+
+@pytest.mark.parametrize("as_string", [False, True])
+@pytest.mark.parametrize("helper", [repo_root, primary_root])
+def test_repo_roots_explicit_root(tmp_path, monkeypatch, as_string, helper):
+    primary = _repo(tmp_path)
+    linked = tmp_path / "linked with spaces"
+    _git("worktree", "add", "-qb", "topic/shared", str(linked), cwd=primary)
+    nested = linked / "nested directory"
+    nested.mkdir()
+    ctx = _repo_ctx(primary, monkeypatch)
+    calls = []
+    real_run = ctx.run
+
+    def run(argv, *, cwd=None):
+        calls.append(SimpleNamespace(argv=list(argv), cwd=cwd))
+        return real_run(argv, cwd=cwd)
+
+    monkeypatch.setattr(ctx, "run", run)
+    root = str(nested) if as_string else nested
+    expected = linked if helper is repo_root else primary
+    assert helper(ctx, root) == str(expected)
+    assert len(calls) == 1
+    args = (
+        ["rev-parse", "--show-toplevel"]
+        if helper is repo_root
+        else [
+            "worktree",
+            "list",
+            "--porcelain",
+        ]
+    )
+    assert calls[0].argv == [ctx.git_bin, *args]
+    assert calls[0].cwd == str(nested)
 
 
 def test_record_missing(tmp_path, monkeypatch):

@@ -19,7 +19,7 @@ CLI authority: a worktree's copied `.venv` may render help from the primary.
 |---|---|
 | Install, Update, Configure | `src/omc/cli/__init__.py`, `src/omc/config/schema.py`, `src/omc/installer.py`; frozen help for configure/install/update/uninstall |
 | Keep knowledge fresh with `omc watch` | The watch parser, module docstring and tick/hook behavior in `src/omc/watch.py`, `.config/wt.toml`; frozen watch help |
-| Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/finish/SKILL.md`, `skills/review/SKILL.md` for authority and stage semantics |
+| Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`, `src/omc/workspace.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/design/SKILL.md`, `skills/implement/SKILL.md`, `skills/audit/SKILL.md`, `skills/workspace/SKILL.md`, `skills/finish/SKILL.md`, `skills/review/SKILL.md` for authority, workspace ordering/list/close and stage semantics |
 | How omc is put together | `src/omc/distribution/AGENTS.md`, `src/omc/toolctx.py`, `src/omc/providers/base.py`, `src/omc/internal.py`; `skills/gitnexus-explain/SKILL.md` for query routing; verdict contracts in the relevant skills |
 | Development | `.omc/config.yaml`, `.config/wt.toml`, `.omc/config/AGENTS.md`, every `.omc/skills/*/SKILL.md`, `.gitignore` |
 | Prerequisites, Other commands, Notifications, Security note, License | Existing README; parser/help; `src/omc/notify.py`, `src/omc/slug.py`, `src/omc/providers/claude.py`, `src/omc/providers/codex.py`, `LICENSE` |
@@ -33,6 +33,10 @@ CLI authority: a worktree's copied `.venv` may render help from the primary.
    described (including `dependency watch`/`list`, `title`, and `shell-integration`).
    `--frozen` avoids rewriting `uv.lock`. Installation examples are output text,
    not commands to execute while generating documentation.
+   Pin `PYTHONPATH` to this checkout's `src` if its copied environment resolves
+   the primary. Internal workspace verbs have no help parser: read their usage
+   and dispatch in `src/omc/internal.py` and `src/omc/workspace.py` instead of
+   running mutations. There is no top-level `omc workspace` command.
 3. Write `README.md` in full using the fixed outline below. The opening four
    user topics should be easy to skim. Section budgets are targets; complete,
    accurate facts and short paragraphs take precedence over a total line target.
@@ -168,14 +172,50 @@ Shared flags table: provider overrides (`--claude`/`--codex`, no saved change),
 `--dry-run` (no session/worktree; design still probes/calls slug/ensures guidance),
 `--headless`, design-only `--no-mutex`. Codex direct syntax is `$omc:…`, not
 `/omc:…`; Claude resumes by name, repeated launch needs id; Codex lacks names.
-Nine one-line in-session skills: explain, index, document, explain-dependency,
+Ten one-line in-session skills: explain, index, document, explain-dependency,
 investigate (env-locked read-only evidence; investigation-context is required and
-its `envs/<env>.md` briefings define the environments), rebase-main, check-wt-config, finish, integrate.
+its `envs/<env>.md` briefings define the environments), rebase-main, check-wt-config,
+workspace (list/close only), finish, integrate.
+Include a workspace subsection covering both delivered milestones: M1 registration,
+design records, list and safe close; M2 dependency implement/audit proxies. Explain
+the behavior, not unfinished roadmap promises. Only a named second modification
+target engages a workspace; read-only dependencies and single-repo work retain
+their normal flow. The master registers through `omc internal workspace add TARGET
+[--path PATH]`; all repos share the slug but retain their own prefix and base.
+Describe sibling/URL resolution and destination prompts briefly. A repository
+without `.omc/` must be integrated and retried or dropped as handled by hand.
+The machine-owned `~/.omc/workspaces.json` is active membership; never hand-edit it.
+Master records retain a one-time Repositories snapshot and Cross-repo contract;
+narrow dependency records commit in registration order, master last.
+Only the master proxies dependency lifecycles, dependencies in registration order
+and master last. A lifecycle invocation there authorizes that phase across the
+workspace; dependency product changes belong to its own lifecycle session. Show
+`omc implement --headless` and `omc review --headless` from dependency worktrees.
+Implementation completion is Git evidence: clean including untracked files, unique
+committed slug plan and a descendant commit after its first addition changing
+files outside specs/plans. No completion state in the ledger. Audit skips a known
+upstream with integer ahead zero; no upstream launches first publication, while
+unknown counts with an existing upstream block inspection.
+Child exit/artifacts are awaited; unanswered CRITICAL output is relayed verbatim
+even when artifacts look complete. Claude resumes the same child after the answer
+(exact session ID if its name is ambiguous); Codex headless resume remains
+unverified, so give the dependency directory and manual `omc implement` or
+`omc review` fallback. Do not imply new live verification.
+`/omc:workspace list|close` (`$omc:workspace` on Codex) is the user surface;
+`omc internal workspace list` reports role, branch, worktree, record, ahead/behind
+and compare URL, with unknown values explicit and no forge API or MR creation.
+Dependencies stay until master closure, including after their finish. Only the
+master runs `omc internal workspace close`: fetch each repo's base, require branch
+ancestry into it, remove dependencies in registration order then master. Stop on
+unmerged/error, retain remaining entries, and allow retry after the blocker resolves.
+Explain that a squash merge may fail ancestry and requires deliberate reconciliation.
 Explain optional check/build/verify/review semantics, order, standalone forms,
 no-op unconfigured project stages, always-on grug review and Important
 fix/waiver into Deliberate complexity. Finish rebases/mirrors, squashes with
 MR description, gates before force-with-lease; user opens MR. Preserve finish
-without audit and close-worktree/review-comments/discuss continuations.
+without audit and close-worktree/review-comments/discuss continuations. Distinguish
+ordinary local removal (pushed unmerged branch survives) from workspace close's
+merge requirement. Each repository runs its own gates; no cross-repository gate.
 
 #### `## How omc is put together` — target 60 lines
 
@@ -192,7 +232,13 @@ Exactly three Mermaid diagrams, each with a short explanatory paragraph:
 3. Sequence for a real internal contract (e.g. design-record): skill → internal
    command → single prefixed JSON verdict → caller continues. List exactly
    OMC_KNOWLEDGE, OMC_DESIGN_RECORD, OMC_STAGE, OMC_REBASE_MAIN, OMC_SQUASH,
-   OMC_SLUG, OMC_MODELS (`omc internal models`, resolved task choices); include OMC_TICKET from behavior layer. Distinguish CLI verdicts
+   OMC_SLUG, OMC_MODELS (`omc internal models`, resolved task choices), OMC_WORKSPACE;
+   include OMC_TICKET from behavior layer. Workspace is CLI-emitted. Document
+   `omc internal workspace implementation-status SLUG`: one `OMC_WORKSPACE`
+   success with `ok:true` and boolean `complete`, or explicit `ok:false` error;
+   incomplete is not an inspection error. This helper reads Git, never ledger
+   completion state. List/add/close use the same prefix, progress is stderr.
+   Distinguish CLI verdicts
    from skill-emitted contracts. Exit codes 0 ok / 1 error / 2 refusal or usage /
    3 bail (internal: inconclusive, caller judges).
    Use plain note text without semicolons: Mermaid treats semicolons as statement

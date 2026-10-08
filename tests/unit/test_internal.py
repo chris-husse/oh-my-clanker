@@ -1010,3 +1010,35 @@ def test_refresh_move_during_analyze_releases_lock(tmp_path, capsys, monkeypatch
     )
     assert "OMC_KNOWLEDGE" not in captured.out
     assert flock_free(repo / ".git/omc-watch-busy.lock")
+
+
+def test_workspace_malformed_invocations_always_emit_one_verdict(capsys):
+    for args in (
+        [],
+        ["unknown"],
+        ["add"],
+        ["add", "a", "b"],
+        ["add", "a", "--path"],
+        ["list", "extra"],
+        ["--help"],
+        ["list", "--path", "x"],
+    ):
+        assert run_internal(["workspace", *args]) == 2
+        lines = capsys.readouterr().out.splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith("OMC_WORKSPACE ")
+        result = json.loads(lines[0].removeprefix("OMC_WORKSPACE "))
+        assert result["ok"] is False
+        assert result["reason"] == "usage"
+
+
+def test_workspace_close_without_membership_refuses(tmp_path, capsys, monkeypatch):
+    from .test_workspace import WorkspaceTools
+
+    tools = WorkspaceTools(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMC_HOME", str(tools.ctx.home))
+    monkeypatch.setattr("omc.internal.ToolContext.from_env", lambda: tools.ctx)
+    assert run_internal(["workspace", "close"]) == 2
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0].removeprefix("OMC_WORKSPACE "))["reason"] == "no-workspace"

@@ -1,10 +1,81 @@
 import json
 import stat
+from subprocess import CompletedProcess
+from types import SimpleNamespace
+
+import pytest
 
 from omc.toolctx import ToolContext
 from omc.worktree import create_worktree, sync_base
 
 from ._stubs import stub_env
+
+
+@pytest.fixture
+def recorded_context(tmp_path, monkeypatch):
+    ctx = ToolContext.from_env({"HOME": str(tmp_path)})
+    calls = []
+    responses = []
+
+    def run(argv, *, cwd=None):
+        calls.append(SimpleNamespace(argv=list(argv), cwd=cwd))
+        return responses.pop(0)
+
+    monkeypatch.setattr(ctx, "run", run)
+    return ctx, calls, responses
+
+
+def test_create_worktree_explicit_cwd_and_retry(tmp_path, recorded_context):
+    ctx, calls, responses = recorded_context
+    primary = tmp_path / "primary with spaces"
+    target = tmp_path / "shared worktree"
+    responses.extend(
+        [
+            CompletedProcess([], 1, "", "branch already exists"),
+            CompletedProcess([], 0, json.dumps({"path": str(target)}), ""),
+        ]
+    )
+
+    assert create_worktree(ctx, "topic/shared", "origin/develop", cwd=primary) == str(target)
+    assert len(calls) == 2
+    assert calls[0].argv == [
+        ctx.wt_bin,
+        "-C",
+        str(primary),
+        "switch",
+        "--create",
+        "topic/shared",
+        "--base",
+        "origin/develop",
+        "--no-cd",
+        "--yes",
+        "--format=json",
+    ]
+    assert calls[1].argv == [
+        ctx.wt_bin,
+        "-C",
+        str(primary),
+        "switch",
+        "topic/shared",
+        "--no-cd",
+        "--yes",
+        "--format=json",
+    ]
+    assert [call.cwd for call in calls] == [None, None]
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_sync_base_explicit_cwd(tmp_path, recorded_context, returncode, capsys):
+    ctx, calls, responses = recorded_context
+    primary = tmp_path / "primary with spaces"
+    responses.append(CompletedProcess([], returncode, "", "offline" if returncode else ""))
+
+    assert sync_base(ctx, "develop", cwd=primary) is (returncode == 0)
+    assert len(calls) == 1
+    fetch = calls[0]
+    assert fetch.argv == [ctx.git_bin, "fetch", "origin", "develop"]
+    assert fetch.cwd == str(primary)
+    assert bool(capsys.readouterr().err) is (returncode != 0)
 
 
 def make_recording_stub(bindir, name, *, stdout="", rc=0, rc_first=None):

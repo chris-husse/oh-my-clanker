@@ -150,6 +150,8 @@ for stage in ("check", "build", "verify", "review"):
         fail = (
             "\nif test -e "
             '"${OMC_EXTERNAL_VERIFY_SENTINEL:-/tmp/omc-external-verify-unavailable}"; then\n'
+            "  git rev-parse HEAD >> "
+            '"${OMC_FAILED_VERIFY_HEADS:-/tmp/omc-failed-verify-heads}"\n'
             "  echo 'E2E environment unavailable: verify sentinel present' >&2\n"
             "  exit 1\nfi"
         )

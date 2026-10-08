@@ -63,11 +63,19 @@ wait for their answer. A pending question or timeout is not a seed. Ask and
 resolve material initial scope questions, retaining the answers with the
 primer and seed before brainstorming.
 
+During scope discussion, explicitly name every repository to be modified as
+a **modification target**. Carry the list from start, update it as the
+brainstorm proceeds, and pass it with the material answers to the later
+`/omc:design` gate. A read-only dependency is not a modification target.
+Do not run workspace verbs in this discussion phase; with no second target,
+there is no new workspace interaction or extra scope prompt.
+
 ## Step 4 — hand off to brainstorming
 
 Invoke `superpowers:brainstorming` with: the user's actual seed, all material
-scope answers, the complete input context, the primer, the
-presentation rule below, this task-model pointer: "Any implementation plan
+scope answers, the explicit modification-target repository list, the complete
+input context, the primer, the presentation rule below, this task-model pointer:
+"Any implementation plan
 born from this brainstorm gives each task a `Complexity:` line with one of
 `simple`, `medium`, or `high`; the cheap/fast tier is never used." — and,
 only when `OMC_SLUG`

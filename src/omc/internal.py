@@ -42,6 +42,7 @@ _USAGE = (
     " | gitnexus [--git REF] <ensure|status|refresh [--enable-documentation]"
     "|query|context|impact|cypher> [args…]"
     " | dependency <ensure|document|list> [args…]"
+    " | workspace {add TARGET [--path PATH] | list | close | implementation-status SLUG}"
     " | skills list NAME"
     " | build-progress LOGFILE}"
 )
@@ -435,6 +436,10 @@ def run_internal(argv: list[str]) -> int:
             print(_USAGE, file=sys.stderr)
             return 2
         return _skills_list(ToolContext.from_env(), rest[1])
+    if cmd == "workspace":
+        from .workspace import run_workspace
+
+        return run_workspace(ToolContext.from_env(), rest)
     if cmd == "dependency":
         from .dependency import run_document, run_ensure, run_list
 

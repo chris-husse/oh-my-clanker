@@ -8,7 +8,8 @@ description: Lifecycle conductor from a committed design record to an unpublishe
 Invoked directly (`$omc:implement` in Codex, `/omc:implement` in Claude) once
 `/omc:design` has committed the design record — in the same session, or in a
 fresh session that `omc implement [--claude|--codex]` seeded in this worktree.
-Four phases, strictly in order; each phase is a black-box command call.
+Dependency traversal, then four local phases, strictly in order; each phase is
+a black-box command call.
 /omc:implement IS the user's approval to carry the committed record through
 committed implementation on this branch: do not ask permission between phases. The only
 interactive stops are genuine blockers and CRITICAL questions a plan cannot
@@ -21,9 +22,9 @@ satisfied by this direct command.
 
 ## Phase -1 — externalize the flow (first action, no exceptions)
 
-**Write the four phases into the task list now**, before the record gate:
-plan → subagent build → milestone gate → handoff. Mark each completed as you
-pass it.
+**Write the remaining phases into the task list now**, before the record gate:
+record gate → dependencies → plan → subagent build → milestone gate → handoff.
+Mark each completed as you pass it.
 
 Every phase can end in a large, polished artifact — a
 1,200-line plan or a completed build. **The bigger the artifact, the more it
@@ -44,8 +45,72 @@ record from here.
 
 If a plan already exists for this slug
 (`docs/superpowers/plans/*-$OMC_SLUG-plan.md`), an earlier implement run was
-interrupted: inspect it and continue from the next unfinished task instead of
-writing a second plan.
+interrupted: inspect it and, after Phase 0.5, continue local work from the next
+unfinished task instead of writing a second plan.
+
+## Phase 0.5 — dependencies
+
+Run `omc internal workspace list` and read its single `OMC_WORKSPACE` verdict.
+An error or missing verdict blocks this phase; surface its message. Only
+`current_role == "master"` traverses dependencies. An empty workspace or a
+dependency role means no child launch: continue to local Phase 1. Walk entries
+with `role == "dependency"` in list order. Never launch the master as a child.
+The master orchestrates only; all dependency edits belong to that repository's
+own lifecycle session.
+
+From each dependency directory, run
+`omc internal workspace implementation-status <slug>`. Only a successful
+`OMC_WORKSPACE` verdict with `"ok": true` and `"complete": true` completes it.
+Inspection errors block; `"complete": false` means work remains. The check requires
+a clean tree, a unique committed slug-specific plan in `docs/superpowers/plans`,
+and a later commit descending from the commit that first adds that exact plan,
+with tracked changes outside `docs/superpowers/specs` and `docs/superpowers/plans`.
+A design-only or plan-only branch cannot pass; later plan amendments are allowed.
+The plan must be committed before building (Phase 1 below).
+
+For each incomplete dependency, run `omc implement --headless` from its exact
+`worktree` directory, using the harness's background/continuation mechanism.
+This is an ordinary foreground CLI process managed by the harness, not a daemon.
+On its own line, announce which repository is pending; retain its output and
+wait for process exit before inspecting artifacts. Poll through the harness's
+continuation handle, keeping the user informed during long waits. Do not treat
+transient dirt or a running child's output as a final outcome. After exit,
+recheck the completion predicate. A restarted master uses the same predicate to
+skip completed dependencies. Proceed to local Phase 1 only when all pass.
+Never auto-close a dependency child worktree; the master owns workspace closure.
+
+Inspect the final output for an unanswered CRITICAL question even when artifacts
+appear complete: relay it verbatim and wait for the answer. For a nonzero exit
+or early stop without completion, also relay the child's final output verbatim.
+Never guess an answer or start another child while that question is pending.
+A launch failure is an actionable failure, not evidence that a resumable session
+exists: report its command, directory and error, resolve the launch blocker, then
+retry. An early stop without a CRITICAL question needs an actionable diagnosis,
+not a fabricated question. A nonzero exit still requires disposition even if the
+artifacts look complete; inspect its error before progressing.
+
+Once the required answer arrives, resume the same child session as follows:
+
+- **Claude:** from that dependency directory, use print mode with
+  `claude -p <answer> --resume <slug>-implement --output-format text`, preserving
+  the child's configured model/effort, full provider environment (`OMC_SLUG`,
+  `OMC_PROVIDER=claude`, provider title settings, `GITNEXUS_SHARED_STORE=off`)
+  and implementation tool grants. Append `--allowed-tools` LAST with the complete
+  `IMPLEMENT_ALLOWED_TOOLS` list from `omc.implement` (including its MCP grants).
+  Pass the answer as one prompt argument immediately after `-p`; use an argv
+  API, or shell-quote every argument with `shlex.quote`, never interpolate the
+  answer into shell code. The initial resume handle is the name `<slug>-implement`.
+  If that name is ambiguous, require the exact session ID or manual dependency
+  resumption. Never substitute a fresh named session for a resume.
+- **Codex:** headless resume is unverified. Give the exact dependency directory
+  and `omc implement` for manual recovery there. Wait for the user to finish that
+  recovery, then recheck artifacts; do not invent a Codex resume command or
+  claim live verification. The same manual fallback is available for an
+  ambiguous Claude session when no exact ID can be established.
+
+Keep resumed processes under the same background wait and artifact check loop.
+Required answers continue the existing authorization; they do not require a new
+master lifecycle invocation. No ledger completion flag is written.
 
 ## Phase 1 — plan
 
@@ -71,6 +136,13 @@ the plan carries a `Complexity: simple | medium | high` line, choosing one
 value. Label multi-file, architecturally tricky or ambiguous coding work
 `high`; choose `simple` for narrow routine work and `medium` otherwise.
 The plan stores complexity, never model ids."
+
+Commit the plan after pressure-testing and resolving CRITICAL questions,
+before dispatching any build worker. There must be exactly one slug-specific plan at
+`docs/superpowers/plans/*-$OMC_SLUG-plan.md`; stage only that plan. If resuming,
+reuse its existing addition commit and commit any necessary plan amendments.
+Do not defer the first plan commit until handoff: dependencies use that commit's
+ancestry to distinguish planning from completed implementation.
 
 ## Phase 2 — build
 
@@ -120,7 +192,7 @@ the remaining phases under the same `/omc:implement` authorization.
 
 ## Phase 3 — hand off
 
-Commit the plan file and any tracked product or documentation changes left by
+Commit any plan amendments and tracked product or documentation changes left by
 the implementation workers. Restore only known tool drift, such as a lockfile
 changed by `uv run` or the milestone verify run; never discard unknown work.
 Verify the working tree is

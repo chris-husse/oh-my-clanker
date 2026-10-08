@@ -187,6 +187,24 @@ Type `/omc:audit` in the implementation session, or run `omc review --claude` or
 
 **In Codex, type `$omc:…` for skills**; `/omc:…` is Claude's syntax. Claude sessions resume with `claude --resume <slug>`, `<slug>-implement` or `<slug>-audit`; repeated launches create duplicate names, so resume by session id then. Codex has no session-naming flag; the tab title is your breadcrumb.
 
+### Working across repositories
+
+Name each repository that needs changes during the design discussion. A second **modification target** engages a workspace; reading an external dependency does not. Single-repository work keeps the usual lifecycle.
+
+When you invoke `/omc:design`, the current worktree becomes the master. It registers each dependency through `omc internal workspace add TARGET [--path PATH]`, reusing a sibling checkout or resolving and cloning its URL. If the origin or destination is unclear, the session asks for it. Every repository uses the same slug with **its own branch prefix and base branch**. A checkout without `.omc/` must be integrated and retried, or dropped from scope as “handled by hand”.
+
+The CLI maintains active membership in `~/.omc/workspaces.json`; never edit it by hand. The master design record keeps a one-time `Repositories` snapshot and a `Cross-repo contract`. Dependency workers inspect their own repositories and write narrowed design records. Records commit with dependencies in registration order, **master last**. This is the registration/design/list/close milestone (M1).
+
+The lifecycle proxy milestone (M2) also runs from the master. Invoking implement or audit there authorizes that phase for the dependencies first and master last. Only the master launches dependency lifecycles; each dependency session changes its own product code. It runs `omc implement --headless` or `omc review --headless` from each dependency worktree in registration order, waits for the child to exit and checks its artifacts before continuing locally. Each repository runs its own stage gates.
+
+Implementation skips a dependency only when Git shows a clean tree including untracked files, exactly one committed plan for the slug, and a descendant commit after that plan's first addition changing files outside `docs/superpowers/specs` and `docs/superpowers/plans`. Design-only and plan-only branches remain incomplete; later plan amendments do not erase completion evidence. Audit skips a dependency only when it has an upstream and a known integer ahead count of zero. **No upstream means first publication is still needed**, so audit launches; unknown ahead counts with an existing upstream block inspection. Completion is derived from Git, never saved as ledger state.
+
+An unanswered CRITICAL question from a child is relayed verbatim even if its artifacts look complete. After your answer, Claude resumes that same child session; an ambiguous name requires its exact session ID or manual recovery. Codex headless resume remains unverified: the session gives you the dependency directory and `omc implement` or `omc review` to recover manually, then rechecks the artifacts when you finish.
+
+Use `/omc:workspace list` (Codex: `$omc:workspace list`) to see every role, branch, worktree, record status, ahead/behind count and compare URL. It calls `omc internal workspace list`. Unknown counts remain unknown; compare URLs do not prove an MR exists. omc creates no MR and calls no forge API.
+
+Dependency worktrees stay available after their finish until the master closes the workspace. After merging, run `/omc:workspace close` from the master. It calls `omc internal workspace close`, fetches each repository's base and requires the branch to be an ancestor of that base before removal, dependencies in registration order then master. An unmerged branch or error stops the chain; remaining entries stay registered so you can resolve the blocker and retry. A squash merge may not satisfy that ancestry check and needs deliberate reconciliation. Closing from a dependency refuses and points back to the master.
+
 Useful in-session skills:
 
 | Skill | Use it to |
@@ -198,6 +216,7 @@ Useful in-session skills:
 | `/omc:investigate <environment> <prompt>` | Run a read-only, environment-locked investigation with evidence and query workers; requires `.omc/skills/investigation-context`, whose `envs/<env>.md` briefings define the environments, and refuses without it. |
 | `/omc:rebase-main` | Rebase onto the latest base and re-mirror the primary's knowledge snapshot. |
 | `/omc:check-wt-config` | Review existing worktree config for faithful copies; `omc watch` seeds a starter when absent. |
+| `/omc:workspace list\|close` | List the registered workspace or close its merged worktrees from the master. |
 | `/omc:finish` | Publish the branch, also available without an audit. |
 | `/omc:integrate` | Set up or revisit the project's omc integration. |
 
@@ -215,7 +234,7 @@ evidence to the local answer, never the answer itself; each is optional and
 fails on its own, and `/omc:explain` ends with one status line per source
 while still answering from the local graph.
 
-Finish rebases and refreshes the snapshot, squashes to one commit, and runs **check → build → verify → review** before pushing with `--force-with-lease`; tracked files a stage changes are amended into the commit. The commit message is the MR/PR description generated from the diff, a compare URL is printed, and **you open the MR/PR**. Finish then moves the ticket to In Review on a best-effort basis and offers to close the worktree (the unmerged branch survives), address review comments with amend/re-push, or discuss the change. Stacked branches are refused.
+Finish rebases and refreshes the snapshot, squashes to one commit, and runs **check → build → verify → review** before pushing with `--force-with-lease`; tracked files a stage changes are amended into the commit. The commit message is the MR/PR description generated from the diff, a compare URL is printed, and **you open the MR/PR**. Finish then moves the ticket to In Review on a best-effort basis and offers to close the worktree, address review comments with amend/re-push, or discuss the change. In a single-repository run, local removal keeps the unmerged branch. A workspace master instead closes through the merge checks above; a dependency keeps its worktree for master closure. Stacked branches are refused.
 
 Project stages live in `.omc/skills/<stage>/SKILL.md`: check is the frequent unit gate, build builds the world without tests, verify is full E2E at major milestones, and review judges the diff. Each can run as `/omc:<stage>`; unconfigured project stages are no-ops. Review always adds omc's grug complexity lens: Important findings need a fix or a waiver in the design record's “Deliberate complexity” section. An unresolved finding or failed gate stops publication.
 
@@ -254,7 +273,7 @@ flowchart LR
 
 [GitNexus](https://github.com/chris-husse/GitNexus) installs from its approved source under `~/.omc/dependencies/gitnexus`; the checkout tracks that repository's `main` and `omc update` rebuilds it. Its graph provides symbols and execution flows; generated docs explain architecture, and a project's explain-context skill establishes where its truth lives.
 
-Internal commands expose deterministic operations to skills: `rebase-main`, `wt-template`, `design-record`, `models`, `global-instructions`, `gitnexus` (ensure/status/refresh and the query verbs), `dependency`, `skills list` and `build-progress`. For example, the record gate returns a single prefixed JSON line, and the skill uses it to continue or refuse:
+Internal commands expose deterministic operations to skills: `rebase-main`, `wt-template`, `design-record`, `models`, `global-instructions`, `gitnexus` (ensure/status/refresh and the query verbs), `dependency`, `workspace` (add/list/close/implementation-status), `skills list` and `build-progress`. For example, the record gate returns a single prefixed JSON line, and the skill uses it to continue or refuse:
 
 ```mermaid
 sequenceDiagram
@@ -265,7 +284,9 @@ sequenceDiagram
     Note over Skill: Continue on success or surface refusal
 ```
 
-The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_REBASE_MAIN`, `OMC_SQUASH`, `OMC_SLUG`, `OMC_MODELS` and `OMC_TICKET`. The CLI emits knowledge, design-record, rebase-main and models verdicts (`omc internal models` resolves every task's model and effort); stage, slug, squash and ticket-sync verdicts come from skills, and the behavior layer names all eight as sacred. A stage verdict reads `OMC_STAGE {"stage", "configured", "passed", "summary"}`. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
+The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_REBASE_MAIN`, `OMC_SQUASH`, `OMC_SLUG`, `OMC_MODELS`, `OMC_WORKSPACE` and `OMC_TICKET`. The CLI emits knowledge, design-record, rebase-main, workspace and models verdicts (`omc internal models` resolves every task's model and effort); stage, slug, squash and ticket-sync verdicts come from skills, and the behavior layer names all nine as sacred. A stage verdict reads `OMC_STAGE {"stage", "configured", "passed", "summary"}`. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
+
+`omc internal workspace implementation-status SLUG` inspects the current repository's Git evidence for the implementation predicate above. It emits one `OMC_WORKSPACE` line: success has `ok: true` and boolean `complete`; incomplete work is `ok: true, complete: false`, while an inspection error is an explicit `ok: false` verdict. The helper neither reads nor writes the ledger. Workspace add/list/close use the same verdict prefix; progress goes to stderr.
 
 The CLI handles mechanics and launches model work for slugging, docs, auto-build and sessions. Skills supply judgment and may run git or project commands directly. `ToolContext` centralizes the Python CLI's subprocess and network calls; provider adapters supply each harness's argv and settings. See [Development](#development) for this repo's project integration.
 

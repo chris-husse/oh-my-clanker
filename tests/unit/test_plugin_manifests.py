@@ -73,6 +73,7 @@ USER_FACING_SKILLS = (
     "rebase-main",
     "check-wt-config",
     "integrate",
+    "workspace",
 )
 INTERNAL_SKILLS = (
     "create-mr",
@@ -336,6 +337,196 @@ def test_machine_contract_listings_include_knowledge_and_models():
         assert "OMC_KNOWLEDGE" in (ROOT / rel).read_text(), rel
         assert "OMC_DESIGN_RECORD" in (ROOT / rel).read_text(), rel
         assert "OMC_MODELS" in (ROOT / rel).read_text(), rel
+        assert "OMC_WORKSPACE" in (ROOT / rel).read_text(), rel
+
+
+def test_workspace_skill_lists_verdict_fields_without_forge_api():
+    path = ROOT / "skills/workspace/SKILL.md"
+    assert path.is_file(), "workspace must be a user-facing skill"
+    text = path.read_text()
+    listing = text.split("## List", 1)[1].split("## Close", 1)[0]
+    assert "omc internal workspace list" in listing
+    for field in ("role", "branch", "worktree", "record", "ahead", "behind", "compare_url"):
+        assert f"`{field}`" in listing
+    for instruction in ("OMC_WORKSPACE", "null", "unknown", "empty", "forge API"):
+        assert instruction in listing
+    frontmatter = text.split("---", 2)[1]
+    assert "not meant for direct invocation" not in frontmatter
+
+
+def test_workspace_close_reports_refusal_identity_and_preserves_remaining_entries():
+    path = ROOT / "skills/workspace/SKILL.md"
+    assert path.is_file(), "workspace close needs a user entry point"
+    closing = path.read_text().split("## Close", 1)[1]
+    for instruction in (
+        "omc internal workspace close",
+        "unmerged",
+        "not-master",
+        "repository",
+        "branch",
+        "master_worktree",
+        "stop",
+        "remaining",
+        "primary",
+        "session",
+    ):
+        assert instruction in closing
+
+
+def test_start_and_plan_keep_explicit_modification_targets_for_design_gate():
+    for name, section, following in (
+        ("start", "## Step 2 — gather context", "## Step 2.5"),
+        ("plan", "## Step 3 — seed", "## Step 4"),
+    ):
+        text = (ROOT / f"skills/{name}/SKILL.md").read_text()
+        scope = text.split(section, 1)[1].split(following, 1)[0]
+        for instruction in ("modification target", "repository", "/omc:design", "read-only"):
+            assert instruction in scope, f"{name} missing {instruction}"
+
+
+def test_design_registers_all_targets_between_record_gate_and_first_write():
+    text = (ROOT / "skills/design/SKILL.md").read_text()
+    gate = text.split("## Step 1a — workspace gate", 1)[1].split("## Step 1b", 1)[0]
+    order = [
+        text.index(marker)
+        for marker in (
+            "Run `omc internal design-record`",
+            "## Step 1a",
+            "## Step 1b",
+            "## Step 1c",
+            "Write the design doc",
+        )
+    ]
+    assert order == sorted(order)
+    for instruction in (
+        "omc internal workspace add <target>",
+        "OMC_WORKSPACE",
+        "unresolved",
+        "URL",
+        "not-a-projects-folder",
+        "--path",
+        "not-omc-aware",
+        "retry",
+        "drop",
+        "registered",
+        "handled by hand",
+        "ledger",
+        "no second modification target",
+        "skip all workspace calls",
+    ):
+        assert instruction in gate
+    assert "workspace gate" in text.split("## Step 0", 1)[1].split("## Step 1", 1)[0]
+
+
+def test_design_dependency_explain_is_rooted_and_discloses_missing_index():
+    text = (ROOT / "skills/design/SKILL.md").read_text()
+    explain = text.split("## Step 1b — dependency explain", 1)[1].split("## Step 1c", 1)[0]
+    for instruction in (
+        "cd",
+        "worktree",
+        ".omc/config/AGENTS.md",
+        ".omc/skills/explain-context/SKILL.md",
+        "/omc:explain",
+        "converged",
+        "constraints",
+        "affected components",
+        "open questions",
+        "no index",
+        "files",
+        "fallback",
+        "harness instructions",
+        "plugin settings",
+    ):
+        assert instruction in explain
+
+
+def test_design_master_snapshot_and_narrowed_records_survive_resume():
+    text = (ROOT / "skills/design/SKILL.md").read_text()
+    master = text.split("## Step 1c", 1)[1].split("## Step 2", 1)[0]
+    for instruction in (
+        "## Repositories",
+        "## Cross-repo contract",
+        "omc internal workspace list",
+        "snapshot",
+        "never regenerate",
+        "dependency",
+        "findings",
+    ):
+        assert instruction in master
+    dependency = text.split("## Step 4b — dependency records", 1)[1].split("## Step 5", 1)[0]
+    for instruction in (
+        "cd",
+        "registration order",
+        "design this repository only",
+        "docs/superpowers/specs/<date>-<slug>-design.md",
+        "omc internal design-record",
+        "existing",
+        "second dated",
+        "whole-record",
+        "/omc:explain",
+        "grug spec",
+        "never commit",
+    ):
+        assert instruction in dependency
+    commits = text.split("## Step 5", 1)[1].split("## Completion contract", 1)[0]
+    for instruction in (
+        "dependencies first",
+        "master last",
+        "git -C <worktree>",
+        "omc internal design-record",
+        "ok: true",
+        "repository and path",
+    ):
+        assert instruction in commits
+
+
+def test_finish_reports_workspace_and_closes_by_current_role():
+    text = (ROOT / "skills/finish/SKILL.md").read_text()
+    followups = text.split("## Step 6", 1)[1].split("## Completion contract", 1)[0]
+    for instruction in (
+        "omc internal workspace list",
+        "non-empty",
+        "current_role",
+        "master",
+        "dependency",
+        "single-repository",
+        "workspace close",
+        "wt remove",
+        "primary",
+        "session",
+        "three options",
+    ):
+        assert instruction in followups
+    assert "this repository only" in text.split("## Step 4", 1)[1].split("## Step 5", 1)[0]
+
+
+def test_finish_retains_dependency_worktree_until_master_closes_workspace():
+    text = (ROOT / "skills/finish/SKILL.md").read_text()
+    close = text.split("1. **Close the worktree**", 1)[1].split(
+        "2. **Address review comments**", 1
+    )[0]
+    close = " ".join(close.split())
+    dependency = close.split("When `current_role` is `dependency`", 1)[1].split(
+        "For a single-repository run", 1
+    )[0]
+    for instruction in (
+        "keep this worktree",
+        "master_worktree",
+        "master closes the workspace",
+        "Do not run `wt remove`",
+        "ledger",
+    ):
+        assert instruction in dependency
+    single = close.split("For a single-repository run", 1)[1]
+    assert "empty list, null role" in single
+    assert "wt -C <primary> remove <branch>" in single
+
+
+def test_behavior_layer_authorizes_dependency_lifecycles_without_direct_code_edits():
+    text = (ROOT / "src/omc/distribution/AGENTS.md").read_text()
+    workspace = text.split("**Workspace lifecycle**", 1)[1].split("\n- **", 1)[0]
+    for instruction in ("master", "authorizes", "dependency", "implement", "audit", "code"):
+        assert instruction in workspace
 
 
 def test_investigate_skill_contract():
@@ -845,3 +1036,98 @@ def test_behavior_layer_names_three_authority_words():
     # the conductor list in the "Externalize a composed flow" bullet names design too
     assert "/omc:design" in text.split("Externalize a composed flow")[1]
     assert "/omc:audit" in text.split("Externalize a composed flow")[1]
+
+
+def test_dependency_lifecycles_run_between_record_gate_and_local_work():
+    for skill, command in (("implement", "implement"), ("audit", "review")):
+        text = (ROOT / f"skills/{skill}/SKILL.md").read_text()
+        assert "## Phase 0.5 — dependencies" in text
+        phase = text.split("## Phase 0.5 — dependencies", 1)[1].split("## Phase 1", 1)[0]
+        assert text.index("omc internal design-record") < text.index("## Phase 0.5")
+        assert text.index("## Phase 0.5") < text.index("## Phase 1")
+        assert "dependencies" in text.split("## Phase -1", 1)[1].split("## Phase 0", 1)[0]
+        prose = " ".join(phase.split())
+        for requirement in (
+            "omc internal workspace list",
+            'current_role == "master"',
+            "empty",
+            "dependency role",
+            "no child",
+            "list order",
+            'role == "dependency"',
+            "Never launch the master",
+            f"omc {command} --headless",
+            "background",
+            "announce",
+            "wait for process exit",
+            "before inspecting artifacts",
+            "skip",
+            "nonzero",
+            "verbatim",
+            "CRITICAL",
+            "wait for the answer",
+            "even when artifacts appear complete",
+            "same child session",
+            "--resume",
+            "--allowed-tools",
+            "IMPLEMENT_ALLOWED_TOOLS",
+            "provider environment",
+            "one prompt argument",
+            "shlex.quote",
+            "ambiguous",
+            "exact session ID",
+            "manual",
+            "Codex",
+            f"`omc {command}`",
+            "launch failure",
+            "Never auto-close",
+        ):
+            assert requirement in prose, (skill, requirement)
+
+
+def test_implement_completion_and_plan_chronology_contract():
+    text = (ROOT / "skills/implement/SKILL.md").read_text()
+    dependencies = text.split("## Phase 0.5", 1)[1].split("## Phase 1", 1)[0]
+    for requirement in (
+        "omc internal workspace implementation-status <slug>",
+        '"complete": true',
+        "clean tree",
+        "unique",
+        "first adds",
+        "later commit",
+        "docs/superpowers/specs",
+        "docs/superpowers/plans",
+        "<slug>-implement",
+    ):
+        assert requirement in dependencies
+    plan = text.split("## Phase 1 — plan", 1)[1].split("## Phase 2", 1)[0]
+    assert "Commit the plan" in plan
+    assert "before dispatching" in plan
+
+
+def test_audit_dependency_completion_requires_known_pushed_state():
+    text = (ROOT / "skills/audit/SKILL.md").read_text()
+    phase = text.split("## Phase 0.5", 1)[1].split("## Phase 1", 1)[0]
+    for requirement in (
+        "upstream",
+        "ahead == 0",
+        "null",
+        "inspection failure",
+        "never zero",
+        "<slug>-audit",
+    ):
+        assert requirement in phase
+    assert '"nothing to audit — run `/omc:implement` first"' in text
+
+
+def test_audit_dependency_first_publication_is_not_an_inspection_failure():
+    text = (ROOT / "skills/audit/SKILL.md").read_text()
+    phase = text.split("## Phase 0.5", 1)[1].split("## Phase 1", 1)[0]
+    prose = " ".join(phase.split())
+    for requirement in (
+        "No upstream: publication remains; launch the dependency audit",
+        "Upstream exists and `ahead` is unknown: block",
+        "Upstream exists and integer `ahead == 0`: skip",
+        "Upstream exists and integer `ahead > 0`: launch",
+    ):
+        assert requirement in prose

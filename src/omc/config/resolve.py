@@ -15,8 +15,8 @@ from . import store
 from .schema import Config, ProjectConfig
 
 
-def project_config(ctx: ToolContext) -> ProjectConfig:
-    root = repo_root(ctx)
+def project_config(ctx: ToolContext, root: str | Path | None = None) -> ProjectConfig:
+    root = repo_root(ctx, root)
     if root is None:
         return ProjectConfig()
     return store.load_project(Path(root)) or ProjectConfig()

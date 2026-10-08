@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
+from pathlib import Path
 
 from .toolctx import ToolContext
 
 
-def _switch(ctx: ToolContext, args: list[str]) -> tuple[str | None, str]:
+def _switch(
+    ctx: ToolContext, args: list[str], *, cwd: str | Path | None = None
+) -> tuple[str | None, str]:
+    directory_args = ["-C", str(cwd)] if cwd is not None else []
     try:
-        cp = ctx.run([ctx.wt_bin, "switch", *args])
+        cp = ctx.run([ctx.wt_bin, *directory_args, "switch", *args])
     except OSError as exc:
         return None, str(exc)
     if cp.returncode != 0:
@@ -24,25 +29,44 @@ def _switch(ctx: ToolContext, args: list[str]) -> tuple[str | None, str]:
     return None, ""
 
 
-def sync_base(ctx: ToolContext, base: str) -> bool:
+def _say(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def sync_base(
+    ctx: ToolContext,
+    base: str,
+    *,
+    cwd: str | Path | None = None,
+    say: Callable[[str], None] = _say,
+) -> bool:
     """Fetch origin/<base> so the worktree is cut from CURRENT upstream.
 
     Best-effort (the start skill's freshness gate is the backstop) but LOUD on
     failure so a stale cut is never silent.
     """
     try:
-        cp = ctx.run([ctx.git_bin, "fetch", "origin", base])
+        cp = ctx.run(
+            [ctx.git_bin, "fetch", "origin", base], cwd=str(cwd) if cwd is not None else None
+        )
     except OSError as exc:
-        print(f"warning: could not fetch origin/{base}: {exc}", file=sys.stderr)
+        say(f"warning: could not fetch origin/{base}: {exc}")
         return False
     if cp.returncode != 0:
         detail = (cp.stderr or cp.stdout or "").strip()
-        print(f"warning: 'git fetch origin {base}' failed: {detail}", file=sys.stderr)
+        say(f"warning: 'git fetch origin {base}' failed: {detail}")
         return False
     return True
 
 
-def create_worktree(ctx: ToolContext, branch: str, base: str | None = None) -> str | None:
+def create_worktree(
+    ctx: ToolContext,
+    branch: str,
+    base: str | None = None,
+    *,
+    cwd: str | Path | None = None,
+    say: Callable[[str], None] = _say,
+) -> str | None:
     """Create (or re-enter) the worktree for `branch`; return its path or None.
 
     `wt switch --create` refuses when the branch already exists, so on that miss
@@ -53,10 +77,10 @@ def create_worktree(ctx: ToolContext, branch: str, base: str | None = None) -> s
     if base:
         create_args += ["--base", base]
     create_args += ["--no-cd", "--yes", "--format=json"]
-    path, _ = _switch(ctx, create_args)
+    path, _ = _switch(ctx, create_args, cwd=cwd)
     if path:
         return path
-    path, err = _switch(ctx, [branch, "--no-cd", "--yes", "--format=json"])
+    path, err = _switch(ctx, [branch, "--no-cd", "--yes", "--format=json"], cwd=cwd)
     if path is None and err:
-        print(f"wt switch failed: {err}", file=sys.stderr)
+        say(f"wt switch failed: {err}")
     return path

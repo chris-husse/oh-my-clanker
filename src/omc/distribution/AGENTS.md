@@ -24,6 +24,12 @@ repo). In any other repository, ignore everything in this section.
   Agreement or `ok` is none of these invocations. Stop
   for required answers or genuine blockers. A pending async question is not an
   answer.
+- **Workspace lifecycle**: a lifecycle word typed in the master authorizes
+  the corresponding dependency lifecycles in ledger order, dependencies
+  first and master last. Design workers write only records. Dependency
+  product code changes happen only inside that dependency's own implement
+  or audit run, never as direct edits from the master session. A single
+  repository with no named second modification target keeps its usual flow.
 - **Worktrees are snapshots of main** — code AND knowledge (`.gitnexus/`,
   `.omc/docs/`). Refresh a worktree with `/omc:rebase-main` (it is also
   `/omc:finish`'s first step). Never hand-copy or hand-delete those dirs;
@@ -74,7 +80,7 @@ repo). In any other repository, ignore everything in this section.
     through `CLAUDE_E2E_MODEL` / `CLAUDE_E2E_JUDGE_MODEL`.
 - **Machine contracts are sacred**: single-line `OMC_SLUG` / `OMC_STAGE` /
   `OMC_SQUASH` / `OMC_REBASE_MAIN` / `OMC_TICKET` / `OMC_KNOWLEDGE` /
-  `OMC_DESIGN_RECORD` / `OMC_MODELS` verdicts are
+  `OMC_DESIGN_RECORD` / `OMC_MODELS` / `OMC_WORKSPACE` verdicts are
   parsed by tools — emit them exactly as their skills specify, never wrapped in
   markdown.
 - **A verdict is an argument, not a destination within the active phase.** Those verdict lines — and

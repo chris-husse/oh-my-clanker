@@ -1,9 +1,11 @@
+import os
 import stat as _stat
 from dataclasses import asdict, fields
 
 import pytest
 
 from omc.config import store
+from omc.config.resolve import project_config
 from omc.config.schema import (
     DocsConfig,
     GlobalConfig,
@@ -14,6 +16,25 @@ from omc.config.schema import (
     WorktreeConfig,
 )
 from omc.errors import ConfigError
+from omc.toolctx import ToolContext
+
+
+def test_project_config_explicit_root(tmp_path, monkeypatch):
+    primary = tmp_path / "primary"
+    dependency = tmp_path / "dependency with spaces"
+    ctx = ToolContext.from_env({**os.environ, "HOME": str(tmp_path)})
+    for root, prefix in [(primary, "feature/"), (dependency, "topic/")]:
+        root.mkdir()
+        ctx.run([ctx.git_bin, "init", "-q"], cwd=root, check=True)
+        store.save_project(root, ProjectConfig(worktree=WorktreeConfig(branch_prefix=prefix)))
+    monkeypatch.chdir(primary)
+
+    assert project_config(ctx, dependency).worktree.branch_prefix == "topic/"
+    nested = dependency / "nested directory"
+    nested.mkdir()
+    assert project_config(ctx, str(nested)).worktree.branch_prefix == "topic/"
+    assert project_config(ctx).worktree.branch_prefix == "feature/"
+    assert project_config(ctx, tmp_path) == ProjectConfig()
 
 
 def test_global_unknown_fields_warn_once_and_disappear_on_save(tmp_path, capsys):

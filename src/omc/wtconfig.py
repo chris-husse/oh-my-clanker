@@ -63,10 +63,13 @@ def slug_for(cfg: Config | ProjectConfig, branch: str) -> str | None:
     return rest
 
 
-def repo_root(ctx: ToolContext) -> str | None:
-    """The toplevel of the repo containing cwd, or None outside a repo."""
+def repo_root(ctx: ToolContext, root: str | Path | None = None) -> str | None:
+    """The toplevel of the repo containing root (default cwd), or None outside a repo."""
     try:
-        cp = ctx.run([ctx.git_bin, "rev-parse", "--show-toplevel"])
+        cp = ctx.run(
+            [ctx.git_bin, "rev-parse", "--show-toplevel"],
+            cwd=str(root) if root is not None else None,
+        )
     except OSError:
         return None
     if cp.returncode != 0:
@@ -74,10 +77,13 @@ def repo_root(ctx: ToolContext) -> str | None:
     return (cp.stdout or "").strip() or None
 
 
-def primary_root(ctx: ToolContext) -> str | None:
+def primary_root(ctx: ToolContext, root: str | Path | None = None) -> str | None:
     """First entry of `git worktree list --porcelain` = the primary checkout."""
     try:
-        cp = ctx.run([ctx.git_bin, "worktree", "list", "--porcelain"])
+        cp = ctx.run(
+            [ctx.git_bin, "worktree", "list", "--porcelain"],
+            cwd=str(root) if root is not None else None,
+        )
     except OSError:
         return None
     if cp.returncode != 0:

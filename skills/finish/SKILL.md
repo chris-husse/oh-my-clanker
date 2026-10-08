@@ -12,7 +12,8 @@ but any feature branch works.
 
 **Write every step below into the task list now**, as your first action:
 gate → anything-to-finish → rebase-main → squash → the four project stages →
-create-mr (describe + push) → ticket-sync (review phase) → offer follow-ups.
+create-mr (describe + push) → ticket-sync (review phase) → workspace report →
+offer role-keyed follow-ups.
 Mark each completed as you pass it.
 
 This is the longest composed flow in omc: nine sub-skills, each arriving as a
@@ -60,7 +61,10 @@ outcome → surface its message and stop.
 Invoke the **`check`**, **`build`**, **`verify`**, and **`review`** skills,
 in that order — check first, as the cheap fail-fast gate: a broken unit
 test dies in seconds, not after a world-build. Each is a proxy for the
-project's own `.omc/skills/<stage>/SKILL.md`:
+project's own `.omc/skills/<stage>/SKILL.md`.
+
+Run stages in this repository only. A dependency's finish owns its own stages;
+the master's finish does not run a cross-repository gate.
 
 - A stage that FAILED (`"passed": false`, regardless of `"configured"`) →
   **stop at that stage** (do not run the remaining stages, do not push):
@@ -97,16 +101,34 @@ follow-ups.
 
 ## Step 6 — offer follow-ups
 
-Report what happened (rebased onto `<base>`, squashed N→1, stage outcomes,
-pushed, title),
-then offer exactly these three options (interactively where the harness
-supports it; in a non-interactive/headless run, list them and end):
+Run `omc internal workspace list` and consume its single `OMC_WORKSPACE`
+verdict. If `repositories` is non-empty, render the table specified by the
+`workspace` skill's List section, including every branch and compare URL in
+returned order. Retain `current_role`, `master_worktree` and the master's primary checkout for
+the close follow-up. For an empty list, keep the ordinary single-repository
+report and removal. If listing fails or its verdict is missing/malformed,
+report that failure; offer the same follow-ups, but resolve membership before
+attempting any close rather than treating failure as an empty workspace.
 
-1. **Close the worktree** — from the primary checkout (find it via
-   `wt list --format=json`), run `wt remove` for this branch (`wt -C <primary>
-   remove <branch>` if needed). `wt remove` deletes the branch only once it's
-   merged, so the pushed branch survives until the MR lands. Then move the
-   session out of the removed directory (e.g. into the primary checkout).
+Report what happened (rebased onto `<base>`, squashed N→1, stage outcomes,
+pushed, title), then offer exactly these three options (interactively where
+the harness supports it; in a non-interactive/headless run, list them and end):
+
+1. **Close the worktree** — when `current_role` is `master`, delegate to the
+   `workspace` skill's Close section (`omc internal workspace close` from this
+   master worktree). It checks merges and stops on refusal; never fall back
+   to `wt remove` on `unmerged` or `not-master`. When `current_role` is `dependency`,
+   keep this worktree until the master closes the workspace. Report the
+   `master_worktree` path and direct the user to `/omc:workspace close` there
+   after all branches are merged. Do not run `wt remove` or edit the ledger:
+   removing this worktree alone would strand its registered entry and block
+   the master's list/close. For a single-repository run (empty list, null role),
+   retain local removal: from this repository's primary checkout (find it
+   via `wt list --format=json`), run `wt remove` for this branch
+   (`wt -C <primary> remove <branch>` if needed). `wt remove` deletes the branch
+   only once it's merged, so the pushed branch survives until the MR lands.
+   After successful removal, move the session out of the removed directory
+   into the appropriate primary checkout.
 2. **Address review comments** — the user pastes review feedback; apply the
    changes, `git commit --amend` into the single commit, then re-run
    `create-mr` so the description reflects the final state and the branch is

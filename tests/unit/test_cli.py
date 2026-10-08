@@ -310,6 +310,33 @@ def test_readme_headings_match_regeneration_skill():
         assert heading in skill, heading
 
 
+@pytest.mark.parametrize(
+    "surface",
+    (
+        "omc internal workspace list",
+        "omc internal workspace close",
+        "/omc:workspace",
+        "~/.omc/workspaces.json",
+        "omc internal workspace implementation-status",
+        "OMC_WORKSPACE",
+    ),
+)
+def test_readme_documents_workspace_surfaces(surface):
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    assert surface in readme
+
+
+def test_readme_documents_dependency_lifecycle_ordering():
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    lifecycle = readme.split("## The lifecycle:", 1)[1].split("## How omc is put together", 1)[0]
+    # Guard discoverability of both lifecycle proxies, not a prose snapshot.
+    assert "dependencies" in lifecycle.lower()
+    assert "registration order" in lifecycle.lower()
+    assert "master last" in lifecycle.lower()
+    for command in ("omc implement --headless", "omc review --headless"):
+        assert command in lifecycle
+
+
 def test_design_is_canonical_and_start_is_an_alias():
     from omc.cli import build_parser
 

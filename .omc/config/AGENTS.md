@@ -67,7 +67,7 @@ the bug).
   judgment").
 - **Skill machine contracts** are single JSON lines: `OMC_SLUG`, `OMC_STAGE`,
   `OMC_SQUASH`, `OMC_REBASE_MAIN`, `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`,
-  `OMC_MODELS`. Parsers tolerate markdown wrapping; skills
+  `OMC_MODELS`, `OMC_WORKSPACE`. Parsers tolerate markdown wrapping; skills
   forbid it. Internal skills carry "not meant for direct invocation" in
   their frontmatter description.
 - CLI phases narrate progress on stderr (`→` / `✓` / `·` lines) — a silent

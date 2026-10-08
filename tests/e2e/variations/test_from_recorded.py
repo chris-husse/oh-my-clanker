@@ -85,7 +85,14 @@ def test_failing_verify_blocks_implementation_handoff(stage_session):
     assert plans, "implementation wrote no plan"
     for plan in plans:
         rc, _ = run_in(container, ["git", "cat-file", "-e", f"HEAD:{plan}"], cwd=m["worktree"])
-        assert rc != 0, f"implementation committed plan before passing verify: {plan}"
+        assert rc == 0, f"implementation did not commit plan before building: {plan}"
+    # Plans and task commits precede the milestone gate. Only a later handoff
+    # commit is forbidden; repairs may commit before the next verify attempt.
+    rc, failed_heads = run_in(container, ["cat", "/tmp/omc-failed-verify-heads"])
+    assert rc == 0 and failed_heads.splitlines(), "failed verify did not capture HEAD"
+    assert after["head"] == failed_heads.splitlines()[-1], (
+        "implementation committed after the last failed verify"
+    )
     assert after["remote_refs"] == recorded["remote_refs"], "failing verify published branch"
     # Artifacts above enforce the boundary; whether the answer hands the decision
     # back to the user is a transcript quality, so a same-provider judge decides
