@@ -14,7 +14,7 @@ from .config.schema import Config
 from .errors import OmcError
 from .gitnexus import ensure_gitnexus, snapshot_freshness
 from .plugin import ensure_plugin
-from .probe import require_tools
+from .probe import has_direnv, require_tools
 from .providers.registry import get_provider
 from .session import run_headless as _run_headless
 from .session import session_plan
@@ -147,6 +147,7 @@ def run_start(
 
     provider = get_provider(name)
     seed = build_start_seed(context, knowledge=knowledge.to_json() if knowledge else None)
+    direnv = has_direnv(ctx)
     plan = session_plan(
         ctx,
         cfg,
@@ -155,13 +156,11 @@ def run_start(
         session_name=slug,
         title=branch,
         cwd="<worktree>",  # the real path does not exist yet; dry-run prints this
+        direnv=direnv,
     )
 
     if dry_run:
-        wt_argv = [
-            ctx.wt_bin, "switch", "--create", branch,
-            "--base", f"origin/{base}", "--no-cd", "--yes", "--format=json",
-        ]  # fmt: skip
+        wt_argv, _ = worktree.switch_command(ctx, branch, f"origin/{base}")
         pcfg = cfg.llm.providers.get(name)
         notifications = pcfg.notifications if pcfg else True
         notify_desc = notify.native_description(provider, notifications)
@@ -186,8 +185,6 @@ def run_start(
 
     _say(f"→ creating worktree {branch} (base origin/{base})")
     path = worktree.create_worktree(ctx, branch, base=f"origin/{base}")
-    if path is None:
-        raise OmcError(f"could not create or switch to the worktree for {branch}")
     _say(f"✓ worktree: {path}")
 
     pcfg = cfg.llm.providers.get(name)
@@ -204,7 +201,7 @@ def run_start(
 
     if headless:
         _say(f"→ running headless {name} session seeded with /omc:start")
-        return _run_headless(ctx, cfg, seed, path, slug)
+        return _run_headless(ctx, cfg, seed, path, slug, direnv=direnv)
     _say(f'→ launching {name} session "{slug}" seeded with /omc:start')
 
     os.environ.update(plan.env)  # pragma: no cover

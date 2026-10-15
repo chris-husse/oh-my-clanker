@@ -3,9 +3,12 @@ import sys
 
 import pytest
 
+from omc.config.schema import Config
 from omc.fish_integration import fish_hook_path
+from omc.session import session_plan
 from omc.shells.base import TMPDIR_PLACEHOLDER
 from omc.shells.registry import detect_shell
+from omc.toolctx import ToolContext
 
 ARGS = dict(
     cwd="/w/tree",
@@ -20,6 +23,50 @@ def test_detect_by_shell_env():
     assert detect_shell({"SHELL": "/bin/zsh"}).name == "zsh"
     assert detect_shell({"SHELL": "/bin/bash"}).name == "bash"
     assert detect_shell({}).name == "sh"
+
+
+@pytest.mark.parametrize("shell_name", ["fish", "zsh", "bash", "sh"])
+def test_direnv_launch_follows_worktree_cd(shell_name, monkeypatch):
+    ctx = ToolContext.from_env({"HOME": "/nowhere", "PATH": "/nowhere", "SHELL": shell_name})
+    plan = session_plan(
+        ctx,
+        Config(),
+        seed="seed",
+        slug="s",
+        session_name="s",
+        title="t",
+        cwd="/w/tree",
+        direnv=True,
+    )
+    if shell_name == "fish":
+        assert plan.shell_argv[:3] == ["fish", "-i", "-C"]
+        body = plan.shell_argv[3]
+    elif shell_name == "sh":
+        import omc.shells.base as base
+
+        seen = []
+        monkeypatch.setattr(base.os, "chdir", lambda path: seen.append(("cd", path)))
+        monkeypatch.setattr(base.os, "execvp", lambda program, argv: seen.append(("exec", argv)))
+        detect_shell(ctx.env).exec_interactive(
+            cwd="/w/tree",
+            title="t",
+            startup_argv=plan.session_argv,
+            title_seq=plan.title_seq,
+            title_argv=plan.title_argv,
+        )
+        assert seen[0] == ("cd", "/w/tree")
+        assert seen[1][1][2].endswith("direnv exec . claude -n s --model opus seed")
+        return
+    else:
+        _, files = detect_shell(ctx.env).build_invocation(
+            cwd="/w/tree",
+            title="t",
+            startup_argv=plan.session_argv,
+            title_seq=plan.title_seq,
+            title_argv=plan.title_argv,
+        )
+        body = next(iter(files.values()))
+    assert body.index("cd /w/tree") < body.index("direnv exec . claude")
 
 
 def test_fish_invocation_inline():

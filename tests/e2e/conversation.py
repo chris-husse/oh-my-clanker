@@ -145,6 +145,7 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
     agent_tools = {}
     background_agents = {}
     started_background_tasks = set()
+    foreground_tasks = {}
     completed_background_tasks = set()
     notification_results = 0
     result_uuids = set()
@@ -173,6 +174,30 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
                     and agent_tools.get(tool_id) == session_id
                 ):
                     started_background_tasks.add((session_id, tool_id, task_id))
+            elif record.get("subtype") == "task_started" and record.get("is_backgrounded") is False:
+                tool_id = record.get("tool_use_id")
+                task_id = record.get("task_id")
+                session_id = record.get("session_id")
+                if (
+                    isinstance(tool_id, str)
+                    and isinstance(task_id, str)
+                    and isinstance(session_id, str)
+                    and agent_tools.get(tool_id) == session_id
+                ):
+                    foreground_tasks[(session_id, task_id)] = tool_id
+            # Claude 2.1.286 SDK schema, task_started.is_backgrounded: "A later
+            # move to the background arrives as task_updated patch.is_backgrounded"
+            # (a blocking Agent can be moved mid-run; its answer then arrives as a
+            # task-notification result). task_updated carries task_id, no tool id.
+            if record.get("subtype") == "task_updated":
+                patch = record.get("patch")
+                key = (record.get("session_id"), record.get("task_id"))
+                if (
+                    isinstance(patch, dict)
+                    and patch.get("is_backgrounded") is True
+                    and key in foreground_tasks
+                ):
+                    started_background_tasks.add((key[0], foreground_tasks.pop(key), key[1]))
             if record.get("subtype") == "task_notification" and record.get("status") == "completed":
                 tool_id = record.get("tool_use_id")
                 task_id = record.get("task_id")

@@ -143,7 +143,12 @@ def test_global_sources_feed_explain_and_fail_independently(container):
     # reached the synthesis under its own citation, and each discovered source
     # has exactly one status line — echo available, vanished unavailable with
     # the fixture's reason — in resolver order.
-    assert "echo-fixture" in answer or _ECHO_MARKER in answer, "echo evidence missing"
+    # Models paraphrase the cited finding, so also accept its distinctive claim text.
+    assert (
+        "echo-fixture" in answer
+        or _ECHO_MARKER in answer
+        or re.search(r"flip\w*\s+a\s+coin|coin[- ]?flip", answer, re.IGNORECASE)
+    ), "echo evidence missing"
     _assert_source_statuses(answer)
 
     verdict = judge(

@@ -945,6 +945,59 @@ def test_claude_stream_requires_matching_background_task_started(change):
         parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
 
 
+def _claude_foreground_agent_moved_to_background_records():
+    """Claude 2.1.286's documented shape for a foreground Agent that is moved
+    to the background mid-run (its SDK schema: task_started.is_backgrounded is
+    false for a blocking spawn, and "a later move to the background arrives as
+    task_updated patch.is_backgrounded"). The golden design turn launches its
+    worker with run_in_background false, so its notification follows this."""
+    records = _claude_background_result_records()
+    records[1]["message"]["content"][0]["input"] = {"run_in_background": False}
+    records[2]["is_backgrounded"] = False
+    records.insert(
+        3,
+        {
+            "type": "system",
+            "subtype": "task_updated",
+            "session_id": "session-1",
+            "task_id": "agent-task",
+            "patch": {"is_backgrounded": True},
+        },
+    )
+    return records
+
+
+def test_claude_stream_accepts_foreground_agent_moved_to_background():
+    from tests.e2e.conversation import parse_claude_stream
+
+    records = _claude_foreground_agent_moved_to_background_records()
+    parsed = parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
+    assert parsed["text"] == "The background task finished"
+    assert parsed["provider_session_id"] == "session-1"
+
+
+@pytest.mark.parametrize(
+    "change", ["no-move", "stays-foreground", "wrong-task", "wrong-session", "unstarted-task"]
+)
+def test_claude_stream_requires_a_matching_move_to_background(change):
+    from tests.e2e.conversation import parse_claude_stream
+
+    records = _claude_foreground_agent_moved_to_background_records()
+    updated = records[3]
+    if change == "no-move":
+        del records[3]
+    elif change == "stays-foreground":
+        updated["patch"] = {"is_backgrounded": False, "status": "running"}
+    elif change == "wrong-task":
+        updated["task_id"] = "other-task"
+    elif change == "wrong-session":
+        updated["session_id"] = "other-session"
+    else:
+        del records[2]
+    with pytest.raises(ValueError, match="notification"):
+        parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
+
+
 def test_claude_stream_rejects_reused_auxiliary_result_identity():
     from tests.e2e.conversation import parse_claude_stream
 

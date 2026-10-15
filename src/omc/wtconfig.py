@@ -1,14 +1,14 @@
 """Faithful-worktree wt configuration: create the starter when absent, sniff
 existing configs and point at /omc:check-wt-config when they look off.
 
-The starter has NO excludes on copy-ignored: cutting a worktree snapshots
-main — .env, caches, AND the .gitnexus/.omc/docs knowledge dirs — refreshed
-later by /omc:rebase-main.
+The blocking copy snapshots ignored files except .gitnexus/ and target/;
+.omc/docs is copied and later refreshed by /omc:rebase-main.
 """
 
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -26,15 +26,17 @@ _SLUG_MAX = 50
 
 WT_TEMPLATE = """\
 # Worktrunk project config, seeded by omc — faithful worktrees out of the box.
-# Every gitignored file (.env, caches, the .gitnexus/.omc knowledge snapshot)
-# is reflink-copied into new worktrees; refresh a worktree's snapshot later
-# with /omc:rebase-main. Docs: https://worktrunk.dev
+# Every gitignored file (.env, caches, .omc) is reflink-copied into new
+# worktrees EXCEPT .gitnexus/ (omc queries the primary's graph) and target/
+# (build cache; a fresh build is cheaper than fixing up copied artifacts).
+# Refresh a worktree's .omc/docs later with /omc:rebase-main.
+# Docs: https://worktrunk.dev
 
-# Blocking setup so the worktree is usable the moment you land in it.
-pre-start = "{ ! test -f .gitmodules || git submodule update --init --recursive; } && { ! command -v direnv >/dev/null || direnv allow .; }"
+# Blocking setup, in order: submodules, copy, direnv. Any failure aborts the cut.
+pre-start = "{ ! test -f .gitmodules || git submodule update --init --recursive; } && wt step copy-ignored && { ! test -f .envrc || ! command -v direnv >/dev/null || direnv allow .; }"
 
-[post-start]
-copy-ignored = "wt step copy-ignored"
+[step.copy-ignored]
+exclude = [".gitnexus/", "target/"]
 """
 
 
@@ -88,14 +90,72 @@ def primary_root(ctx: ToolContext) -> str | None:
     return None
 
 
+# One shell word: quotes (an unterminated one runs to end of line), escapes, plain chars.
+_WORD = r"""(?:'[^']*'?|"(?:\\.|[^"\\])*"?|\\.|[^\s;&|(){}<>'"\\])+"""
+# Tokens of one line, left to right. Words swallow quoted `<<` and mid-word `#`, so
+# `#` reaches the comment branch only at a word start, and the comment ends the line.
+_LINE_TOKEN = re.compile(
+    rf"<<<+|<<(?P<strip>-?)[ \t]*(?:(?!#)(?P<word>{_WORD}))?|#.*|{_WORD}", re.S
+)
+_COMMAND_SEPARATORS = {";", "&&", "||", "|", "\n", "{", "("}
+_COMPOUND_KEYWORDS = {"then", "else", "do"}
+
+
+def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
+    """(delimiter, strip_tabs) for each `<<word` / `<<-word` opened on this line."""
+    delimiters = []
+    for match in _LINE_TOKEN.finditer(line):
+        if match["word"] is not None:
+            try:
+                delimiters.append((shlex.split(match["word"])[0], match["strip"] == "-"))
+            except ValueError:  # unbalanced quote: not a usable delimiter
+                pass
+    return delimiters
+
+
+def _without_heredoc_bodies(command: str) -> str:
+    executable_lines = []
+    delimiters = []
+    for line in command.splitlines(keepends=True):
+        if delimiters:
+            delimiter, strip_tabs = delimiters[0]
+            candidate = line.rstrip("\r\n")
+            if (candidate.lstrip("\t") if strip_tabs else candidate) == delimiter:
+                delimiters.pop(0)
+            continue
+        executable_lines.append(line)
+        delimiters.extend(_heredoc_delimiters(line))
+    return "".join(executable_lines)
+
+
 def _has_copy_ignored(text: str) -> bool:
-    try:
-        data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
-        raise
-    post_start = data.get("post-start", {})
-    if isinstance(post_start, dict):
-        return any("copy-ignored" in str(v) for v in post_start.values())
+    data = tomllib.loads(text)
+    for hook_name in ("pre-start", "post-start"):
+        hook = data.get(hook_name)
+        commands = (
+            [hook] if isinstance(hook, str) else hook.values() if isinstance(hook, dict) else []
+        )
+        for command in commands:
+            if not isinstance(command, str):
+                continue
+            lexer = shlex.shlex(
+                _without_heredoc_bodies(command), posix=True, punctuation_chars=";&|(){}\n"
+            )
+            lexer.whitespace = " \t\r"
+            lexer.whitespace_split = True
+            lexer.commenters = "#"
+            try:
+                tokens = list(lexer)
+            except ValueError:
+                continue
+            for index in range(len(tokens) - 2):
+                if tokens[index : index + 3] != ["wt", "step", "copy-ignored"]:
+                    continue
+                start = (
+                    index - 1 if index >= 2 and tokens[index - 1] in _COMPOUND_KEYWORDS else index
+                )
+                if start == 0 or tokens[start - 1] in _COMMAND_SEPARATORS:
+                    return True
     return False
 
 

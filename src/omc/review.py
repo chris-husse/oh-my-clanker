@@ -12,7 +12,7 @@ from .config.schema import Config
 from .errors import OmcError, Refusal
 from .implement import IMPLEMENT_ALLOWED_TOOLS
 from .plugin import ensure_plugin
-from .probe import require_tools
+from .probe import has_direnv, require_tools
 from .providers.registry import get_provider
 from .session import SessionPlan, run_headless, session_plan
 from .shells.registry import detect_shell
@@ -62,8 +62,16 @@ def run_review(
     session_name = f"{slug}-audit"
 
     provider = get_provider(name)
+    direnv = has_direnv(ctx)
     plan = session_plan(
-        ctx, cfg, seed=REVIEW_SEED, slug=slug, session_name=session_name, title=branch, cwd=root
+        ctx,
+        cfg,
+        seed=REVIEW_SEED,
+        slug=slug,
+        session_name=session_name,
+        title=branch,
+        cwd=root,
+        direnv=direnv,
     )
 
     if dry_run:
@@ -89,6 +97,7 @@ def run_review(
             slug,
             session_name=session_name,
             allowed_tools=IMPLEMENT_ALLOWED_TOOLS,
+            direnv=direnv,
         )
     _say(f'→ launching {name} session "{session_name}" seeded with {REVIEW_SEED}')
     os.environ.update(plan.env)  # pragma: no cover

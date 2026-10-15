@@ -34,7 +34,7 @@ def _no_real_gitnexus(monkeypatch):
     monkeypatch.setattr(start_mod, "ensure_gitnexus", lambda ctx: 0)
 
 
-def _make_git_stub(bindir):
+def _make_git_stub(bindir, *, branch_exists=False):
     """git stub that's argv-aware just enough for run_start's needs: --version
     (require_tools' probe) answers like a real git; rev-parse (repo_root, now
     called unconditionally by run_start) reports "not a repo" so these
@@ -42,7 +42,12 @@ def _make_git_stub(bindir):
     bindir.mkdir(parents=True, exist_ok=True)
     path = bindir / "git"
     path.write_text(
-        '#!/bin/sh\ncase "$1" in\n  rev-parse) exit 128 ;;\n  *) echo "git version 2.99" ;;\nesac\n'
+        '#!/bin/sh\ncase "$1" in\n'
+        "  rev-parse) exit 128 ;;\n"
+        f"  show-ref) exit {0 if branch_exists else 1} ;;\n"
+        "  worktree) : ;;\n"
+        '  *) echo "git version 2.99" ;;\n'
+        "esac\n"
     )
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
@@ -85,6 +90,79 @@ def test_dry_run_prints_plan(tmp_path, capsys):
     assert "session argv:" in out and "/omc:start\\n" in out
     assert "-n" in out and "proj-1-fix-login" in out  # session named after slug
     assert "title seq:" in out
+
+
+def test_dry_run_prints_direnv_prefix_when_available(tmp_path, capsys):
+    ctx = full_env(tmp_path)
+    make_stub(tmp_path / "bin", "direnv", stdout="2.38.2")
+    assert run_start(ctx, Config(), "PROJ-1", dry_run=True) == 0
+    assert "session argv: ['direnv', 'exec', '.', 'claude'" in capsys.readouterr().out
+
+
+def test_headless_passes_direnv_without_changing_five_positional_args(tmp_path, monkeypatch):
+    import omc.start as start_mod
+
+    ctx = full_env(tmp_path)
+    make_stub(tmp_path / "bin", "direnv", stdout="2.38.2")
+    (tmp_path / "wtree").mkdir()
+    seen = {}
+
+    def fake_headless(ctx, cfg, seed, cwd, slug, *, direnv=False):
+        seen.update(cwd=cwd, slug=slug, direnv=direnv)
+        return 0
+
+    monkeypatch.setattr(start_mod, "_run_headless", fake_headless)
+    assert run_start(ctx, Config(), "PROJ-1", headless=True) == 0
+    assert seen == {"cwd": str(tmp_path / "wtree"), "slug": "proj-1-fix-login", "direnv": True}
+
+
+def test_dry_run_prints_existing_branch_command(tmp_path, capsys):
+    ctx = full_env(tmp_path)
+    _make_git_stub(tmp_path / "bin", branch_exists=True)
+    assert run_start(ctx, Config(), "PROJ-1", dry_run=True) == 0
+    assert (
+        "worktree cmd: wt switch feature/proj-1-fix-login --no-cd --yes --format=json"
+        in capsys.readouterr().out
+    )
+
+
+def test_failed_design_exits_one_before_wiring_or_launch(tmp_path, monkeypatch, capsys):
+    import omc.cli as cli_mod
+    import omc.start as start_mod
+
+    ctx = full_env(tmp_path)
+    wt_path = tmp_path / "bin" / "wt"
+    wt_path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = --version ]; then echo "wt v0.79.0"; exit 0; fi\n'
+        'echo "✗ pre-start command failed: exit status: 7" >&2\n'
+        "exit 1\n"
+    )
+    wt_path.chmod(wt_path.stat().st_mode | stat.S_IXUSR)
+    for key, value in ctx.env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(cli_mod, "_load_cfg_or_bail", lambda _ctx: Config())
+    monkeypatch.setattr(
+        start_mod.notify,
+        "wire_worktree",
+        lambda *args: pytest.fail("notifications wired after failed cut"),
+    )
+    monkeypatch.setattr(
+        start_mod,
+        "_run_headless",
+        lambda *args: pytest.fail("headless session launched after failed cut"),
+    )
+    monkeypatch.setattr(
+        start_mod,
+        "detect_shell",
+        lambda *args: pytest.fail("interactive session launched after failed cut"),
+    )
+
+    assert cli_mod.main(["design", "PROJ-1", "--headless"]) == 1
+    err = capsys.readouterr().err
+    assert "feature/proj-1-fix-login" in err
+    assert "✗ pre-start command failed: exit status: 7" in err
+    assert "wt config state logs" in err
 
 
 def test_dry_run_uses_full_branch_title_but_slug_session(tmp_path, capsys):
@@ -424,7 +502,7 @@ def _wire_verdict(monkeypatch, verdict, seen=None):
         monkeypatch.setattr(
             start_mod,
             "_run_headless",
-            lambda ctx, cfg, seed, cwd, slug: seen.setdefault("seed", seed) and 0,
+            lambda ctx, cfg, seed, cwd, slug, *, direnv=False: seen.setdefault("seed", seed) and 0,
         )
 
 

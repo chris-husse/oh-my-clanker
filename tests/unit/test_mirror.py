@@ -39,10 +39,10 @@ def test_mirror_snapshot_syncs_known_dirs_only(tmp_path):
 
     result = mirror_snapshot(primary, wt)
 
-    assert result.synced == [".gitnexus", ".omc/docs"]
+    assert result.synced == [".omc/docs"]
     assert result.shared == []
-    assert (wt / ".gitnexus" / "graph.db").read_text() == "db"
-    assert not (wt / ".gitnexus" / "stale.db").exists()
+    assert not (wt / ".gitnexus" / "graph.db").exists()
+    assert (wt / ".gitnexus" / "stale.db").read_text() == "stale"
     assert (wt / ".omc" / "docs" / "page.md").read_text() == "docs"
     assert not (wt / ".env").exists()
 
@@ -51,10 +51,15 @@ def test_mirror_snapshot_skips_missing_sources(tmp_path):
     primary = tmp_path / "primary"
     wt = tmp_path / "wt"
     (primary / ".gitnexus").mkdir(parents=True)
+    (primary / ".gitnexus" / "graph.db").write_text("primary")
     wt.mkdir()
+    (wt / ".gitnexus").mkdir()
+    (wt / ".gitnexus" / "graph.db").write_text("worktree")
     result = mirror_snapshot(primary, wt)
-    assert result.synced == [".gitnexus"]  # no .omc/docs -> skipped entirely
+    assert result.synced == []
     assert result.shared == []
+    assert (wt / ".gitnexus" / "graph.db").read_text() == "worktree"
+    assert not (wt / ".omc" / "docs").exists()
 
 
 def test_mirror_snapshot_refuses_same_root(tmp_path):
@@ -204,8 +209,7 @@ def test_mirror_dir_case_only_rename_never_leaves_dst_empty(tmp_path):
 
 
 def test_mirror_snapshot_reports_shared_omc_docs(tmp_path):
-    # Incident regression end-to-end: shared .omc via symlinks in BOTH roots;
-    # .gitnexus is a real per-checkout dir and still syncs.
+    # Incident regression end-to-end: shared .omc via symlinks in BOTH roots.
     shared = tmp_path / "shared-omc"
     (shared / "docs").mkdir(parents=True)
     (shared / "docs" / "page.md").write_text("docs")
@@ -214,12 +218,15 @@ def test_mirror_snapshot_reports_shared_omc_docs(tmp_path):
     (primary / ".gitnexus").mkdir(parents=True)
     (primary / ".gitnexus" / "graph.db").write_text("db")
     wt.mkdir()
+    (wt / ".gitnexus").mkdir()
+    (wt / ".gitnexus" / "graph.db").write_text("local")
     os.symlink(shared, primary / ".omc")
     os.symlink(shared, wt / ".omc")
 
     result = mirror_snapshot(primary, wt)
 
-    assert result.synced == [".gitnexus"]
+    assert result.synced == []
     assert result.shared == [".omc/docs"]
     assert (shared / "docs" / "page.md").read_text() == "docs"
+    assert (wt / ".gitnexus" / "graph.db").read_text() == "local"
     assert (wt / ".omc").is_symlink()  # the symlink is preserved, never materialized

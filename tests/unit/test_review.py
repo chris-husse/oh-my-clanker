@@ -61,6 +61,7 @@ def test_seed_is_the_bare_audit_command():
 def test_dry_run_prints_record_and_audit_session(tmp_path, monkeypatch, capsys):
     repo = _worktree(tmp_path)
     ctx = _ctx(tmp_path, repo, monkeypatch)
+    make_stub(tmp_path / "bin", "direnv", rc=1)
     assert run_review(ctx, Config(), dry_run=True) == 0
     out = capsys.readouterr().out
     assert "omc review — plan (dry run, no changes made):" in out
@@ -77,6 +78,14 @@ def test_dry_run_prints_record_and_audit_session(tmp_path, monkeypatch, capsys):
         "/omc:audit",
     ]
     assert "shell argv:" in out and "notifications: native, on" in out
+
+
+def test_dry_run_prints_direnv_prefix_when_available(tmp_path, monkeypatch, capsys):
+    repo = _worktree(tmp_path)
+    ctx = _ctx(tmp_path, repo, monkeypatch)
+    make_stub(tmp_path / "bin", "direnv", stdout="2.38.2")
+    assert run_review(ctx, Config(), dry_run=True) == 0
+    assert "session argv: ['direnv', 'exec', '.', 'claude'" in capsys.readouterr().out
 
 
 def test_dry_run_never_writes_notification_files(tmp_path, monkeypatch, capsys):
@@ -116,10 +125,20 @@ def test_headless_names_session_passes_allow_list_and_return_code(tmp_path, monk
 
     repo = _worktree(tmp_path)
     ctx = _ctx(tmp_path, repo, monkeypatch)
+    make_stub(tmp_path / "bin", "direnv", stdout="2.38.2")
     seen = {}
 
-    def fake_headless(ctx, cfg, seed, cwd, slug, *, session_name=None, allowed_tools=None):
-        seen.update(seed=seed, cwd=cwd, slug=slug, session_name=session_name, tools=allowed_tools)
+    def fake_headless(
+        ctx, cfg, seed, cwd, slug, *, session_name=None, allowed_tools=None, direnv=False
+    ):
+        seen.update(
+            seed=seed,
+            cwd=cwd,
+            slug=slug,
+            session_name=session_name,
+            tools=allowed_tools,
+            direnv=direnv,
+        )
         return 7
 
     monkeypatch.setattr(review, "run_headless", fake_headless)
@@ -127,6 +146,7 @@ def test_headless_names_session_passes_allow_list_and_return_code(tmp_path, monk
     assert seen["seed"] == "/omc:audit" and seen["slug"] == SLUG
     assert seen["session_name"] == f"{SLUG}-audit"
     assert seen["tools"] is IMPLEMENT_ALLOWED_TOOLS
+    assert seen["direnv"] is True
     assert os.path.realpath(seen["cwd"]) == os.path.realpath(str(repo))
 
 
@@ -150,6 +170,7 @@ def test_interactive_execs_in_worktree_with_slug_env(tmp_path, monkeypatch):
 
     repo = _worktree(tmp_path)
     ctx = _ctx(tmp_path, repo, monkeypatch)
+    make_stub(tmp_path / "bin", "direnv", rc=1)
     seen = []
     monkeypatch.setattr(
         review,

@@ -1,13 +1,15 @@
 ---
 name: rebase-main
-description: Refresh this worktree onto the latest base branch AND re-mirror the knowledge snapshot (.gitnexus, .omc/docs) from the primary checkout. Run anytime; /omc:finish runs it first automatically.
+description: Refresh this worktree onto the latest base branch AND re-mirror .omc/docs from the primary checkout. The .gitnexus graph stays primary. Run anytime; /omc:finish runs it first automatically.
 ---
 
 # omc rebase-main
 
-A worktree is a snapshot of main at cut time — code AND knowledge. This
-refreshes both, via the deterministic Python subcommand (an LLM is never
-trusted with delete-semantics mirroring):
+A worktree is a snapshot of main at cut time — code and generated knowledge
+docs (`.omc/docs/`). The `.gitnexus/` graph stays in the primary checkout,
+where `/omc:explain` queries it. This refreshes code and docs via the
+deterministic Python subcommand (an LLM is never trusted with
+delete-semantics mirroring):
 
 ```sh
 omc internal rebase-main
@@ -20,9 +22,10 @@ omc internal rebase-main
 The last line is machine-readable:
 
 - `OMC_REBASE_MAIN {"ok": true, "rebased": "<old>..<new>", "synced": [...],
-  "shared": [...]}` — report what moved and which snapshot dirs were
-  re-mirrored, then continue. Entries under `shared` were already present
-  via a shared `.omc` (symlinked across checkouts) — nothing was copied,
+  "shared": [...]}` — report what moved and whether `.omc/docs` was
+  re-mirrored, then continue. `synced` and `shared` never list `.gitnexus`.
+  An entry under `shared` was already present via a shared `.omc` (symlinked
+  across checkouts) — nothing was copied,
   and that is success, not a warning.
 - `OMC_REBASE_MAIN {"ok": true, ..., "note": "primary checkout — nothing to
   rebase"}` — you're in the main checkout; `omc watch` owns freshness here.
@@ -36,11 +39,12 @@ The last line is machine-readable:
 
 Every `OMC_REBASE_MAIN` payload carries `"knowledge": {…}` (the primary's
 freshness verdict, same schema as `OMC_KNOWLEDGE`). When `knowledge.fresh` is
-false, relay its `reasons` and `fix` — the mirrored snapshot is faithful but
-stale.
+false, relay its `reasons` and `fix` — the mirrored docs may be stale, and
+the primary graph may also be stale.
 
 ## When to use
 
-- Anytime the base branch has moved and you want current code + a current
-  `/omc:explain` graph in this worktree.
+- Anytime the base branch has moved and you want current code and generated
+  docs in this worktree. `/omc:explain` queries the primary graph; this
+  command does not copy or refresh it.
 - `/omc:finish` invokes this as its FIRST working step.

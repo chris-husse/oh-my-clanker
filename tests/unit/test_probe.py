@@ -8,6 +8,20 @@ from omc.toolctx import ToolContext
 from ._stubs import make_stub, stub_env
 
 
+def test_has_direnv_probes_version_on_restricted_path(tmp_path):
+    from omc.probe import has_direnv
+
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "direnv", stdout="2.38.2")
+    assert has_direnv(ToolContext.from_env(stub_env(bindir))) is True
+
+
+def test_has_direnv_is_false_when_missing(tmp_path):
+    from omc.probe import has_direnv
+
+    assert has_direnv(ToolContext.from_env(stub_env(tmp_path / "bin"))) is False
+
+
 def test_run_probes_parallel_mixed(tmp_path):
     bindir = tmp_path / "bin"
     make_stub(bindir, "git", stdout="git version 2.99")

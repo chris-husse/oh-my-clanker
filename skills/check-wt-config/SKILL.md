@@ -6,27 +6,31 @@ description: Analyze this project's worktrunk config (.config/wt.toml) against o
 # omc check-wt-config
 
 omc's worktree model needs `wt` to copy the important gitignored files into
-every new worktree (.env, caches, and the `.gitnexus`/`.omc/docs` knowledge
-snapshot). This skill judges whether the project's config actually does that.
+every new worktree (.env, secrets, and the `.omc/docs` knowledge snapshot).
+The starter excludes `.gitnexus/` (omc uses the primary graph) and `target/`
+(build artifacts). This skill judges whether the project's config does that.
 
 ## Step 1 — gather both sides
 
 - The project's config: `<repo root>/.config/wt.toml` (missing → say `omc
-  start`/`omc watch` will seed the starter automatically, and stop).
+  watch` will seed the starter automatically, and stop).
 - omc's canonical starter for comparison: run `omc internal wt-template`.
 
 ## Step 2 — analyze (real judgment, not a diff)
 
-- **Copy coverage**: is a `copy-ignored` step wired in `[post-start]`? Do
-  `exclude` patterns skip things this project obviously needs — `.env`,
-  credentials, build caches — or break the snapshot model by excluding
-  `.gitnexus/` or `.omc/docs/`?
+- **Copy coverage**: is a `wt step copy-ignored` command wired in `pre-start`
+  or `post-start`, as a string or a named step? Blocking `pre-start` makes the
+  copy available before the new worktree is used. Excluding `.gitnexus/` and
+  `target/` is expected; excluding `.omc/docs/`, `.env`, or credentials breaks
+  the snapshot.
 - **Hook safety**: do `pre-start`/`post-start`/other hooks look dangerous
   (destructive commands, `rm -rf`, network side effects), unbounded/slow, or
   likely to prompt and hang a non-interactive worktree creation?
 - **Missing setup**: does the repo visibly use submodules (`.gitmodules`) or
   direnv (`.envrc`) without a matching `pre-start`? (See the starter's
-  pre-start line.)
+  pre-start line.) If `.envrc` is ignored, the blocking copy must finish
+  before `direnv allow .` so the copied file is trusted before launch. Guard
+  the allow step when `.envrc` or direnv is absent.
 - Anything else that will plausibly "do weird things" on `wt switch
   --create` — trust your read of the project over the template.
 
