@@ -9,6 +9,33 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - uses: extractions/setup-just@v2
-      - run: sudo apt-get update && sudo apt-get install -y fish
+      - run: sudo apt-get update && sudo apt-get install -y fish direnv xz-utils
+      - name: Install Worktrunk v0.79.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64)
+              target=x86_64-unknown-linux-musl
+              expected=b8c190b1d652370ef9f6b8f4694a2d6831b5b22f4b789f047612aad32764c6cf
+              ;;
+            aarch64)
+              target=aarch64-unknown-linux-musl
+              expected=6bb148471c4f4e5e616a3d703a00f0095b2d0025d86658f8d610c95a7756e3e7
+              ;;
+            *) exit 1 ;;
+          esac
+          asset="worktrunk-${target}.tar.xz"
+          release="https://github.com/max-sixty/worktrunk/releases/download/v0.79.0"
+          download_dir="$(mktemp -d)"
+          trap 'rm -rf "$download_dir"' EXIT
+          curl -fsSL -o "$download_dir/$asset" "$release/$asset"
+          curl -fsSL -o "$download_dir/$asset.sha256" "$release/$asset.sha256"
+          (cd "$download_dir" && sha256sum -c "$asset.sha256")
+          echo "$expected  $download_dir/$asset" | sha256sum -c -
+          tar -xJf "$download_dir/$asset" -C "$download_dir"
+          sudo install -m 0755 "$download_dir/worktrunk-${target}/wt" /usr/local/bin/wt
+          wt --version
+          direnv version
       - run: just check
       - run: just build

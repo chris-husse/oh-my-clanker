@@ -24,10 +24,12 @@ repo). In any other repository, ignore everything in this section.
   Agreement or `ok` is none of these invocations. Stop
   for required answers or genuine blockers. A pending async question is not an
   answer.
-- **Worktrees are snapshots of main** — code AND knowledge (`.gitnexus/`,
-  `.omc/docs/`). Refresh a worktree with `/omc:rebase-main` (it is also
-  `/omc:finish`'s first step). Never hand-copy or hand-delete those dirs;
-  the deterministic mirror lives in `omc internal rebase-main`.
+- **Worktrees are snapshots of main** — code and generated knowledge docs
+  (`.omc/docs/`). The `.gitnexus/` graph stays in the primary checkout, where
+  `/omc:explain` queries it. Refresh a worktree with `/omc:rebase-main` (it is
+  also `/omc:finish`'s first step). Never hand-copy or hand-delete `.omc/docs/`;
+  its deterministic mirror lives in `omc internal rebase-main`. Existing
+  worktree `.gitnexus/` content is left untouched.
 - **Publish through `/omc:finish`** — rebase, squash, project stage gates
   (`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review`), described
   push. Do not bypass a failing stage.

@@ -76,6 +76,14 @@ def test_dry_run_prints_record_and_named_session(tmp_path, monkeypatch, capsys):
     assert "shell argv:" in out and "notifications: native, on" in out
 
 
+def test_dry_run_prints_direnv_prefix_when_available(tmp_path, monkeypatch, capsys):
+    repo = _worktree(tmp_path)
+    ctx = _ctx(tmp_path, repo, monkeypatch)
+    make_stub(tmp_path / "bin", "direnv", stdout="2.38.2")
+    assert run_implement(ctx, Config(), dry_run=True) == 0
+    assert "session argv: ['direnv', 'exec', '.', 'claude'" in capsys.readouterr().out
+
+
 def test_dry_run_never_writes_notification_files(tmp_path, monkeypatch):
     repo = _worktree(tmp_path)
     ctx = _ctx(tmp_path, repo, monkeypatch)
@@ -115,10 +123,20 @@ def test_headless_names_the_session_and_widens_tools(tmp_path, monkeypatch):
 
     repo = _worktree(tmp_path)
     ctx = _ctx(tmp_path, repo, monkeypatch)
+    make_stub(tmp_path / "bin", "direnv", stdout="2.38.2")
     seen = {}
 
-    def fake_headless(ctx, cfg, seed, cwd, slug, *, session_name=None, allowed_tools=None):
-        seen.update(seed=seed, cwd=cwd, slug=slug, session_name=session_name, tools=allowed_tools)
+    def fake_headless(
+        ctx, cfg, seed, cwd, slug, *, session_name=None, allowed_tools=None, direnv=False
+    ):
+        seen.update(
+            seed=seed,
+            cwd=cwd,
+            slug=slug,
+            session_name=session_name,
+            tools=allowed_tools,
+            direnv=direnv,
+        )
         return 0
 
     monkeypatch.setattr(impl, "run_headless", fake_headless)
@@ -126,6 +144,7 @@ def test_headless_names_the_session_and_widens_tools(tmp_path, monkeypatch):
     assert seen["seed"] == "/omc:implement" and seen["slug"] == SLUG
     assert seen["session_name"] == f"{SLUG}-implement"
     assert seen["tools"] == IMPLEMENT_ALLOWED_TOOLS
+    assert seen["direnv"] is True
     assert os.path.realpath(seen["cwd"]) == os.path.realpath(str(repo))
 
 

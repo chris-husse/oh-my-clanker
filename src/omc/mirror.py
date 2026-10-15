@@ -1,8 +1,8 @@
 """Deterministic directory mirroring (rsync --delete semantics, no shell).
 
-The snapshot model copies the primary root's `.gitnexus/` and `.omc/docs/`
-into worktrees; refreshing that snapshot must delete extraneous files. An LLM
-is never trusted with that operation — this is the unit-tested Python it
+The snapshot model copies the primary root's `.omc/docs/` into worktrees;
+refreshing that snapshot must delete extraneous files. An LLM is never trusted
+with that operation — this is the unit-tested Python it
 calls instead (via `omc internal rebase-main`).
 
 Some projects share one `.omc` across all checkouts via symlinks (the
@@ -22,7 +22,7 @@ from typing import NamedTuple
 from .errors import OmcError
 
 # The ONLY directories the snapshot mirror will ever touch, relative to a root.
-SNAPSHOT_DIRS = (".gitnexus", ".omc/docs")
+SNAPSHOT_DIRS = (".omc/docs",)
 
 # Where watch mirrors the generated wiki inside a root. Fixed relative path —
 # clear_docs_mirror deletes ONLY this, by construction.

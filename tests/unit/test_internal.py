@@ -353,9 +353,11 @@ def test_rebase_main_rebases_and_mirrors_snapshot(tmp_path, capsys):
     _git("add", ".", cwd=wt)
     _git("commit", "-qm", "my work", cwd=wt)
     _advance_main(primary)
-    # primary carries a fresher snapshot than the worktree copy
+    # primary carries fresher docs than the worktree
     (primary / ".gitnexus").mkdir()
     (primary / ".gitnexus" / "graph.db").write_text("fresh")
+    (primary / ".omc" / "docs").mkdir(parents=True)
+    (primary / ".omc" / "docs" / "page.md").write_text("fresh docs")
     (wt / ".gitnexus").mkdir()
     (wt / ".gitnexus" / "graph.db").write_text("stale")
     (wt / ".gitnexus" / "extraneous").write_text("x")
@@ -363,13 +365,14 @@ def test_rebase_main_rebases_and_mirrors_snapshot(tmp_path, capsys):
     rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
 
     assert rc == 0 and verdict["ok"] is True
-    assert ".gitnexus" in verdict["synced"]
+    assert verdict["synced"] == [".omc/docs"]
     assert verdict["shared"] == []  # stable schema: key present even when empty
     assert verdict["rebased"]  # old..new range recorded
     assert (wt / "f2.txt").exists()  # main's commit arrived under our work
     assert (wt / "mine.txt").exists()
-    assert (wt / ".gitnexus" / "graph.db").read_text() == "fresh"
-    assert not (wt / ".gitnexus" / "extraneous").exists()
+    assert (wt / ".omc" / "docs" / "page.md").read_text() == "fresh docs"
+    assert (wt / ".gitnexus" / "graph.db").read_text() == "stale"
+    assert (wt / ".gitnexus" / "extraneous").read_text() == "x"
 
 
 def test_rebase_main_reports_shared_omc_docs(tmp_path, capsys):
@@ -385,7 +388,7 @@ def test_rebase_main_reports_shared_omc_docs(tmp_path, capsys):
 
     assert rc == 0 and verdict["ok"] is True
     assert verdict["shared"] == [".omc/docs"]
-    assert verdict["synced"] == []  # no .gitnexus in this fixture; nothing else synced
+    assert verdict["synced"] == []
     assert (shared / "docs" / "page.md").read_text() == "docs"  # nothing destroyed
 
 
@@ -401,6 +404,8 @@ def test_rebase_main_never_runs_gitnexus_index(tmp_path, capsys):
     _advance_main(primary)
     (primary / ".gitnexus").mkdir()
     (primary / ".gitnexus" / "graph.db").write_text("fresh")
+    (primary / ".omc" / "docs").mkdir(parents=True)
+    (primary / ".omc" / "docs" / "page.md").write_text("docs")
     # Derive the CLI path from the real locator so this trap stays armed even
     # if the managed-install layout ever moves.
     from omc.gitnexus import gitnexus_cli
@@ -423,7 +428,9 @@ def test_rebase_main_never_runs_gitnexus_index(tmp_path, capsys):
         os.environ["PATH"] = old_path
 
     assert rc == 0 and verdict["ok"] is True
-    assert ".gitnexus" in verdict["synced"]  # mirroring stays
+    assert verdict["synced"] == [".omc/docs"]
+    assert (wt / ".omc" / "docs" / "page.md").read_text() == "docs"
+    assert not (wt / ".gitnexus").exists()
     assert not calls.exists()  # registration goes: node never invoked
 
 

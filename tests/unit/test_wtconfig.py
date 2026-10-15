@@ -1,5 +1,7 @@
 import os
 import subprocess
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -30,8 +32,201 @@ def test_creates_starter_when_absent(tmp_path, capsys):
     written = (root / ".config" / "wt.toml").read_text()
     assert written == WT_TEMPLATE
     assert "copy-ignored" in written
-    assert "exclude" not in written  # the snapshot model copies EVERYTHING
+    assert tomllib.loads(written)["step"]["copy-ignored"]["exclude"] == [
+        ".gitnexus/",
+        "target/",
+    ]
     assert "wt.toml" in capsys.readouterr().err
+
+
+def test_starter_blocks_on_ordered_setup_and_excludes_large_caches():
+    data = tomllib.loads(WT_TEMPLATE)
+    assert data["pre-start"] == (
+        "{ ! test -f .gitmodules || git submodule update --init --recursive; } && "
+        "wt step copy-ignored && "
+        "{ ! test -f .envrc || ! command -v direnv >/dev/null || direnv allow .; }"
+    )
+    assert data["step"]["copy-ignored"]["exclude"] == [".gitnexus/", "target/"]
+    assert "post-start" not in data
+    repo_config = Path(__file__).resolve().parents[2] / ".config" / "wt.toml"
+    assert repo_config.read_text() == WT_TEMPLATE
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        WT_TEMPLATE,
+        'pre-start = "wt step copy-ignored"\n',
+        '[pre-start]\ncopy = "wt step copy-ignored"\n',
+        'post-start = "wt step copy-ignored"\n',
+        '[post-start]\ncopy = "wt step copy-ignored"\n',
+    ],
+)
+def test_existing_copy_command_in_either_hook_shape_is_ok(tmp_path, capsys, config):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "ok"
+    assert path.read_text() == config
+    assert capsys.readouterr().err == ""
+
+
+def test_existing_conditional_copy_command_is_ok(tmp_path):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = 'pre-start = "if true; then wt step copy-ignored; fi"\n'
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "ok"
+    assert path.read_text() == config
+
+
+def test_here_document_copy_text_is_suspicious_and_untouched(tmp_path):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = "pre-start = '''cat <<'EOF'\nwt step copy-ignored\nEOF\n'''\n"
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "suspicious"
+    assert path.read_text() == config
+
+
+@pytest.mark.parametrize("delimiter", ["''", '""'])
+def test_empty_quoted_here_document_copy_text_is_suspicious(tmp_path, delimiter):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = f"pre-start = '''cat <<{delimiter}\nwt step copy-ignored\n\n'''\n"
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "suspicious"
+    assert path.read_text() == config
+
+
+@pytest.mark.parametrize(
+    ("opener", "terminator"),
+    [("<<''", ""), ('<<-""', "\t")],
+)
+def test_copy_command_after_empty_quoted_here_document_is_ok(tmp_path, opener, terminator):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = (
+        f"pre-start = '''cat {opener}\n'unbalanced shell text\n"
+        f"{terminator}\nwt step copy-ignored\n'''\n"
+    )
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "ok"
+    assert path.read_text() == config
+
+
+def test_copy_text_in_empty_second_here_document_is_suspicious(tmp_path):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = "pre-start = '''cat <<END <<''\nfirst body\nEND\nwt step copy-ignored\n\n'''\n"
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "suspicious"
+    assert path.read_text() == config
+
+
+def test_copy_command_after_here_document_is_ok(tmp_path):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = "pre-start = '''cat <<EOF\n'unbalanced shell text\nEOF\nwt step copy-ignored\n'''\n"
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "ok"
+    assert path.read_text() == config
+
+
+@pytest.mark.parametrize("terminator", ["EOF", "\tEOF"])
+def test_copy_command_after_tab_stripping_here_document_is_ok(tmp_path, terminator):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = (
+        "pre-start = '''cat <<-EOF\n'unbalanced shell text\n"
+        f"{terminator}\nwt step copy-ignored\n'''\n"
+    )
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "ok"
+    assert path.read_text() == config
+
+
+def test_copy_command_after_hyphenated_here_document_delimiter_is_ok(tmp_path):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = "pre-start = '''cat << -EOF\n'unbalanced shell text\n-EOF\nwt step copy-ignored\n'''\n"
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "ok"
+    assert path.read_text() == config
+
+
+@pytest.mark.parametrize(
+    ("operator", "terminator"),
+    [("<<", "END-OF-FILE"), ("<<-", "\tEND-OF-FILE")],
+)
+def test_copy_command_after_hyphenated_word_delimiter_is_ok(tmp_path, operator, terminator):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = (
+        f"pre-start = '''cat {operator}END-OF-FILE\n'unbalanced shell text\n"
+        f"{terminator}\nwt step copy-ignored\n'''\n"
+    )
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "ok"
+    assert path.read_text() == config
+
+
+@pytest.mark.parametrize(
+    ("operator", "terminator"),
+    [("<<", "<<-EOF"), ("<<-", "\t<<-EOF")],
+)
+def test_copy_command_after_quoted_here_document_delimiter_is_ok(tmp_path, operator, terminator):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = (
+        f"pre-start = '''cat {operator}'<<-EOF'\n'unbalanced shell text\n"
+        f"{terminator}\nwt step copy-ignored\n'''\n"
+    )
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "ok"
+    assert path.read_text() == config
+
+
+def test_copy_command_after_here_string_is_ok(tmp_path):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    config = "pre-start = '''cat <<<value\nwt step copy-ignored\n'''\n"
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "ok"
+    assert path.read_text() == config
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        '# wt step copy-ignored\npre-start = "echo ready"\n',
+        'description = "wt step copy-ignored"\n',
+        '[step.copy-ignored]\nexclude = ["target/"]\n',
+        'pre-start = "echo wt step copy-ignored"\n',
+        'pre-start = "echo then wt step copy-ignored"\n',
+        '[post-start]\nnotice = "echo wt step copy-ignored"\n',
+        "[post-start]\nnotice = \"echo 'wt step copy-ignored'\"\n",
+    ],
+)
+def test_incidental_copy_mentions_are_suspicious_and_untouched(tmp_path, config):
+    root = tmp_path / "proj"
+    (root / ".config").mkdir(parents=True)
+    path = root / ".config" / "wt.toml"
+    path.write_text(config)
+    assert ensure_wt_config(_ctx(tmp_path), root) == "suspicious"
+    assert path.read_text() == config
 
 
 def test_existing_config_with_copy_ignored_is_ok(tmp_path, capsys):

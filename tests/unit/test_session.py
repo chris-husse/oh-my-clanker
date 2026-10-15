@@ -9,6 +9,75 @@ def _ctx():
     return ToolContext.from_env({"HOME": "/nowhere", "PATH": "/nowhere", "SHELL": "/bin/bash"})
 
 
+@pytest.mark.parametrize("direnv, prefix", [(False, []), (True, ["direnv", "exec", "."])])
+def test_session_plan_prefixes_provider_argv_only_when_enabled(direnv, prefix):
+    plan = session_plan(
+        _ctx(),
+        Config(),
+        seed="/omc:implement",
+        slug="proj-1",
+        session_name="proj-1-implement",
+        title="feature/proj-1",
+        cwd="/w/tree",
+        direnv=direnv,
+    )
+    assert plan.session_argv == [
+        *prefix,
+        "claude",
+        "-n",
+        "proj-1-implement",
+        "--model",
+        "opus",
+        "/omc:implement",
+    ]
+
+
+def test_session_plan_defaults_to_unprefixed_provider_argv():
+    plan = session_plan(
+        _ctx(), Config(), seed="seed", slug="s", session_name="s", title="t", cwd="."
+    )
+    assert plan.session_argv == ["claude", "-n", "s", "--model", "opus", "seed"]
+
+
+@pytest.mark.parametrize("direnv, prefix", [(False, []), (True, ["direnv", "exec", "."])])
+def test_run_headless_prefixes_provider_argv_only_when_enabled(direnv, prefix):
+    from types import SimpleNamespace
+
+    from omc.session import run_headless
+
+    captured = {}
+
+    class FakeCtx:
+        def run(self, argv, *, cwd=None, extra_env=None):
+            captured["argv"] = argv
+            captured["cwd"] = cwd
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    assert (
+        run_headless(
+            FakeCtx(), Config(), "/omc:start", "/w/tree", "s", allowed_tools=["Bash"], direnv=direnv
+        )
+        == 0
+    )
+    assert captured == {
+        "argv": [
+            *prefix,
+            "claude",
+            "-p",
+            "/omc:start",
+            "--output-format",
+            "text",
+            "-n",
+            "s",
+            "--model",
+            "opus",
+            "--allowed-tools",
+            "Bash",
+        ],
+        "cwd": "/w/tree",
+    }
+
+
 def test_session_plan_is_pure_and_names_the_session():
     plan = session_plan(
         _ctx(),

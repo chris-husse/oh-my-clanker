@@ -297,6 +297,17 @@ def test_readme_documents_gitnexus_storage_contract():
     assert "unsupported" in architecture
 
 
+def test_readme_recipe_knowledge_flow_keeps_graph_primary():
+    root = Path(__file__).resolve().parents[2]
+    recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
+    knowledge_flow = recipe.split("2. Knowledge flowchart:", 1)[1].split("3. Sequence", 1)[0]
+    assert "primary `.gitnexus/`" in knowledge_flow
+    assert "worktree `.omc/docs/`" in knowledge_flow
+    assert "no copied graph" in knowledge_flow
+    assert "internal proxy" in knowledge_flow
+    assert "rebase-main" in knowledge_flow
+
+
 def test_readme_headings_match_regeneration_skill():
     root = Path(__file__).resolve().parents[2]
     headings = [

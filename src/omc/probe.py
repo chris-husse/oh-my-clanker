@@ -35,6 +35,11 @@ def run_probes(ctx: ToolContext, specs: list[tuple[str, list[str], str]]) -> lis
         return list(pool.map(probe, specs))
 
 
+def has_direnv(ctx: ToolContext) -> bool:
+    present, _ = tool_version(ctx, ["direnv", "version"])
+    return present
+
+
 def require_tools(ctx: ToolContext, cfg: Config | GlobalConfig) -> None:
     """Probe git, wt, and the configured provider CLI in parallel; raise on any miss."""
     provider = get_provider(cfg.llm.default)

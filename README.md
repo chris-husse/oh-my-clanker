@@ -102,9 +102,11 @@ Legacy root symlinks and ignore entries remain after upgrading. Delete old root 
 
 ## Keep knowledge fresh with `omc watch`
 
-Worktrees start as snapshots of the primary checkout: code, knowledge and gitignored build artifacts. A stale primary gives new worktrees stale knowledge, makes `/omc:explain` answer from old data, and leaves copied build artifacts cold.
+New worktrees take code from the base branch and copy useful gitignored files from the primary, including `.env`, `.venv`, `.omc/docs/` and other local caches. This repo's Worktrunk config excludes `.gitnexus/` and `target/`; each worktree builds its own target cache.
 
-**Run `omc watch` in a terminal in the primary checkout and leave it running while you work.** It refuses to run inside a worktree; worktrees refresh through `/omc:rebase-main`. To keep documentation and build artifacts warm too:
+Stale primary knowledge gives new worktrees stale docs and makes `/omc:explain` answer from an old primary graph.
+
+**Run `omc watch` in a terminal in the primary checkout and leave it running while you work.** It refuses to run inside a worktree; worktrees refresh through `/omc:rebase-main`. To keep documentation fresh and build the primary checkout automatically:
 
 ```bash
 omc watch --enable-documentation --auto-build
@@ -196,7 +198,7 @@ Useful in-session skills:
 | `/omc:document` | Generate architecture docs in `.omc/docs/gitnexus/docs/` from that graph. |
 | `/omc:explain-dependency [<name>] <question>` | Explain a library/service at a pinned commit (default: its remote HEAD); first ask indexes it without LLM cost. |
 | `/omc:investigate <environment> <prompt>` | Run a read-only, environment-locked investigation with evidence and query workers; requires `.omc/skills/investigation-context`, whose `envs/<env>.md` briefings define the environments, and refuses without it. |
-| `/omc:rebase-main` | Rebase onto the latest base and re-mirror the primary's knowledge snapshot. |
+| `/omc:rebase-main` | Rebase onto the latest base and re-mirror `.omc/docs/` from the primary; explain still queries the primary graph. |
 | `/omc:check-wt-config` | Review existing worktree config for faithful copies; `omc watch` seeds a starter when absent. |
 | `/omc:finish` | Publish the branch, also available without an audit. |
 | `/omc:integrate` | Set up or revisit the project's omc integration. |
@@ -215,7 +217,7 @@ evidence to the local answer, never the answer itself; each is optional and
 fails on its own, and `/omc:explain` ends with one status line per source
 while still answering from the local graph.
 
-Finish rebases and refreshes the snapshot, squashes to one commit, and runs **check → build → verify → review** before pushing with `--force-with-lease`; tracked files a stage changes are amended into the commit. The commit message is the MR/PR description generated from the diff, a compare URL is printed, and **you open the MR/PR**. Finish then moves the ticket to In Review on a best-effort basis and offers to close the worktree (the unmerged branch survives), address review comments with amend/re-push, or discuss the change. Stacked branches are refused.
+Finish rebases and refreshes the worktree's `.omc/docs/`, squashes to one commit, and runs **check → build → verify → review** before pushing with `--force-with-lease`; tracked files a stage changes are amended into the commit. The commit message is the MR/PR description generated from the diff, a compare URL is printed, and **you open the MR/PR**. Finish then moves the ticket to In Review on a best-effort basis and offers to close the worktree (the unmerged branch survives), address review comments with amend/re-push, or discuss the change. Stacked branches are refused.
 
 Project stages live in `.omc/skills/<stage>/SKILL.md`: check is the frequent unit gate, build builds the world without tests, verify is full E2E at major milestones, and review judges the diff. Each can run as `/omc:<stage>`; unconfigured project stages are no-ops. Review always adds omc's grug complexity lens: Important findings need a fix or a waiver in the design record's “Deliberate complexity” section. An unresolved finding or failed gate stops publication.
 
@@ -236,20 +238,23 @@ flowchart LR
     Tools --> Nexus["GitNexus"]
 ```
 
-Watch maintains the primary graph and docs. Worktrunk's `copy-ignored` copies every gitignored file—`.env`, caches, `.venv`, `.gitnexus/` and `.omc/docs/`—into new worktrees; `/omc:rebase-main` re-mirrors knowledge later. **Explain queries the primary graph**, scoped to the configured base branch, and reads primary docs; the copied graph is a workspace snapshot.
+Watch maintains `.gitnexus/` and `.omc/docs/` in the primary checkout. This repo's Worktrunk `copy-ignored` step carries `.env`, `.venv`, `.omc/docs/` and other ignored local files into new worktrees; it excludes `.gitnexus/` and `target/`. `/omc:rebase-main` re-mirrors only `.omc/docs/`.
 
-Current GitNexus releases normally route linked-worktree checkouts to `$GITNEXUS_HOME/stores`. omc sets `GITNEXUS_SHARED_STORE=off` in `ToolContext.child_env`, which overrides inherited sharing settings and keeps `.gitnexus/` local for snapshots and whole-directory cleanup. `GITNEXUS_STORAGE_PATH` and `GITNEXUS_STORAGE_ROOT` are unsupported with omc and remain untouched.
+**Explain queries the primary graph** through `omc internal gitnexus`, scoped to the configured base branch, and reads primary docs. Any old `.gitnexus/` content already in a worktree is left untouched and is not used for those queries.
+
+Current GitNexus releases normally route linked-worktree checkouts to `$GITNEXUS_HOME/stores`. omc sets `GITNEXUS_SHARED_STORE=off` in `ToolContext.child_env`, which overrides inherited sharing settings and keeps the primary `.gitnexus/` local for indexing and whole-directory cleanup. `GITNEXUS_STORAGE_PATH` and `GITNEXUS_STORAGE_ROOT` are unsupported with omc and remain untouched.
 
 ```mermaid
 flowchart LR
-    Watch["omc watch"] --> Primary["Primary .gitnexus/ and .omc/docs/"]
-    Primary --> Copy["worktrunk copy-ignored"]
-    Copy --> Snapshot["Worktree snapshot"]
-    Primary --> Rebase["/omc:rebase-main: re-mirror"]
-    Rebase --> Snapshot
+    Watch["omc watch"] --> Graph["Primary .gitnexus/ graph"]
+    Watch --> Docs["Primary .omc/docs/"]
+    Docs --> Copy["worktrunk copy-ignored"]
+    Copy --> WorktreeDocs["Worktree .omc/docs/"]
+    Docs --> Rebase["/omc:rebase-main"]
+    Rebase --> WorktreeDocs
     Explain["/omc:explain in any worktree"] --> Proxy["omc internal gitnexus"]
-    Proxy -->|queries| Primary
-    Primary -->|docs and graph evidence| Explain
+    Proxy -->|queries| Graph
+    Docs -->|reference docs| Explain
 ```
 
 [GitNexus](https://github.com/chris-husse/GitNexus) installs from its approved source under `~/.omc/dependencies/gitnexus`; the checkout tracks that repository's `main` and `omc update` rebuilds it. Its graph provides symbols and execution flows; generated docs explain architecture, and a project's explain-context skill establishes where its truth lives.
@@ -315,14 +320,14 @@ omc is developed with omc: keep watch running in the primary checkout and start 
 | Surface | What it ensures here |
 |---|---|
 | `.omc/config.yaml` (committed) | Branches are `feature/<slug>`, cut from `main`. |
-| `.config/wt.toml` | Every gitignored file is copied into worktrees, including `.env`, `.venv` and knowledge; submodules and direnv are set up before landing. |
+| `.config/wt.toml` | Copies ignored files such as `.env`, `.venv` and `.omc/docs/` into worktrees, excluding `.gitnexus/` and `target/`; sets up submodules and direnv before landing. |
 | `.omc/config/AGENTS.md` | Red → green on every change, tests run or fail and never skip, ToolContext process boundary, no unasked installs, generated README. |
 | `.omc/skills/check` | Frequent quick gate: the unit suite. |
 | `.omc/skills/build` | World build during finish: format check, lint and package build, without tests. |
 | `.omc/skills/verify` | Docker golden lifecycle, then variations and smoke in parallel; 300 s per test. Codex gate when Codex code changed; tokens from gitignored `.env`, never public runners. Docker is required. |
 | `.omc/skills/review` | Branch diff checked against this repo's rules, plus omc's grug lens. |
 | `.omc/skills/explain-context` | Where truth lives and the order sources take precedence. |
-| `.gitignore` | `.gitnexus/` and `.omc/docs/` stay machine-local, watch-maintained and uncommitted. |
+| `.gitignore` | The primary `.gitnexus/` graph and generated `.omc/docs/` stay uncommitted; Worktrunk copies docs into worktrees. |
 | `docs/superpowers/specs/`, `docs/superpowers/plans/` | Dated design records and implementation plans. |
 
 This repo has no post-watch hook. [PLUGIN-NOTES.md](docker/PLUGIN-NOTES.md) holds harness/auth details and [lifecycle E2E evidence](docker/PLUGIN-NOTES.md#conversational-lifecycle-regression-evidence-2026-09-24).

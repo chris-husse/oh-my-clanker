@@ -120,8 +120,10 @@ old root symlinks/ignore entries remain and duplicate symlinks may be removed.
 
 #### `` ## Keep knowledge fresh with `omc watch` `` — target 45 lines
 
-Open with snapshots: stale primary knowledge means stale new worktrees and
-stale explain answers; warm gitignored build artifacts are copied by worktrunk.
+Open with snapshots: stale primary knowledge means stale worktree docs and
+stale explain answers. Worktrunk copies useful gitignored files, including
+`.env`, `.venv` and `.omc/docs/`, but excludes `.gitnexus/` and `target/`.
+The graph stays primary; worktrees build without a copied `target/` cache.
 Bold rule: run watch in a terminal in the primary checkout and leave it running.
 Show the useful `omc watch --enable-documentation --auto-build` command and
 state both LLM-costly additions are opt-in.
@@ -171,6 +173,8 @@ Shared flags table: provider overrides (`--claude`/`--codex`, no saved change),
 Nine one-line in-session skills: explain, index, document, explain-dependency,
 investigate (env-locked read-only evidence; investigation-context is required and
 its `envs/<env>.md` briefings define the environments), rebase-main, check-wt-config, finish, integrate.
+The rebase-main row and finish prose say only `.omc/docs/` is mirrored, while
+explain queries the primary graph.
 Explain optional check/build/verify/review semantics, order, standalone forms,
 no-op unconfigured project stages, always-on grug review and Important
 fix/waiver into Deliberate complexity. Finish rebases/mirrors, squashes with
@@ -183,10 +187,12 @@ Exactly three Mermaid diagrams, each with a short explanatory paragraph:
 1. Component flowchart: uv CLI, harness-installed plugin, fenced global behavior,
    project's `.omc/` skills/hook. CLI → ToolContext → git/wt/provider CLI/GitNexus;
    harness → skills → omc internal → CLI. Providers are argv adapters.
-2. Knowledge flowchart: watch → primary `.gitnexus/` + `.omc/docs/` → worktrunk
-   copy-ignored snapshot → worktree; rebase-main re-mirrors. Explicitly show
-   explain's queries routing to PRIMARY graph via internal proxy, and primary
-   docs as reference. A copied graph is not the live query source. Mention
+2. Knowledge flowchart: watch → primary `.gitnexus/` and `.omc/docs/`;
+   worktrunk copies docs to worktree `.omc/docs/` with no copied graph;
+   rebase-main re-mirrors docs only. Explicitly show explain's queries routing
+   to the PRIMARY graph via internal proxy, and primary docs as reference.
+   `GITNEXUS_SHARED_STORE=off` keeps the primary graph local, without making
+   it a worktree snapshot. Mention
    GitNexus approved-source install under `~/.omc/dependencies/gitnexus`; the
    checkout tracks upstream `main` (no version pin), so never cite a GitNexus version.
 3. Sequence for a real internal contract (e.g. design-record): skill → internal
@@ -226,13 +232,15 @@ notifications ignored and removed next save.
 
 omc develops itself: watch in primary, `omc design "<change>"`, lifecycle
 agents run just recipes. Table with all ten surfaces and what each ensures:
-`.omc/config.yaml` (feature/ + main); `.config/wt.toml` (all ignored files,
-submodules, direnv); `.omc/config/AGENTS.md` (red/green, no skips, ToolContext,
-no unasked installs, generated README); `.omc/skills/check` (unit gate);
+`.omc/config.yaml` (feature/ + main); `.config/wt.toml` (ignored files except
+`.gitnexus/` and `target/`, submodules, direnv); `.omc/config/AGENTS.md`
+(red/green, no skips, ToolContext, no unasked installs, generated README);
+`.omc/skills/check` (unit gate);
 `.omc/skills/build` (format/lint/package, no tests); `.omc/skills/verify`
 (Docker golden then parallel variations/smoke, 300 s, Codex when changed,
 gitignored .env tokens); `.omc/skills/review` (rules + grug);
-`.omc/skills/explain-context` (truth order); `.gitignore` (local knowledge);
+`.omc/skills/explain-context` (truth order); `.gitignore` (primary-only graph
+and worktree docs, both uncommitted);
 `docs/superpowers/specs/`, `docs/superpowers/plans/` (dated records/plans).
 State this repo has no post-watch hook; link PLUGIN-NOTES for E2E/auth evidence.
 

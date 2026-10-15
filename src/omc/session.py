@@ -41,6 +41,7 @@ def session_plan(
     session_name: str,
     title: str,
     cwd: str,
+    direnv: bool = False,
 ) -> SessionPlan:
     name = cfg.llm.default
     provider = get_provider(name)
@@ -53,6 +54,8 @@ def session_plan(
         seed=seed,
         notifications=pcfg.notifications if pcfg else True,
     )
+    if direnv:
+        session_argv = ["direnv", "exec", ".", *session_argv]
     title_seq = detect_terminal(ctx.env).title_sequence(title)
     title_argv = terminal_title_argv()
     shell_argv, _ = detect_shell(ctx.env).build_invocation(
@@ -80,6 +83,7 @@ def run_headless(
     *,
     session_name: str | None = None,
     allowed_tools: list[str] | None = None,
+    direnv: bool = False,
 ) -> int:
     """Print-mode run of a seeded session. The five positional parameters are a
     test contract (omc.start._run_headless is monkeypatched by shape); the
@@ -96,6 +100,8 @@ def run_headless(
         session_name=session_name or slug,
         allowed_tools=START_ALLOWED_TOOLS if allowed_tools is None else allowed_tools,
     )
+    if direnv:
+        argv = ["direnv", "exec", ".", *argv]
     try:
         cp = ctx.run(
             argv,
