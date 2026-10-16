@@ -10,7 +10,6 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 from . import docsllm
@@ -170,24 +169,16 @@ def _claude_catalog(ctx: ToolContext) -> list[CatalogModel]:
         raise CatalogMissing(
             f"Claude model catalog missing under {directory}; open claude once to fetch it"
         )
-    dated: list[tuple[datetime, Path, dict[str, object]]] = []
+    dated: list[tuple[int, Path, dict[str, object]]] = []
     for path in paths:
         try:
             data = json.loads(ctx.read_text(path))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ConfigError(f"invalid Claude model catalog {path}: {exc}") from exc
-        if (
-            not isinstance(data, dict)
-            or not isinstance(data.get("fetchedAt"), str)
-            or not data["fetchedAt"]
-        ):
+        # Claude Code 2.1.301 writes fetchedAt as epoch milliseconds.
+        fetched_at = data.get("fetchedAt") if isinstance(data, dict) else None
+        if not isinstance(fetched_at, int) or isinstance(fetched_at, bool):
             raise ConfigError(f"invalid Claude model catalog {path}: expected fetchedAt")
-        try:
-            fetched_at = datetime.fromisoformat(data["fetchedAt"].replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ConfigError(f"invalid Claude model catalog {path}: invalid fetchedAt") from exc
-        if fetched_at.tzinfo is None:
-            raise ConfigError(f"invalid Claude model catalog {path}: fetchedAt has no timezone")
         dated.append((fetched_at, path, data))
     _, path, data = max(dated, key=lambda entry: entry[0])
     try:
@@ -204,6 +195,9 @@ def _claude_catalog(ctx: ToolContext) -> list[CatalogModel]:
             model_id = entry.get("id")
             short_name = entry.get("short_name")
             thinking = entry.get("thinking")
+            if isinstance(thinking, dict) and thinking.get("type") == "none":
+                # A model without effort levels lists no effort_options.
+                thinking = {"effort_options": []}
             if (
                 not isinstance(model_id, str)
                 or not model_id
