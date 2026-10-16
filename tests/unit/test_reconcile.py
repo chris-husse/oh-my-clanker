@@ -282,7 +282,7 @@ def _claude_catalog(ctx: ToolContext, models=CLAUDE_CURRENT) -> Path:
     path.write_text(
         json.dumps(
             {
-                "fetchedAt": "2026-10-15T12:00:00Z",
+                "fetchedAt": 1792065600000,
                 "catalog": {
                     "config": {
                         "models": [

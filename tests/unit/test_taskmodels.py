@@ -571,10 +571,11 @@ def test_codex_catalog_uses_codex_home_and_distinguishes_missing_from_malformed(
 
 
 def _claude_catalog(models, fetched_at):
+    # Claude Code 2.1.301 writes both timestamps as epoch milliseconds.
     return {
         "version": 2,
         "fetchedAt": fetched_at,
-        "staleAt": "2026-10-16T00:00:00Z",
+        "staleAt": fetched_at + 3_304_030,
         "catalog": {
             "surface": "cc",
             "config": {"id": "models", "models": models, "settings_vocabulary": {}},
@@ -610,9 +611,7 @@ def _claude_catalog_ctx(tmp_path, *, org_id="org-current"):
 
 def test_claude_catalog_uses_current_org_newest_file_and_both_sections(tmp_path, monkeypatch):
     ctx, directory, calls = _claude_catalog_ctx(tmp_path)
-    old = _claude_catalog(
-        [_claude_model("claude-opus-old", "Opus", "main")], "2026-10-01T00:00:00Z"
-    )
+    old = _claude_catalog([_claude_model("claude-opus-old", "Opus", "main")], 1790812800000)
     current = _claude_catalog(
         [
             _claude_model("claude-opus-5-5", "Opus", "main", ("high", "max")),
@@ -620,14 +619,15 @@ def test_claude_catalog_uses_current_org_newest_file_and_both_sections(tmp_path,
             _claude_model("claude-haiku-5", "Haiku", "main", ("low",)),
             _claude_model("claude-opus-5", "Opus", "overflow", ("high",)),
             _claude_model("claude-nova-5-5", "Nova", "overflow", ("high",)),
+            # A model without effort levels has no effort_options at all.
+            _claude_model("claude-sonnet-4-5", "Sonnet", "overflow")
+            | {"thinking": {"type": "none"}},
         ],
-        "2026-10-15T00:00:00Z",
+        1792022400000,
     )
     (directory / "org-current-old-cc.json").write_text(json.dumps(old))
     (directory / "org-current-new-cc.json").write_text(json.dumps(current))
-    other = _claude_catalog(
-        [_claude_model("claude-opus-other", "Opus", "main")], "2026-11-01T00:00:00Z"
-    )
+    other = _claude_catalog([_claude_model("claude-opus-other", "Opus", "main")], 1793491200000)
     (directory / "org-other-new-cc.json").write_text(json.dumps(other))
     visited = []
     real_list_dir = ctx.list_dir
@@ -641,6 +641,7 @@ def test_claude_catalog_uses_current_org_newest_file_and_both_sections(tmp_path,
         taskmodels.CatalogModel("claude-sonnet-5-5", "sonnet", ("medium",)),
         taskmodels.CatalogModel("claude-opus-5", "opus", ("high",)),
         taskmodels.CatalogModel("claude-nova-5-5", "", ("high",)),
+        taskmodels.CatalogModel("claude-sonnet-4-5", "sonnet", ()),
     ]
     assert taskmodels.compatible("claude-nova-5-5", "high", listed)
     assert not taskmodels.compatible("nova", "", listed)
@@ -670,25 +671,14 @@ def test_claude_catalog_missing_has_open_once_hint(tmp_path):
     assert str(directory) in str(exc.value)
 
 
-def test_claude_catalog_chooses_latest_absolute_fetch_time(tmp_path):
+@pytest.mark.parametrize("fetched_at", ["2026-10-15T00:00:00Z", "1792022400000", True, None])
+def test_claude_catalog_rejects_non_epoch_fetched_at(tmp_path, fetched_at):
     ctx, directory, _ = _claude_catalog_ctx(tmp_path)
-    (directory / "org-current-offset-cc.json").write_text(
-        json.dumps(
-            _claude_catalog(
-                [_claude_model("claude-opus-older", "Opus", "main")],
-                "2026-10-15T12:00:00+02:00",
-            )
-        )
-    )
-    (directory / "org-current-utc-cc.json").write_text(
-        json.dumps(
-            _claude_catalog(
-                [_claude_model("claude-opus-newer", "Opus", "main")],
-                "2026-10-15T11:00:00Z",
-            )
-        )
-    )
-    assert [model.id for model in taskmodels.catalog(ctx, "claude")] == ["claude-opus-newer"]
+    data = _claude_catalog([_claude_model("claude-opus-5-5", "Opus", "main")], 0)
+    data["fetchedAt"] = fetched_at
+    (directory / "org-current-hash-cc.json").write_text(json.dumps(data))
+    with pytest.raises(ConfigError, match="org-current-hash-cc.json: expected fetchedAt"):
+        taskmodels.catalog(ctx, "claude")
 
 
 @pytest.mark.parametrize(
@@ -705,7 +695,7 @@ def test_claude_catalog_chooses_latest_absolute_fetch_time(tmp_path):
 def test_claude_catalog_malformed_shape_names_its_file(tmp_path, models):
     ctx, directory, _ = _claude_catalog_ctx(tmp_path)
     path = directory / "org-current-hash-cc.json"
-    path.write_text(json.dumps(_claude_catalog(models, "2026-10-15T00:00:00Z")))
+    path.write_text(json.dumps(_claude_catalog(models, 1792022400000)))
     with pytest.raises(ConfigError, match="org-current-hash-cc.json") as exc:
         taskmodels.catalog(ctx, "claude")
     assert not isinstance(exc.value, taskmodels.CatalogMissing)
