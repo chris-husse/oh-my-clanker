@@ -5,10 +5,13 @@ description: Analyze this project's worktrunk config (.config/wt.toml) against o
 
 # omc check-wt-config
 
-omc's worktree model needs `wt` to copy the important gitignored files into
-every new worktree (.env, secrets, and the `.omc/docs` knowledge snapshot).
-The starter excludes `.gitnexus/` (omc uses the primary graph) and `target/`
-(build artifacts). This skill judges whether the project's config does that.
+omc's worktree model needs `wt` to copy the project's important gitignored
+files into every new worktree (.env, secrets, local caches).
+omc itself copies the primary checkout's `.omc/` (including the `.omc/docs`
+knowledge snapshot) into every cut, adding only what is missing, so the
+config never needs to know about it. The starter excludes `.gitnexus/`
+(omc uses the primary graph) and `target/` (build artifacts). This skill
+judges whether the project's config does that.
 
 ## Step 1 — gather both sides
 
@@ -21,8 +24,8 @@ The starter excludes `.gitnexus/` (omc uses the primary graph) and `target/`
 - **Copy coverage**: is a `wt step copy-ignored` command wired in `pre-start`
   or `post-start`, as a string or a named step? Blocking `pre-start` makes the
   copy available before the new worktree is used. Excluding `.gitnexus/` and
-  `target/` is expected; excluding `.omc/docs/`, `.env`, or credentials breaks
-  the snapshot.
+  `target/` is expected; excluding `.env` or credentials leaves the worktree
+  unfaithful. Excluding `.omc/` is harmless — omc copies it itself.
 - **Hook safety**: do `pre-start`/`post-start`/other hooks look dangerous
   (destructive commands, `rm -rf`, network side effects), unbounded/slow, or
   likely to prompt and hang a non-interactive worktree creation?

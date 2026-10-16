@@ -337,6 +337,9 @@ def test_start_alias_dispatches_to_run_start(monkeypatch):
     seen = {}
     monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: object())
     monkeypatch.setattr(
+        cli, "reconcile", lambda ctx, cfg, groups, *, say, dry_run: cfg, raising=False
+    )
+    monkeypatch.setattr(
         cli, "run_start", lambda ctx, cfg, context, **kw: seen.setdefault("ctx", context) and 0
     )
     assert cli.main(["start", "PROJ-9"]) == 0
@@ -387,6 +390,9 @@ def test_design_dispatch_applies_the_override(monkeypatch):
     seen = {}
     monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: Config())
     monkeypatch.setattr(
+        cli, "reconcile", lambda ctx, cfg, groups, *, say, dry_run: cfg, raising=False
+    )
+    monkeypatch.setattr(
         cli, "run_start", lambda ctx, cfg, context, **kw: seen.setdefault("cfg", cfg) and 0
     )
     assert cli.main(["design", "PROJ-1", "--codex"]) == 0
@@ -402,6 +408,9 @@ def test_implement_parser_and_dispatch(monkeypatch):
     assert args.dry_run is True and args.headless is False
     seen = {}
     monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: Config())
+    monkeypatch.setattr(
+        cli, "reconcile", lambda ctx, cfg, groups, *, say, dry_run: cfg, raising=False
+    )
 
     def fake_run_implement(ctx, cfg, *, dry_run, headless):
         seen.update(provider=cfg.llm.default, dry_run=dry_run, headless=headless)
@@ -443,6 +452,9 @@ def test_review_dispatch_applies_run_only_provider_override(monkeypatch):
     cfg = Config()
     seen = {}
     monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: cfg)
+    monkeypatch.setattr(
+        cli, "reconcile", lambda ctx, cfg, groups, *, say, dry_run: cfg, raising=False
+    )
 
     def fake_run_review(ctx, actual, *, dry_run, headless):
         seen.update(provider=actual.llm.default, dry_run=dry_run, headless=headless)
@@ -459,3 +471,150 @@ def test_review_without_config_bails(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     assert main(["review"]) == 2
     assert "omc configure" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("argv", "saved_provider", "effective_provider", "groups", "dry_run"),
+    [
+        (["design", "PROJ-1", "--codex"], "claude", "codex", {"session"}, False),
+        (["start", "PROJ-1", "--claude", "--dry-run"], "codex", "claude", {"session"}, True),
+        (["implement", "--codex", "--dry-run"], "claude", "codex", {"session"}, True),
+        (["review", "--claude"], "codex", "claude", {"session"}, False),
+        (["dependency", "watch", "--once"], "claude", "codex", {"docs"}, False),
+    ],
+)
+def test_provider_command_reconciles_before_worker(
+    monkeypatch, argv, saved_provider, effective_provider, groups, dry_run
+):
+    import omc.cli as cli
+    from omc.config.schema import Config
+
+    original = Config()
+    original.llm.default = saved_provider
+    original.llm.docs.provider = "codex"
+    remapped = Config()
+    events = []
+    monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: events.append("load") or original)
+    real_with_provider = cli._with_provider
+
+    def with_provider(cfg, override):
+        events.append("override")
+        return real_with_provider(cfg, override)
+
+    monkeypatch.setattr(cli, "_with_provider", with_provider)
+
+    def fake_reconcile(ctx, cfg, leaves, *, say, dry_run):
+        events.append("reconcile")
+        assert leaves == groups
+        assert dry_run is ("--dry-run" in argv)
+        assert callable(say)
+        assert cfg.llm.default == (effective_provider if groups == {"session"} else saved_provider)
+        if groups == {"session"}:
+            assert [cfg.llm.default] == [effective_provider]
+        else:
+            assert cfg.llm.docs.provider == effective_provider
+        return remapped
+
+    monkeypatch.setattr(cli, "reconcile", fake_reconcile, raising=False)
+
+    def session_worker(ctx, cfg, *args, **kwargs):
+        events.append("worker")
+        assert cfg is remapped
+        assert kwargs["dry_run"] is dry_run
+        return 23
+
+    if argv[0] in ("design", "start"):
+        monkeypatch.setattr(cli, "run_start", session_worker)
+    elif argv[0] == "implement":
+        monkeypatch.setattr("omc.implement.run_implement", session_worker)
+    elif argv[0] == "review":
+        monkeypatch.setattr("omc.review.run_review", session_worker)
+    else:
+
+        def dependency_worker(ctx, *, interval, once):
+            events.append("worker")
+            assert once and interval == 30
+            return 23
+
+        monkeypatch.setattr("omc.depwatch.run_dependency_watch", dependency_worker)
+
+    assert cli.main(argv) == 23
+    assert events == (
+        ["load", "override", "reconcile", "worker"]
+        if groups == {"session"}
+        else ["load", "reconcile", "worker"]
+    )
+    assert original.llm.default == saved_provider
+
+
+@pytest.mark.parametrize(
+    "argv", [["dependency", "list"], ["configure", "--defaults"], ["internal", "models"]]
+)
+def test_non_launch_commands_do_not_reconcile(monkeypatch, argv):
+    import omc.cli as cli
+
+    monkeypatch.setattr(
+        cli, "reconcile", lambda *a, **kw: pytest.fail("unexpected reconcile"), raising=False
+    )
+    monkeypatch.setattr("omc.depwatch.run_dependency_list", lambda home: 0)
+    monkeypatch.setattr("omc.configure.run_configure", lambda ctx, *, defaults, sets: 0)
+    monkeypatch.setattr("omc.internal.run_internal", lambda args: 0)
+    assert cli.main(argv) == 0
+
+
+@pytest.mark.parametrize("argv", [["design", "PROJ-1"], ["implement"], ["review"]])
+def test_stale_session_dry_run_reports_all_leaves_without_launch(monkeypatch, capsys, argv):
+    import omc.cli as cli
+    from omc.config.schema import Config
+    from omc.reconcile import DryRunStale
+
+    monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: Config())
+    writes = []
+    turns = []
+    monkeypatch.setattr("omc.config.store.save_global", lambda *a, **kw: writes.append(True))
+    monkeypatch.setattr("omc.docsllm.cli_model_probe", lambda *a, **kw: turns.append(True))
+
+    def stale(ctx, cfg, groups, *, say, dry_run):
+        assert groups == {"session"} and dry_run
+        say("· model: retired-id is unavailable (would remap)")
+        say("· tasks.review: retired-review is unavailable (would remap)")
+        raise DryRunStale()
+
+    monkeypatch.setattr(cli, "reconcile", stale, raising=False)
+    monkeypatch.setattr(cli, "run_start", lambda *a, **kw: pytest.fail("launched start"))
+    monkeypatch.setattr(
+        "omc.implement.run_implement", lambda *a, **kw: pytest.fail("launched implement")
+    )
+    monkeypatch.setattr("omc.review.run_review", lambda *a, **kw: pytest.fail("launched review"))
+    assert cli.main([*argv, "--dry-run"]) == 0
+    err = capsys.readouterr().err
+    assert "· model: retired-id is unavailable (would remap)" in err
+    assert "· tasks.review: retired-review is unavailable (would remap)" in err
+    assert not writes and not turns
+
+
+@pytest.mark.parametrize("argv", [["design", "PROJ-1"], ["implement"], ["review"]])
+def test_current_session_dry_run_continues_to_full_preview(monkeypatch, argv):
+    import omc.cli as cli
+    from omc.config.schema import Config
+
+    cfg = Config()
+    seen = []
+    monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: cfg)
+    monkeypatch.setattr(
+        cli,
+        "reconcile",
+        lambda ctx, actual, groups, *, say, dry_run: seen.append("current") or actual,
+        raising=False,
+    )
+
+    def preview(ctx, actual, *args, **kwargs):
+        assert actual is cfg and kwargs["dry_run"] is True
+        seen.append("full preview")
+        return 0
+
+    monkeypatch.setattr(cli, "run_start", preview)
+    monkeypatch.setattr("omc.implement.run_implement", preview)
+    monkeypatch.setattr("omc.review.run_review", preview)
+    assert cli.main([*argv, "--dry-run"]) == 0
+    assert seen == ["current", "full preview"]

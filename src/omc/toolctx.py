@@ -60,6 +60,10 @@ class ToolContext:
         """Read provider-owned state through the same runtime I/O boundary."""
         return path.read_text(encoding="utf-8")
 
+    def list_dir(self, path: Path) -> list[Path]:
+        """List provider-owned directory entries through the runtime I/O boundary."""
+        return list(path.iterdir())
+
     def run(
         self,
         argv: Sequence[str],

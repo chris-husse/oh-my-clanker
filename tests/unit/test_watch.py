@@ -5,6 +5,7 @@ import shlex
 import stat
 import subprocess
 import sys
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,208 @@ def _fast_wiki_poll(monkeypatch):
     import omc.gitnexus as gitnexus_mod
 
     monkeypatch.setattr(gitnexus_mod, "_WIKI_POLL_SECONDS", 0.05)
+
+
+@pytest.fixture(autouse=True)
+def _current_models(monkeypatch):
+    """Existing watch tests exercise git/knowledge behavior, not model catalogs."""
+    import omc.watch as watch_mod
+
+    monkeypatch.setattr(
+        watch_mod, "reconcile", lambda ctx, cfg, groups, *, say, dry_run: cfg, raising=False
+    )
+
+
+@pytest.mark.parametrize(
+    ("documentation", "auto_build", "groups"),
+    [
+        (False, False, set()),
+        (True, False, {"docs"}),
+        (False, True, {"orchestrator"}),
+        (True, True, {"docs", "orchestrator"}),
+    ],
+)
+def test_watch_reconciles_selected_models_at_each_locked_tick(
+    tmp_path, monkeypatch, documentation, auto_build, groups
+):
+    import omc.watch as watch_mod
+
+    initial = Config()
+    initial.llm.docs.provider = "codex"
+    remapped = [Config(), Config()]
+    for cfg in remapped:
+        cfg.llm.docs.provider = "codex"
+    events = []
+    calls = []
+    locked = False
+
+    class Instance:
+        is_locked = True
+
+        def release(self):
+            self.is_locked = False
+
+    instance = Instance()
+    monkeypatch.setattr(watch_mod, "repo_root", lambda ctx: str(tmp_path))
+    monkeypatch.setattr(watch_mod, "primary_root", lambda ctx: str(tmp_path))
+    monkeypatch.setattr(watch_mod, "require_tools", lambda ctx, cfg: None)
+    monkeypatch.setattr(watch_mod, "ensure_gitnexus", lambda ctx: 0)
+    monkeypatch.setattr(watch_mod, "ensure_wt_config", lambda ctx, root: None)
+    monkeypatch.setattr(watch_mod, "watch_locks", lambda ctx, *, cwd: (instance, object()))
+    monkeypatch.setattr(watch_mod, "acquire_instance", lambda instance, *, clear: True)
+
+    @contextmanager
+    def busy_lock(busy, say):
+        nonlocal locked
+        assert not locked
+        locked = True
+        events.append("lock")
+        try:
+            yield
+        finally:
+            locked = False
+            events.append("unlock")
+
+    monkeypatch.setattr(watch_mod, "acquire_busy_narrated", busy_lock)
+
+    def fake_reconcile(ctx, cfg, leaves, *, say, dry_run):
+        assert locked and not dry_run
+        assert leaves == groups
+        assert cfg is (initial if not calls else remapped[0])
+        assert cfg.llm.default == "claude"  # auto-build's orchestrator provider
+        assert cfg.llm.docs.provider == "codex"  # docs provider differs
+        calls.append((cfg, leaves))
+        events.append("reconcile")
+        return remapped[len(calls) - 1]
+
+    monkeypatch.setattr(watch_mod, "reconcile", fake_reconcile)
+
+    def tick(ctx, cfg, root, **kwargs):
+        assert locked
+        expected = remapped[len(calls) - 1] if groups else initial
+        assert cfg is expected
+        events.append("tick")
+        return "synced"
+
+    monkeypatch.setattr(watch_mod, "_tick", tick)
+    monkeypatch.setattr(watch_mod, "_post_watch_hook", lambda *args: events.append("hook"))
+
+    def build(ctx, cfg, root):
+        assert locked and cfg is remapped[len(calls) - 1]
+        events.append("build")
+
+    monkeypatch.setattr(watch_mod, "_auto_build", build)
+    sleeps = []
+
+    def stop_after_two_ticks(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(watch_mod.time, "sleep", stop_after_two_ticks)
+    assert (
+        watch_mod.run_watch(
+            object(),
+            initial,
+            interval=1,
+            enable_documentation=documentation,
+            auto_build=auto_build,
+        )
+        == 0
+    )
+    one_tick = [
+        "lock",
+        *(["reconcile"] if groups else []),
+        "tick",
+        "hook",
+        *(["build"] if auto_build else []),
+        "unlock",
+    ]
+    assert events == one_tick * 2
+    assert len(calls) == (2 if groups else 0)
+    assert sleeps == [1, 1]
+    assert not instance.is_locked
+
+
+def _fake_watch_boot(monkeypatch, tmp_path):
+    """Stub every boot check and lock so run_watch goes straight to its loop."""
+    import omc.watch as watch_mod
+
+    class Instance:
+        is_locked = True
+
+        def release(self):
+            self.is_locked = False
+
+    instance = Instance()
+    monkeypatch.setattr(watch_mod, "repo_root", lambda ctx: str(tmp_path))
+    monkeypatch.setattr(watch_mod, "primary_root", lambda ctx: str(tmp_path))
+    monkeypatch.setattr(watch_mod, "require_tools", lambda ctx, cfg: None)
+    monkeypatch.setattr(watch_mod, "ensure_gitnexus", lambda ctx: 0)
+    monkeypatch.setattr(watch_mod, "ensure_wt_config", lambda ctx, root: None)
+    monkeypatch.setattr(watch_mod, "watch_locks", lambda ctx, *, cwd: (instance, object()))
+    monkeypatch.setattr(watch_mod, "acquire_instance", lambda instance, *, clear: True)
+    monkeypatch.setattr(watch_mod, "acquire_busy_narrated", lambda busy, say: nullcontext())
+    monkeypatch.setattr(watch_mod, "_post_watch_hook", lambda *args: None)
+    return instance
+
+
+def test_watch_first_tick_reconcile_failure_fails_loud(tmp_path, monkeypatch):
+    """The first tick is the command's entry: a reconcile failure propagates."""
+    import omc.watch as watch_mod
+    from omc.errors import ConfigError
+
+    instance = _fake_watch_boot(monkeypatch, tmp_path)
+
+    def failing_reconcile(ctx, cfg, groups, *, say, dry_run):
+        raise ConfigError("catalog unreachable")
+
+    monkeypatch.setattr(watch_mod, "reconcile", failing_reconcile)
+    ticks = []
+    monkeypatch.setattr(watch_mod, "_tick", lambda *a, **k: ticks.append(1) or "synced")
+    with pytest.raises(ConfigError, match="catalog unreachable"):
+        watch_mod.run_watch(object(), Config(), interval=1, enable_documentation=True)
+    assert ticks == []
+    assert not instance.is_locked
+
+
+def test_watch_later_tick_reconcile_failure_warns_and_keeps_previous_cfg(
+    tmp_path, monkeypatch, capsys
+):
+    """Later ticks are warn-and-skip: one ✗ line, previous cfg kept, loop goes on."""
+    import omc.docsllm as docsllm
+    import omc.watch as watch_mod
+
+    _fake_watch_boot(monkeypatch, tmp_path)
+    initial = Config()
+    first = Config()
+    third = Config()
+    outcomes = [first, docsllm.ProbeFailed("GET /v1/models returned 503"), third]
+
+    def flaky_reconcile(ctx, cfg, groups, *, say, dry_run):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(watch_mod, "reconcile", flaky_reconcile)
+    seen = []
+    monkeypatch.setattr(watch_mod, "_tick", lambda ctx, cfg, root, **k: seen.append(cfg) or None)
+    sleeps = []
+
+    def stop_after_three_ticks(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(watch_mod.time, "sleep", stop_after_three_ticks)
+    assert watch_mod.run_watch(object(), initial, interval=1, enable_documentation=True) == 0
+    assert len(seen) == 3
+    assert seen[0] is first
+    assert seen[1] is first  # failed reconcile keeps the previous cfg
+    assert seen[2] is third
+    err = capsys.readouterr().err
+    assert err.count("✗ model reconciliation failed: GET /v1/models returned 503") == 1
 
 
 def _git(*args, cwd):

@@ -142,6 +142,7 @@ def test_failed_design_exits_one_before_wiring_or_launch(tmp_path, monkeypatch, 
     for key, value in ctx.env.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(cli_mod, "_load_cfg_or_bail", lambda _ctx: Config())
+    monkeypatch.setattr(cli_mod, "reconcile", lambda _ctx, cfg, _leaves, **_kwargs: cfg)
     monkeypatch.setattr(
         start_mod.notify,
         "wire_worktree",

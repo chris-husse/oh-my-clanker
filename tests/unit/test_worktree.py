@@ -1,4 +1,5 @@
 import json
+import os
 import shlex
 import stat
 
@@ -62,6 +63,7 @@ def test_create_worktree_fresh(tmp_path):
 def make_worktree_git_stub(
     bindir,
     *,
+    primary="/repo",
     branch_before=False,
     branch_after=False,
     worktrees_before=(),
@@ -77,7 +79,7 @@ def make_worktree_git_stub(
     marker = bindir / "wt.invoked"
 
     def porcelain(worktrees):
-        entries = [("/repo", "main"), *worktrees]
+        entries = [(primary, "main"), *worktrees]
         return "".join(
             f"worktree {path}\nHEAD deadbeef\nbranch refs/heads/{branch}\n\n"
             for path, branch in entries
@@ -321,3 +323,114 @@ def test_switch_command_selects_existing_branch_for_dry_run(tmp_path):
         ["wt", "switch", "feature/x", "--no-cd", "--yes", "--format=json"],
         True,
     )
+
+
+def _cut_with_primary(tmp_path, primary):
+    """A fresh cut whose porcelain names ``primary`` first; returns (ctx, worktree, git calls)."""
+    bindir = tmp_path / "bin"
+    wtree = tmp_path / "wtree"
+    wtree.mkdir(exist_ok=True)
+    git_calls = make_worktree_git_stub(
+        bindir,
+        primary=str(primary),
+        branch_after=True,
+        worktrees_after=((str(wtree), "feature/x"),),
+    )
+    make_worktree_wt_stub(bindir, stdout=json.dumps({"path": str(wtree)}))
+    return ToolContext.from_env(stub_env(bindir)), wtree, git_calls
+
+
+def test_cut_copies_missing_primary_omc_files(tmp_path, capsys):
+    primary = tmp_path / "primary"
+    (primary / ".omc" / "docs").mkdir(parents=True)
+    (primary / ".omc" / "docs" / "x.md").write_text("generated docs")
+    ctx, wtree, _ = _cut_with_primary(tmp_path, primary)
+
+    assert create_worktree(ctx, "feature/x") == str(wtree)
+
+    assert (wtree / ".omc" / "docs" / "x.md").read_text() == "generated docs"
+    assert "✓ copied 1 .omc file(s) from the primary checkout" in capsys.readouterr().err
+
+
+def test_cut_never_overwrites_existing_omc_files(tmp_path):
+    primary = tmp_path / "primary"
+    (primary / ".omc" / "config").mkdir(parents=True)
+    (primary / ".omc" / "config" / "AGENTS.md").write_text("primary edit")
+    ctx, wtree, _ = _cut_with_primary(tmp_path, primary)
+    (wtree / ".omc" / "config").mkdir(parents=True)
+    (wtree / ".omc" / "config" / "AGENTS.md").write_bytes(b"tracked\n")
+
+    create_worktree(ctx, "feature/x")
+
+    assert (wtree / ".omc" / "config" / "AGENTS.md").read_bytes() == b"tracked\n"
+
+
+def test_cut_recreates_symlinked_primary_omc_as_symlink(tmp_path):
+    shared = tmp_path / "shared-omc"
+    (shared / "docs").mkdir(parents=True)
+    (shared / "docs" / "x.md").write_text("shared")
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    (primary / ".omc").symlink_to(shared)
+    ctx, wtree, _ = _cut_with_primary(tmp_path, primary)
+
+    create_worktree(ctx, "feature/x")
+
+    assert (wtree / ".omc").is_symlink()
+    assert os.readlink(wtree / ".omc") == str(shared)
+
+
+def test_cut_leaves_shared_omc_alias_untouched(tmp_path, capsys):
+    primary = tmp_path / "primary"
+    (primary / ".omc" / "docs").mkdir(parents=True)
+    (primary / ".omc" / "docs" / "x.md").write_text("shared")
+    ctx, wtree, _ = _cut_with_primary(tmp_path, primary)
+    (wtree / ".omc").symlink_to(primary / ".omc")
+
+    create_worktree(ctx, "feature/x")
+
+    assert os.readlink(wtree / ".omc") == str(primary / ".omc")
+    assert sorted(p.name for p in (primary / ".omc").iterdir()) == ["docs"]
+    assert "· .omc shared with the primary checkout" in capsys.readouterr().err
+
+
+def test_cut_without_primary_omc_copies_nothing(tmp_path):
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    ctx, wtree, _ = _cut_with_primary(tmp_path, primary)
+
+    assert create_worktree(ctx, "feature/x") == str(wtree)
+    assert not os.path.lexists(wtree / ".omc")
+
+
+def test_cut_copies_nested_omc_symlink_as_symlink(tmp_path):
+    primary = tmp_path / "primary"
+    (primary / ".omc" / "docs").mkdir(parents=True)
+    (primary / ".omc" / "docs" / "x.md").write_text("docs")
+    (primary / ".omc" / "docs" / "latest").symlink_to("x.md")
+    ctx, wtree, _ = _cut_with_primary(tmp_path, primary)
+
+    create_worktree(ctx, "feature/x")
+
+    assert (wtree / ".omc" / "docs" / "latest").is_symlink()
+    assert os.readlink(wtree / ".omc" / "docs" / "latest") == "x.md"
+
+
+def test_omc_copy_failure_fails_the_cut_and_cleans_up(tmp_path, monkeypatch):
+    import omc.worktree as worktree_mod
+
+    primary = tmp_path / "primary"
+    (primary / ".omc" / "docs").mkdir(parents=True)
+    (primary / ".omc" / "docs" / "x.md").write_text("docs")
+    ctx, wtree, git_calls = _cut_with_primary(tmp_path, primary)
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(worktree_mod, "copy_missing", boom)
+    with pytest.raises(OmcError, match=r"\.omc.*disk full"):
+        create_worktree(ctx, "feature/x")
+
+    calls = git_calls.read_text().splitlines()
+    assert f"worktree remove --force {wtree}" in calls
+    assert "branch -D feature/x" in calls

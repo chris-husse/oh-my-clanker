@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+from pathlib import Path
 
 from .errors import OmcError
+from .mirror import copy_missing
 from .toolctx import ToolContext
+from .wtconfig import primary_root
 
 
 def switch_command(ctx: ToolContext, branch: str, base: str | None) -> tuple[list[str], bool]:
@@ -122,6 +126,29 @@ def sync_base(ctx: ToolContext, base: str) -> bool:
     return True
 
 
+def _copy_primary_omc(ctx: ToolContext, path: str) -> None:
+    """Copy what the worktree lacks of the primary checkout's `.omc`.
+
+    omc copies `.omc` itself rather than asking each repo's wt config to: the
+    directory is omc's (and goes away in a future version), so repos should not
+    have to know about it. Everything else ignored (`.env`, …) is the repo's wt
+    config's job. Non-destructive: tracked or already-copied files win.
+    """
+    primary = primary_root(ctx)
+    if primary is None or Path(primary).resolve() == Path(path).resolve():
+        return
+    src = Path(primary) / ".omc"
+    dst = Path(path) / ".omc"
+    if not os.path.lexists(src):
+        return
+    if os.path.lexists(dst) and src.resolve() == dst.resolve():
+        print("· .omc shared with the primary checkout", file=sys.stderr)
+        return
+    copied = copy_missing(src, dst)
+    if copied:
+        print(f"✓ copied {copied} .omc file(s) from the primary checkout", file=sys.stderr)
+
+
 def create_worktree(ctx: ToolContext, branch: str, base: str | None = None) -> str:
     """Create or re-enter one worktree, removing only resources this attempt created."""
     argv, branch_existed = switch_command(ctx, branch, base)
@@ -138,13 +165,22 @@ def create_worktree(ctx: ToolContext, branch: str, base: str | None = None) -> s
             except json.JSONDecodeError:
                 data = None
             if isinstance(data, dict) and isinstance(data.get("path"), str) and data["path"]:
-                return data["path"]
-            detail = (result.stderr or "").strip()[-2000:]
-            suffix = f": {detail}" if detail else ""
-            error = OmcError(
-                f"wt switch for {branch} returned no valid path (exit 0){suffix}; "
-                "see wt config state logs"
-            )
+                path = data["path"]
+                try:
+                    _copy_primary_omc(ctx, path)
+                except OSError as exc:
+                    error = OmcError(
+                        f"could not copy .omc from the primary checkout into {path}: {exc}"
+                    )
+                else:
+                    return path
+            else:
+                detail = (result.stderr or "").strip()[-2000:]
+                suffix = f": {detail}" if detail else ""
+                error = OmcError(
+                    f"wt switch for {branch} returned no valid path (exit 0){suffix}; "
+                    "see wt config state logs"
+                )
         else:
             detail = (result.stderr or result.stdout or "").strip()[-2000:]
             error = OmcError(

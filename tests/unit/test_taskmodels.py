@@ -4,6 +4,7 @@ import stat
 
 import pytest
 
+from omc import taskmodels
 from omc.config.schema import Config, ProviderConfig
 from omc.errors import ConfigError
 from omc.taskmodels import (
@@ -15,6 +16,8 @@ from omc.taskmodels import (
     validate_selection,
 )
 from omc.toolctx import ToolContext
+
+from ._stubs import make_stub, stub_env
 
 
 def _ctx(tmp_path):
@@ -519,3 +522,285 @@ def test_internal_models_uses_only_global_config(tmp_path, capsys, monkeypatch, 
     assert payload["ok"] is True
     assert payload["provider"] == "claude"
     assert payload["tasks"]["review"] == {"model": "fable", "effort": ""}
+
+
+def test_codex_catalog_orders_visible_exact_families_and_keeps_supported_efforts(tmp_path):
+    _cache(
+        tmp_path,
+        [
+            _model("gpt-5-sol", "GPT Sol", 9, levels=("medium",)),
+            _model("gpt-6-sol", "GPT-6-SoL", 2, levels=("high", "xhigh")),
+            _model("gpt-hidden-sol", "GPT Sol", 0, visibility="hide"),
+            _model("gpt-solar", "GPT Solar", 0),
+            _model("gpt-6-astra", "GPT Astra", 1, levels=("medium", "high")),
+            _model("gpt-6-nova", "GPT Nova", 3, levels=("high",)),
+            _model("gpt-luna", "GPT Luna", 0),
+        ],
+    )
+    listed = taskmodels.catalog(_ctx(tmp_path), "codex")
+    assert listed == [
+        taskmodels.CatalogModel("gpt-solar", "", ("medium", "high")),
+        taskmodels.CatalogModel("gpt-6-astra", "astra", ("medium", "high")),
+        taskmodels.CatalogModel("gpt-6-sol", "sol", ("high", "xhigh")),
+        taskmodels.CatalogModel("gpt-6-nova", "", ("high",)),
+        taskmodels.CatalogModel("gpt-5-sol", "sol", ("medium",)),
+    ]
+    assert taskmodels.compatible("gpt-6-nova", "high", listed)
+    assert not taskmodels.compatible("nova", "", listed)
+    assert taskmodels.compatible("sol", "high", listed)
+    assert not taskmodels.compatible("sol", "medium", listed)
+    assert taskmodels.compatible("gpt-5-sol", "medium", listed)
+    assert not taskmodels.compatible("gpt-5.1-sol", "", listed)
+    assert not taskmodels.compatible("gpt-6-sol", "medium", listed)
+
+
+def test_codex_catalog_uses_codex_home_and_distinguishes_missing_from_malformed(tmp_path):
+    ctx = _ctx(tmp_path)
+    with pytest.raises(taskmodels.CatalogMissing, match="models_cache.json.*open codex once"):
+        taskmodels.catalog(ctx, "codex")
+    path = tmp_path / "codex" / "models_cache.json"
+    path.parent.mkdir()
+    path.write_text('{"models": ["not a model"]}')
+    with pytest.raises(ConfigError, match="models_cache.json") as exc:
+        taskmodels.catalog(ctx, "codex")
+    assert not isinstance(exc.value, taskmodels.CatalogMissing)
+    path.write_text(json.dumps({"models": [_model("gpt-6-sol", "GPT Sol", 1)]}))
+    assert taskmodels.catalog(ctx, "codex") == [
+        taskmodels.CatalogModel("gpt-6-sol", "sol", ("medium", "high"))
+    ]
+
+
+def _claude_catalog(models, fetched_at):
+    return {
+        "version": 2,
+        "fetchedAt": fetched_at,
+        "staleAt": "2026-10-16T00:00:00Z",
+        "catalog": {
+            "surface": "cc",
+            "config": {"id": "models", "models": models, "settings_vocabulary": {}},
+            "state": {},
+        },
+    }
+
+
+def _claude_model(model_id, short_name, section, efforts=("medium", "high")):
+    return {
+        "id": model_id,
+        "name": model_id,
+        "short_name": short_name,
+        "section": section,
+        "thinking": {"effort_options": [{"id": effort} for effort in efforts]},
+    }
+
+
+def _claude_catalog_ctx(tmp_path, *, org_id="org-current"):
+    config_dir = tmp_path / "claude-config"
+    catalog_dir = config_dir / "cache" / "model-catalog"
+    catalog_dir.mkdir(parents=True)
+    bindir = tmp_path / "bin"
+    calls = tmp_path / "auth-argv"
+    make_stub(
+        bindir,
+        "claude",
+        stdout=json.dumps({"loggedIn": True, "orgId": org_id, "configDirectory": str(config_dir)}),
+        argv_log=calls,
+    )
+    return ToolContext.from_env(stub_env(bindir)), catalog_dir, calls
+
+
+def test_claude_catalog_uses_current_org_newest_file_and_both_sections(tmp_path, monkeypatch):
+    ctx, directory, calls = _claude_catalog_ctx(tmp_path)
+    old = _claude_catalog(
+        [_claude_model("claude-opus-old", "Opus", "main")], "2026-10-01T00:00:00Z"
+    )
+    current = _claude_catalog(
+        [
+            _claude_model("claude-opus-5-5", "Opus", "main", ("high", "max")),
+            _claude_model("claude-sonnet-5-5", "SONNET", "overflow", ("medium",)),
+            _claude_model("claude-haiku-5", "Haiku", "main", ("low",)),
+            _claude_model("claude-opus-5", "Opus", "overflow", ("high",)),
+            _claude_model("claude-nova-5-5", "Nova", "overflow", ("high",)),
+        ],
+        "2026-10-15T00:00:00Z",
+    )
+    (directory / "org-current-old-cc.json").write_text(json.dumps(old))
+    (directory / "org-current-new-cc.json").write_text(json.dumps(current))
+    other = _claude_catalog(
+        [_claude_model("claude-opus-other", "Opus", "main")], "2026-11-01T00:00:00Z"
+    )
+    (directory / "org-other-new-cc.json").write_text(json.dumps(other))
+    visited = []
+    real_list_dir = ctx.list_dir
+    monkeypatch.setattr(ctx, "list_dir", lambda path: visited.append(path) or real_list_dir(path))
+
+    listed = taskmodels.catalog(ctx, "claude")
+    assert visited == [directory]
+    assert calls.read_text().strip() == "auth status"
+    assert listed == [
+        taskmodels.CatalogModel("claude-opus-5-5", "opus", ("high", "max")),
+        taskmodels.CatalogModel("claude-sonnet-5-5", "sonnet", ("medium",)),
+        taskmodels.CatalogModel("claude-opus-5", "opus", ("high",)),
+        taskmodels.CatalogModel("claude-nova-5-5", "", ("high",)),
+    ]
+    assert taskmodels.compatible("claude-nova-5-5", "high", listed)
+    assert not taskmodels.compatible("nova", "", listed)
+    assert taskmodels.compatible("claude-opus-5-5[1m]", "high", listed)
+    assert not taskmodels.compatible("claude-opus-5-5[2m]", "high", listed)
+
+
+def test_compatible_ignores_effort_only_when_catalog_efforts_are_unknown():
+    unknown = [taskmodels.CatalogModel("claude-opus-5-5", "opus", None)]
+    none_listed = [taskmodels.CatalogModel("claude-opus-5-5", "opus", ())]
+
+    assert taskmodels.compatible("opus", "max", unknown)
+    assert taskmodels.compatible("claude-opus-5-5", "max", unknown)
+    assert taskmodels.compatible("claude-opus-5-5[1m]", "high", unknown)
+    assert not taskmodels.compatible("sonnet", "max", unknown)
+    assert not taskmodels.compatible("claude-opus-4-1", "max", unknown)
+    # A source that lists effort data and offers none still rejects an effort.
+    assert not taskmodels.compatible("opus", "max", none_listed)
+    assert not taskmodels.compatible("claude-opus-5-5", "max", none_listed)
+    assert taskmodels.compatible("claude-opus-5-5", "", none_listed)
+
+
+def test_claude_catalog_missing_has_open_once_hint(tmp_path):
+    ctx, directory, _ = _claude_catalog_ctx(tmp_path)
+    with pytest.raises(taskmodels.CatalogMissing, match="open claude once") as exc:
+        taskmodels.catalog(ctx, "claude")
+    assert str(directory) in str(exc.value)
+
+
+def test_claude_catalog_chooses_latest_absolute_fetch_time(tmp_path):
+    ctx, directory, _ = _claude_catalog_ctx(tmp_path)
+    (directory / "org-current-offset-cc.json").write_text(
+        json.dumps(
+            _claude_catalog(
+                [_claude_model("claude-opus-older", "Opus", "main")],
+                "2026-10-15T12:00:00+02:00",
+            )
+        )
+    )
+    (directory / "org-current-utc-cc.json").write_text(
+        json.dumps(
+            _claude_catalog(
+                [_claude_model("claude-opus-newer", "Opus", "main")],
+                "2026-10-15T11:00:00Z",
+            )
+        )
+    )
+    assert [model.id for model in taskmodels.catalog(ctx, "claude")] == ["claude-opus-newer"]
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        "not a list",
+        [{"id": "claude-opus-5-5", "short_name": "Opus"}],
+        [
+            _claude_model("claude-opus-5-5", "Opus", "main", ("high",))
+            | {"thinking": {"effort_options": ["high"]}}
+        ],
+    ],
+)
+def test_claude_catalog_malformed_shape_names_its_file(tmp_path, models):
+    ctx, directory, _ = _claude_catalog_ctx(tmp_path)
+    path = directory / "org-current-hash-cc.json"
+    path.write_text(json.dumps(_claude_catalog(models, "2026-10-15T00:00:00Z")))
+    with pytest.raises(ConfigError, match="org-current-hash-cc.json") as exc:
+        taskmodels.catalog(ctx, "claude")
+    assert not isinstance(exc.value, taskmodels.CatalogMissing)
+
+
+def test_claude_api_key_auth_uses_live_models_when_org_and_cache_are_absent(tmp_path):
+    """API-key auth omits orgId, and Claude Code 2.1.286 writes no CLI catalog."""
+    bindir = tmp_path / "bin"
+    make_stub(
+        bindir,
+        "claude",
+        stdout=json.dumps(
+            {
+                "loggedIn": True,
+                "authMethod": "api_key",
+                "apiKeySource": "ANTHROPIC_API_KEY",
+                "configDirectory": str(tmp_path / "claude-config"),
+            }
+        ),
+    )
+    ctx = ToolContext.from_env(stub_env(bindir, ANTHROPIC_API_KEY="private-key"))
+    seen = []
+
+    def fake_http_get(url, *, headers=None, timeout=30.0):
+        seen.append((url, dict(headers or {})))
+        return 200, json.dumps(
+            {
+                "data": [
+                    {"id": "claude-opus-5-5", "created_at": "2026-05-01T00:00:00Z"},
+                    {"id": "claude-haiku-5", "created_at": "2026-06-01T00:00:00Z"},
+                ]
+            }
+        )
+
+    ctx.http_get = fake_http_get
+    listed = taskmodels.catalog(ctx, "claude")
+
+    assert [model.id for model in listed] == ["claude-opus-5-5"]
+    # The models endpoint has no effort data: unknown, not "none supported".
+    assert listed[0].efforts is None
+    assert taskmodels.compatible("claude-opus-5-5", "high", listed)
+    assert taskmodels.compatible("opus", "max", listed)
+    assert not taskmodels.compatible("sonnet", "high", listed)
+    assert not taskmodels.compatible("claude-opus-4-1", "high", listed)
+    assert seen == [
+        (
+            "https://api.anthropic.com/v1/models?limit=1000",
+            {"x-api-key": "private-key", "anthropic-version": "2023-06-01"},
+        )
+    ]
+
+
+def test_api_catalog_reuses_http_probe_filters_haiku_and_orders_newest(tmp_path):
+    ctx = _ctx(tmp_path)
+    seen = []
+
+    def fake_http_get(url, *, headers=None, timeout=30.0):
+        seen.append((url, dict(headers or {})))
+        return 200, json.dumps(
+            {
+                "data": [
+                    {"id": "claude-sonnet-5", "created_at": "2026-01-01T00:00:00Z"},
+                    {"id": "claude-opus-5-5", "created_at": "2026-05-01T00:00:00Z"},
+                    {"id": "claude-sonnet-5-5", "created_at": "2026-06-01T00:00:00Z"},
+                    {"id": "claude-haiku-5", "created_at": "2026-07-01T00:00:00Z"},
+                    {"id": "foreign-model", "created_at": "2026-08-01T00:00:00Z"},
+                    {"id": "claude-nova-5-5", "created_at": "2026-09-01T00:00:00Z"},
+                ]
+            }
+        )
+
+    ctx.http_get = fake_http_get
+    listed = taskmodels.catalog(ctx, "claude", docs_api_key="private-key")
+    assert listed == [
+        taskmodels.CatalogModel("claude-nova-5-5", "", None),
+        taskmodels.CatalogModel("foreign-model", "", None),
+        taskmodels.CatalogModel("claude-sonnet-5-5", "sonnet", None),
+        taskmodels.CatalogModel("claude-opus-5-5", "opus", None),
+        taskmodels.CatalogModel("claude-sonnet-5", "sonnet", None),
+    ]
+    assert taskmodels.compatible("claude-nova-5-5", "", listed)
+    assert not taskmodels.compatible("nova", "", listed)
+    assert seen == [
+        (
+            "https://api.anthropic.com/v1/models?limit=1000",
+            {"x-api-key": "private-key", "anthropic-version": "2023-06-01"},
+        )
+    ]
+
+
+def test_api_catalog_failure_keeps_key_redacted(tmp_path):
+    ctx = _ctx(tmp_path)
+    key = "sk-ant-api03-SECRETKEYabcdefghijklmnop1234"
+    ctx.http_get = lambda url, *, headers=None, timeout=30.0: (0, f"transport echoed {key}")
+    with pytest.raises(ConfigError, match="could not reach api.anthropic.com") as exc:
+        taskmodels.catalog(ctx, "claude", docs_api_key=key)
+    assert key not in str(exc.value)
+    assert "******" in str(exc.value)

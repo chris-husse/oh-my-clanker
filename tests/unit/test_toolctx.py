@@ -34,6 +34,17 @@ def test_from_env_overrides(tmp_path):
     assert ctx.child_env()["UV_TOOL_DIR"] == "/x/uvt"
 
 
+def test_list_dir_returns_paths_and_missing_directory_raises(tmp_path):
+    ctx = _ctx(tmp_path)
+    directory = tmp_path / "catalog"
+    directory.mkdir()
+    (directory / "one.json").write_text("{}")
+    (directory / "two.json").write_text("{}")
+    assert set(ctx.list_dir(directory)) == {directory / "one.json", directory / "two.json"}
+    with pytest.raises(FileNotFoundError):
+        ctx.list_dir(tmp_path / "absent")
+
+
 def test_run_captures_and_detaches_stdin(tmp_path):
     ctx = ToolContext.from_env({"HOME": str(tmp_path)})
     cp = ctx.run([sys.executable, "-c", "print('hi')"])

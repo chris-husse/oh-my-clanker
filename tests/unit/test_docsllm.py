@@ -331,3 +331,36 @@ def test_api_model_probe_refuses_an_unsafe_id_without_a_request(tmp_path):
         "invalid model id 'claude-x?y=1'",
     )
     assert seen == []
+
+
+def test_auth_status_returns_current_org_and_config_directory_without_changing_probe(tmp_path):
+    config_dir = tmp_path / "claude-settings"
+    status = {
+        "loggedIn": True,
+        "orgId": "org-current",
+        "configDirectory": str(config_dir),
+        "authMethod": "claude.ai",
+    }
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "claude", stdout=json.dumps(status))
+    ctx = ToolContext.from_env(stub_env(bindir))
+    assert docsllm.auth_status(ctx, "claude") == status
+    assert docsllm.cli_connection_probe(ctx, "claude") == (True, "claude is logged in")
+
+
+@pytest.mark.parametrize(
+    ("stdout", "rc", "message"),
+    [
+        ('{"loggedIn": false}', 0, "claude is not logged in — run claude auth login"),
+        ("broken", 0, "claude auth status failed (exit 0): broken"),
+        ('{"loggedIn": true}', 2, 'claude auth status failed (exit 2): {"loggedIn": true}'),
+    ],
+)
+def test_auth_status_raises_the_existing_probe_failure_message(tmp_path, stdout, rc, message):
+    bindir = tmp_path / "bin"
+    make_stub(bindir, "claude", stdout=stdout, rc=rc)
+    ctx = ToolContext.from_env(stub_env(bindir))
+    with pytest.raises(ProbeFailed) as exc:
+        docsllm.auth_status(ctx, "claude")
+    assert str(exc.value) == message
+    assert docsllm.cli_connection_probe(ctx, "claude") == (False, message)

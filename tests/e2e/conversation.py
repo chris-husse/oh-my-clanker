@@ -146,6 +146,7 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
     background_agents = {}
     started_background_tasks = set()
     foreground_tasks = {}
+    completed_foreground_tasks = set()
     completed_background_tasks = set()
     notification_results = 0
     result_uuids = set()
@@ -171,9 +172,16 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
                     isinstance(tool_id, str)
                     and isinstance(task_id, str)
                     and isinstance(session_id, str)
-                    and agent_tools.get(tool_id) == session_id
+                    and (
+                        agent_tools.get(tool_id) == session_id
+                        or (session_id, task_id) in completed_foreground_tasks
+                    )
                 ):
+                    # A nested Agent can be absent from the top-level assistant
+                    # stream. Claude still emits its background task with the
+                    # same task id after the known foreground Agent completes.
                     started_background_tasks.add((session_id, tool_id, task_id))
+                    completed_foreground_tasks.discard((session_id, task_id))
             elif record.get("subtype") == "task_started" and record.get("is_backgrounded") is False:
                 tool_id = record.get("tool_use_id")
                 task_id = record.get("task_id")
@@ -202,6 +210,10 @@ def parse_claude_stream(output: str, skill_paths: dict[str, str] | None = None) 
                 tool_id = record.get("tool_use_id")
                 task_id = record.get("task_id")
                 session_id = record.get("session_id")
+                key = (session_id, task_id)
+                if foreground_tasks.get(key) == tool_id:
+                    completed_foreground_tasks.add(key)
+                    del foreground_tasks[key]
                 if (
                     isinstance(tool_id, str)
                     and isinstance(task_id, str)

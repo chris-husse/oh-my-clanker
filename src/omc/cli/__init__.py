@@ -8,10 +8,15 @@ from .. import __version__
 from ..config import resolve, store
 from ..errors import OmcError
 from ..providers.registry import provider_names
+from ..reconcile import DryRunStale, reconcile
 from ..start import run_start
 from ..toolctx import ToolContext
 
 _CONFIGURE_HINT = "run `omc configure` first"
+
+
+def _say(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
 
 
 def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
@@ -33,8 +38,8 @@ def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
 def _with_provider(cfg, override: str | None):
     """The effective config with llm.default swapped for this process. A
     dataclasses.replace copy: it SHARES llm.providers and secrets with the
-    original (nothing on the design/implement path mutates them) and is never
-    persisted - Config is a runtime composite that no save path accepts."""
+    original. Reconciliation may update selected provider leaves in both
+    copies, but the runtime Config is never persisted as a whole."""
     if not override:
         return cfg
     return replace(cfg, llm=replace(cfg.llm, default=override))
@@ -284,6 +289,10 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
         if cfg is None:
             return 2
         cfg = _with_provider(cfg, args.provider_override)
+        try:
+            cfg = reconcile(ctx, cfg, {"session"}, say=_say, dry_run=args.dry_run)
+        except DryRunStale:
+            return 0
         return run_start(
             ctx,
             cfg,
@@ -296,11 +305,16 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
         cfg = _load_cfg_or_bail(ctx)
         if cfg is None:
             return 2
+        cfg = _with_provider(cfg, args.provider_override)
+        try:
+            cfg = reconcile(ctx, cfg, {"session"}, say=_say, dry_run=args.dry_run)
+        except DryRunStale:
+            return 0
         from ..implement import run_implement  # lazy, like every newer command
 
         return run_implement(
             ctx,
-            _with_provider(cfg, args.provider_override),
+            cfg,
             dry_run=args.dry_run,
             headless=args.headless,
         )
@@ -308,11 +322,16 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
         cfg = _load_cfg_or_bail(ctx)
         if cfg is None:
             return 2
+        cfg = _with_provider(cfg, args.provider_override)
+        try:
+            cfg = reconcile(ctx, cfg, {"session"}, say=_say, dry_run=args.dry_run)
+        except DryRunStale:
+            return 0
         from ..review import run_review
 
         return run_review(
             ctx,
-            _with_provider(cfg, args.provider_override),
+            cfg,
             dry_run=args.dry_run,
             headless=args.headless,
         )
@@ -338,6 +357,7 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             cfg = _load_cfg_or_bail(ctx)
             if cfg is None:
                 return 2
+            reconcile(ctx, cfg, {"docs"}, say=_say, dry_run=False)
             from ..depwatch import run_dependency_watch
 
             return run_dependency_watch(ctx, interval=args.interval, once=args.once)

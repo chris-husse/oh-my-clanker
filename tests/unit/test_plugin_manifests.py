@@ -532,6 +532,9 @@ def test_check_wt_config_skill_contract():
     text = (ROOT / "skills" / "check-wt-config" / "SKILL.md").read_text()
     for needle in ("omc internal wt-template", ".config/wt.toml", "never edit"):
         assert needle in text, f"check-wt-config skill missing {needle!r}"
+    # omc copies the primary's `.omc` into every cut itself; the wt config owns the rest.
+    assert "omc itself copies the primary checkout's `.omc/`" in text
+    assert "excluding `.omc/docs/`" not in text
 
 
 def test_finish_starts_with_rebase_main():

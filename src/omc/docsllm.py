@@ -162,28 +162,42 @@ def api_model_probe(ctx: ToolContext, provider: str, key: str, model_id: str) ->
     return False, f"{_host(base)} answered HTTP {status}: {_error_message(body, key)}"
 
 
-def cli_connection_probe(ctx: ToolContext, provider: str) -> tuple[bool, str]:
-    """`claude auth status` → JSON with loggedIn. Lowercase "not logged in" on
-    purpose: the E2E harness fails any output containing `Not logged in`."""
+def _auth_status_result(ctx: ToolContext, provider: str) -> tuple[bool, str, dict[str, object]]:
+    """Parse the CLI's login JSON once for the connection probe and catalog."""
     argv = get_provider(provider).auth_status_argv()
     if not argv:
-        return True, f"no login check for {provider}"  # codex: the model probe is the check
+        return True, f"no login check for {provider}", {}  # codex: model probe checks login
     try:
         cp = ctx.run_bounded(argv, timeout=AUTH_STATUS_TIMEOUT)
     except FileNotFoundError:
-        return False, f"{provider} CLI not found on PATH"
+        return False, f"{provider} CLI not found on PATH", {}
     except OSError as exc:  # run_bounded's TimeoutError is an OSError subclass
-        return False, f"{provider} auth status failed: {exc}"
+        return False, f"{provider} auth status failed: {exc}", {}
     try:
         status = json.loads(cp.stdout or "")
     except ValueError:
         status = None
     if cp.returncode != 0 or not isinstance(status, dict):
         tail = (cp.stderr or cp.stdout or "").strip()
-        return False, f"{provider} auth status failed (exit {cp.returncode}): {tail[:200]}"
+        return False, f"{provider} auth status failed (exit {cp.returncode}): {tail[:200]}", {}
     if status.get("loggedIn") is not True:
-        return False, f"{provider} is not logged in — run {provider} auth login"
-    return True, f"{provider} is logged in"
+        return False, f"{provider} is not logged in — run {provider} auth login", {}
+    return True, f"{provider} is logged in", status
+
+
+def auth_status(ctx: ToolContext, provider: str) -> dict[str, object]:
+    """Return the CLI's parsed login state, raising its existing probe detail."""
+    ok, detail, status = _auth_status_result(ctx, provider)
+    if not ok:
+        raise ProbeFailed(detail)
+    return status
+
+
+def cli_connection_probe(ctx: ToolContext, provider: str) -> tuple[bool, str]:
+    """`claude auth status` → JSON with loggedIn. Lowercase "not logged in" on
+    purpose: the E2E harness fails any output containing `Not logged in`."""
+    ok, detail, _ = _auth_status_result(ctx, provider)
+    return ok, detail
 
 
 def cli_model_probe(
