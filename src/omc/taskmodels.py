@@ -10,11 +10,12 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from . import docsllm
 from .config.schema import Config, GlobalConfig
-from .config.store import validate_task_model
+from .config.store import _BANNED_FAMILIES, validate_task_model
 from .errors import ConfigError
 from .providers.registry import get_provider
 from .toolctx import ToolContext
@@ -27,6 +28,18 @@ EXACT_ID_PROMPT = "Reply with only your exact model id"
 class ModelChoice:
     model_arg: str
     effort: str
+
+
+@dataclass(frozen=True)
+class CatalogModel:
+    id: str
+    family: str
+    # None: the source lists no effort data (unknown), unlike () (none offered).
+    efforts: tuple[str, ...] | None
+
+
+class CatalogMissing(ConfigError):
+    """A provider CLI has not written its model cache yet; one refresh may help."""
 
 
 @dataclass(frozen=True)
@@ -87,6 +100,186 @@ def _matches_family(model: _ListedModel, family: str) -> bool:
     return bool(
         re.search(rf"(?<![A-Za-z0-9]){re.escape(family)}(?![A-Za-z0-9])", model.display_name, re.I)
     )
+
+
+def _cheap(provider: str, model_id: str) -> bool:
+    return any(part.lower() in _BANNED_FAMILIES[provider] for part in re.split(r"[-_.]", model_id))
+
+
+def _codex_catalog(ctx: ToolContext) -> list[CatalogModel]:
+    path = get_provider("codex").model_list_path(ctx.env)
+    models = _model_list(ctx, missing_ok=True)
+    if models is None:
+        raise CatalogMissing(
+            f"Codex model list missing at {path}; open codex once to fetch its model list"
+        )
+    families = get_provider("codex").families()
+    result: list[CatalogModel] = []
+    # Codex's visible cache priority is the picker's preference order.
+    for model in sorted(models, key=lambda item: item.priority):
+        if model.visibility != "list" or _cheap("codex", model.slug):
+            continue
+        family = next((name for name in families if _matches_family(model, name)), "")
+        result.append(CatalogModel(model.slug, family, model.efforts))
+    return result
+
+
+def _claude_catalog(ctx: ToolContext) -> list[CatalogModel]:
+    status = docsllm.auth_status(ctx, "claude")
+    org_id = status.get("orgId")
+    config_directory = status.get("configDirectory")
+    if status.get("authMethod") == "api_key" and not org_id:
+        # Claude Code 2.1.286 reports no orgId and writes no model-catalog
+        # cache for ANTHROPIC_API_KEY auth, even after a successful turn.
+        # Query the same key's live model list instead of guessing an org.
+        key = ctx.env.get("ANTHROPIC_API_KEY", "")
+        if not key:
+            raise ConfigError(
+                "claude API-key auth has no local model catalog; "
+                "set ANTHROPIC_API_KEY for model reconciliation"
+            )
+        return _api_catalog(ctx, "claude", key)
+    # Claude Code 2.1.300 account auth reports the current org and resolved
+    # configDirectory. Its catalog files are <orgId>-*-cc.json under
+    # cache/model-catalog; other organizations' files can coexist there.
+    if (
+        not isinstance(org_id, str)
+        or not org_id
+        or not isinstance(config_directory, str)
+        or not config_directory
+    ):
+        raise ConfigError("claude auth status missing orgId or configDirectory")
+    directory = Path(config_directory) / "cache" / "model-catalog"
+    try:
+        entries = ctx.list_dir(directory)
+    except FileNotFoundError as exc:
+        raise CatalogMissing(
+            f"Claude model catalog missing under {directory}; open claude once to fetch it"
+        ) from exc
+    except OSError as exc:
+        raise ConfigError(f"cannot list Claude model catalog {directory}: {exc}") from exc
+    prefix = f"{org_id}-"
+    paths = [
+        path
+        for path in entries
+        if path.name.startswith(prefix)
+        and path.name.endswith("-cc.json")
+        and len(path.name) > len(prefix) + len("-cc.json")
+    ]
+    if not paths:
+        raise CatalogMissing(
+            f"Claude model catalog missing under {directory}; open claude once to fetch it"
+        )
+    dated: list[tuple[datetime, Path, dict[str, object]]] = []
+    for path in paths:
+        try:
+            data = json.loads(ctx.read_text(path))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ConfigError(f"invalid Claude model catalog {path}: {exc}") from exc
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("fetchedAt"), str)
+            or not data["fetchedAt"]
+        ):
+            raise ConfigError(f"invalid Claude model catalog {path}: expected fetchedAt")
+        try:
+            fetched_at = datetime.fromisoformat(data["fetchedAt"].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ConfigError(f"invalid Claude model catalog {path}: invalid fetchedAt") from exc
+        if fetched_at.tzinfo is None:
+            raise ConfigError(f"invalid Claude model catalog {path}: fetchedAt has no timezone")
+        dated.append((fetched_at, path, data))
+    _, path, data = max(dated, key=lambda entry: entry[0])
+    try:
+        models = data["catalog"]["config"]["models"]
+        if not isinstance(models, list):
+            raise ValueError("expected a models list")
+        result: list[CatalogModel] = []
+        families = get_provider("claude").families()
+        # Claude's catalog offers both `main` and `overflow` models. Preserve
+        # its order within each family instead of guessing from the ID.
+        for entry in models:
+            if not isinstance(entry, dict):
+                raise ValueError("expected a model object")
+            model_id = entry.get("id")
+            short_name = entry.get("short_name")
+            thinking = entry.get("thinking")
+            if (
+                not isinstance(model_id, str)
+                or not model_id
+                or not isinstance(short_name, str)
+                or not short_name
+                or not isinstance(thinking, dict)
+                or not isinstance(thinking.get("effort_options"), list)
+            ):
+                raise ValueError("invalid model fields")
+            efforts: list[str] = []
+            for option in thinking["effort_options"]:
+                if (
+                    not isinstance(option, dict)
+                    or not isinstance(option.get("id"), str)
+                    or not option["id"]
+                ):
+                    raise ValueError("invalid thinking.effort_options")
+                efforts.append(option["id"])
+            if _cheap("claude", model_id):
+                continue
+            family = short_name.lower()
+            result.append(
+                CatalogModel(model_id, family if family in families else "", tuple(efforts))
+            )
+        return result
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ConfigError(f"invalid Claude model catalog {path}: {exc}") from exc
+
+
+def _api_catalog(ctx: ToolContext, provider: str, key: str) -> list[CatalogModel]:
+    ok, detail, models = docsllm.api_connection_probe(ctx, provider, key)
+    if not ok:
+        raise ConfigError(detail)  # api_connection_probe already redacts the key
+    adapter = get_provider(provider)
+    prefixes = [(family, adapter.api_model_family(family)) for family in adapter.families()]
+    result: list[CatalogModel] = []
+    for model in sorted(models, key=lambda item: item.created_at, reverse=True):
+        if _cheap(provider, model.id):
+            continue
+        family = next(
+            (name for name, prefix in prefixes if prefix and model.id.startswith(prefix)), ""
+        )
+        # The models endpoint has IDs but no model-specific effort options:
+        # support is unknown, so a configured effort is not evidence of staleness.
+        result.append(CatalogModel(model.id, family, None))
+    return result
+
+
+def catalog(ctx: ToolContext, provider: str, *, docs_api_key: str = "") -> list[CatalogModel]:
+    """Return the current non-cheap models offered by this provider source."""
+    if docs_api_key:
+        return _api_catalog(ctx, provider, docs_api_key)
+    if provider == "codex":
+        return _codex_catalog(ctx)
+    if provider == "claude":
+        return _claude_catalog(ctx)
+    raise ConfigError(f"unknown model catalog provider: {provider}")
+
+
+def compatible(value: str, effort: str, models: list[CatalogModel]) -> bool:
+    """Check a family or full ID against the listed model and its applied effort.
+
+    A model whose efforts are unknown is judged on family / exact ID alone.
+    """
+    token = value.partition(":")[0]
+    if not token:
+        return False
+    model = next((item for item in models if item.family == token), None)
+    if model is None:
+        # Claude's [1m] long-context selector modifies a listed ID at launch;
+        # the catalog itself contains only the base model ID.
+        model_id = token.removesuffix("[1m]")
+        model = next((item for item in models if item.id == model_id), None)
+    if model is None:
+        return False
+    return not effort or model.efforts is None or effort in model.efforts
 
 
 def _family_model(models: list[_ListedModel], family: str, path: Path) -> _ListedModel:

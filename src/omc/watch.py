@@ -39,6 +39,7 @@ from .gitnexus import (
 )
 from .probe import require_tools
 from .providers.registry import get_provider
+from .reconcile import reconcile
 from .skills_source import skill_prompt
 from .taskmodels import orchestrator
 from .toolctx import ToolContext
@@ -443,10 +444,26 @@ def run_watch(
     last: str | None = None
     reset_pending = reset_gitnexus
     reset_note: str | None = None
+    model_groups: set[str] = set()
+    if enable_documentation:
+        model_groups.add("docs")
+    if auto_build:
+        model_groups.add("orchestrator")
+    first_tick = True
     try:
         while True:
             # Busy lock held for the WHOLE busy portion (tick + hooks): free ⇔ idle.
             with acquire_busy_narrated(busy, _say) if busy is not None else nullcontext():
+                if model_groups:
+                    # The first tick is the command's entry: fail loud. Later
+                    # ticks warn-and-skip, keeping the previous cfg.
+                    try:
+                        cfg = reconcile(ctx, cfg, model_groups, say=_say, dry_run=False)
+                    except OmcError as exc:
+                        if first_tick:
+                            raise
+                        _say(f"✗ model reconciliation failed: {exc}")
+                first_tick = False
                 reset_progress = ResetProgress()
                 last = _tick(
                     ctx,

@@ -976,6 +976,78 @@ def test_claude_stream_accepts_foreground_agent_moved_to_background():
     assert parsed["provider_session_id"] == "session-1"
 
 
+def _claude_nested_background_result_records():
+    """Observed golden design turn: a foreground Agent finishes before a nested
+    background Agent starts with the same task id but an unseen tool id."""
+    records = _claude_background_result_records()
+    records[1]["message"]["content"][0]["input"] = {"run_in_background": False}
+    records[2]["is_backgrounded"] = False
+    records[4:4] = [
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "session_id": "session-1",
+            "task_id": "agent-task",
+            "tool_use_id": "nested-tool",
+            "is_backgrounded": True,
+        },
+        {
+            "type": "system",
+            "subtype": "task_updated",
+            "session_id": "session-1",
+            "task_id": "agent-task",
+            "patch": {"status": "running"},
+        },
+        {
+            "type": "system",
+            "subtype": "task_notification",
+            "session_id": "session-1",
+            "task_id": "agent-task",
+            "tool_use_id": "nested-tool",
+            "status": "completed",
+        },
+    ]
+    return records
+
+
+def test_claude_stream_accepts_nested_background_task_after_foreground_agent_completes():
+    from tests.e2e.conversation import parse_claude_stream
+
+    records = _claude_nested_background_result_records()
+    parsed = parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
+    assert parsed["text"] == "The background task finished"
+    assert parsed["provider_session_id"] == "session-1"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "foreground-unfinished",
+        "wrong-foreground-tool",
+        "wrong-nested-task",
+        "nested-not-backgrounded",
+        "wrong-nested-notification-tool",
+    ],
+)
+def test_claude_stream_requires_correlated_nested_background_task(change):
+    from tests.e2e.conversation import parse_claude_stream
+
+    records = _claude_nested_background_result_records()
+    if change == "foreground-unfinished":
+        del records[3]
+    elif change == "wrong-foreground-tool":
+        records[3]["tool_use_id"] = "unrelated-tool"
+    elif change == "wrong-nested-task":
+        records[4]["task_id"] = "unrelated-task"
+        records[6]["task_id"] = "unrelated-task"
+    elif change == "nested-not-backgrounded":
+        records[4]["is_backgrounded"] = False
+    else:
+        records[6]["tool_use_id"] = "unrelated-tool"
+    with pytest.raises(ValueError, match="notification"):
+        parse_claude_stream("\n".join(json.dumps(row) for row in records) + "\n")
+
+
 @pytest.mark.parametrize(
     "change", ["no-move", "stays-foreground", "wrong-task", "wrong-session", "unstarted-task"]
 )

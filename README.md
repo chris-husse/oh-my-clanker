@@ -81,6 +81,8 @@ Provider defaults are:
 
 Implementation plan tasks carry a `Complexity: simple | medium | high` label; a missing label means medium.
 
+Configured models are checked against the provider's current model list before `omc design`, `omc implement` and `omc review` launch (Orchestrator and task models), before `omc dependency watch` (Documentation model) and on watch ticks that use them; a blank choice is checked as the provider default. When everything is listed, the check costs no model turn and writes nothing. A model still missing after one list refresh, such as a retired full id or a dropped family, is remapped: the provider CLI's default model picks a listed full model id, omc saves it to `~/.omc/config.yaml` and prints one line per remap. A failed remap stops the command and saves nothing.
+
 For scripts, use `--defaults` or repeat `--set`:
 
 ```bash
@@ -102,7 +104,7 @@ Legacy root symlinks and ignore entries remain after upgrading. Delete old root 
 
 ## Keep knowledge fresh with `omc watch`
 
-New worktrees take code from the base branch and copy useful gitignored files from the primary, including `.env`, `.venv`, `.omc/docs/` and other local caches. This repo's Worktrunk config excludes `.gitnexus/` and `target/`; each worktree builds its own target cache.
+New worktrees take code from the base branch. When `omc design` creates or re-enters a worktree, it copies the primary checkout's `.omc/`, docs included, adding only missing entries: tracked or already-copied files win, symlinks are recreated rather than followed, and a `.omc/` shared with the primary is left alone. The repo's Worktrunk config copies its other gitignored files, such as `.env`, `.venv` and local caches. This repo's config excludes `.gitnexus/` and `target/`; each worktree builds its own target cache.
 
 Stale primary knowledge gives new worktrees stale docs and makes `/omc:explain` answer from an old primary graph.
 
@@ -120,6 +122,8 @@ Both additions cost LLM work and are opt-in. A normal tick:
 4. Refreshes the GitNexus index directly, with no LLM cost; up-to-date ticks also heal stale knowledge.
 5. Optionally regenerates documentation, runs the project's post-watch hook on action ticks, then optionally runs its build stage.
 
+With `--enable-documentation` or `--auto-build`, each tick first checks the Documentation or Orchestrator model and remaps one the provider no longer lists, as described under [Configure](#configure).
+
 | Option | Effect |
 |---|---|
 | `--interval` | Seconds between ticks; default **30**. |
@@ -134,7 +138,7 @@ Watch is foreground-only: no daemon, one instance per primary, Ctrl-C to stop. A
 
 A conflicting rebase is aborted to restore the checkout. If restoring autostashed edits conflicts, watch warns, leaves conflict markers and keeps the edits safe in `git stash`; resolve them before further syncs. A repair that leaves knowledge stale is not retried while its stale reasons stay identical, so the terminal stays quiet until something changes.
 
-`omc design` waits for an in-flight tick, including its hook and build, before copying a worktree (`--no-mutex` skips the wait). If knowledge is stale, it prints the reason and exact watch command to run in the primary, and carries an `OMC_KNOWLEDGE` alert into the session; design itself does not rebuild knowledge.
+`omc design` waits for an in-flight tick, including its hook and build, before creating a worktree (`--no-mutex` skips the wait). If knowledge is stale, it prints the reason and exact watch command to run in the primary, and carries an `OMC_KNOWLEDGE` alert into the session; design itself does not rebuild knowledge.
 
 A project can commit `.omc/hooks/post-watch.sh`. Watch runs it with bash from the repo root after syncs or forced `--once` refreshes, setting `OMC_WATCH_OUTCOME` to `synced` or `refreshed`; pure knowledge healing fires no hook. Failed or hung hooks (600 s limit) warn and link their captured log, then the loop continues.
 
@@ -183,7 +187,7 @@ Type `/omc:audit` in the implementation session, or run `omc review --claude` or
 | Flag | Applies to / effect |
 |---|---|
 | `--claude` / `--codex` | All three commands: override the provider for this run; saved defaults stay unchanged. |
-| `--dry-run` | Print the plan without creating a worktree or launching its session. Design still probes, calls the slug model and ensures guidance. |
+| `--dry-run` | Print the plan without creating a worktree or launching its session. Design still probes, calls the slug model and ensures guidance. A stale configured model is reported as a would-be remap, and the run stops there. |
 | `--headless` | Run the seeded session in the provider's print mode. |
 | `--no-mutex` | Design only: skip waiting for an in-flight watch tick. |
 
@@ -238,7 +242,7 @@ flowchart LR
     Tools --> Nexus["GitNexus"]
 ```
 
-Watch maintains `.gitnexus/` and `.omc/docs/` in the primary checkout. This repo's Worktrunk `copy-ignored` step carries `.env`, `.venv`, `.omc/docs/` and other ignored local files into new worktrees; it excludes `.gitnexus/` and `target/`. `/omc:rebase-main` re-mirrors only `.omc/docs/`.
+Watch maintains `.gitnexus/` and `.omc/docs/` in the primary checkout. omc's worktree cut copies the primary `.omc/` into new worktrees, adding only missing files, so docs arrive without the graph. The repo's Worktrunk config carries other ignored files such as `.env` and `.venv`; this repo's excludes `.gitnexus/` and `target/`. `/omc:rebase-main` re-mirrors only `.omc/docs/`.
 
 **Explain queries the primary graph** through `omc internal gitnexus`, scoped to the configured base branch, and reads primary docs. Any old `.gitnexus/` content already in a worktree is left untouched and is not used for those queries.
 
@@ -248,7 +252,7 @@ Current GitNexus releases normally route linked-worktree checkouts to `$GITNEXUS
 flowchart LR
     Watch["omc watch"] --> Graph["Primary .gitnexus/ graph"]
     Watch --> Docs["Primary .omc/docs/"]
-    Docs --> Copy["worktrunk copy-ignored"]
+    Docs --> Copy["omc worktree cut copies missing .omc/ files"]
     Copy --> WorktreeDocs["Worktree .omc/docs/"]
     Docs --> Rebase["/omc:rebase-main"]
     Rebase --> WorktreeDocs
@@ -327,7 +331,7 @@ omc is developed with omc: keep watch running in the primary checkout and start 
 | `.omc/skills/verify` | Docker golden lifecycle, then variations and smoke in parallel; 300 s per test. Codex gate when Codex code changed; tokens from gitignored `.env`, never public runners. Docker is required. |
 | `.omc/skills/review` | Branch diff checked against this repo's rules, plus omc's grug lens. |
 | `.omc/skills/explain-context` | Where truth lives and the order sources take precedence. |
-| `.gitignore` | The primary `.gitnexus/` graph and generated `.omc/docs/` stay uncommitted; Worktrunk copies docs into worktrees. |
+| `.gitignore` | The primary `.gitnexus/` graph and generated `.omc/docs/` stay uncommitted; omc's worktree cut copies docs into worktrees. |
 | `docs/superpowers/specs/`, `docs/superpowers/plans/` | Dated design records and implementation plans. |
 
 This repo has no post-watch hook. [PLUGIN-NOTES.md](docker/PLUGIN-NOTES.md) holds harness/auth details and [lifecycle E2E evidence](docker/PLUGIN-NOTES.md#conversational-lifecycle-regression-evidence-2026-09-24).

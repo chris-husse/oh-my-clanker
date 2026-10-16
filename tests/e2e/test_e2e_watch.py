@@ -1,16 +1,36 @@
-"""Live `omc watch --once`: real git sync + real GitNexus reindex. Most tests
-need no tokens; the documentation test requires a Claude token
-(require_token)."""
+"""Live `omc watch --once`: real git sync and GitNexus reindex. Documentation
+and the auto-build shim test declare their real Claude token prerequisites."""
 
 from __future__ import annotations
 
+import json
 import re
+import shlex
 
 import pytest
 
 from .harness import configure_omc, make_work_repo, require_token, run_in
 
 pytestmark = pytest.mark.e2e
+
+
+def _claude_build_shim(real_cli: str) -> str:
+    """Stub only the streamed build turn; leave auth and model checks real."""
+    return (
+        "#!/bin/sh\n"
+        "previous=\n"
+        "for arg do\n"
+        '  if [ "$previous" = --output-format ] && [ "$arg" = stream-json ] && '
+        '[ "$1" = -p ]; then\n'
+        "    echo 'OMC_STAGE "
+        '{"stage": "build", "configured": true, "passed": true, "summary": "ok"}'
+        "'\n"
+        "    exit 0\n"
+        "  fi\n"
+        "  previous=$arg\n"
+        "done\n"
+        f'exec {shlex.quote(real_cli)} "$@"\n'
+    )
 
 
 def _push_remote_commit(container, repo):
@@ -124,9 +144,14 @@ def test_watch_auto_build_skips_when_unconfigured(container):
 
 
 def test_watch_auto_build_runs_stage_via_shim_provider(container):
+    require_token("claude")
     configure_omc(container, "claude")
     repo = make_work_repo(container)
-    # seed a project build stage + a claude shim that answers with a passing verdict.
+    rc, real_claude = run_in(container, ["bash", "-c", "command -v claude"])
+    assert rc == 0 and real_claude.strip().startswith("/"), real_claude
+    # Seed a project build stage + a shim for that one streamed build turn.
+    # Other Claude commands must still reach the real CLI: watch now checks
+    # auth and the current model catalog before it can run the build stage.
     # NOTE: a printf-based one-liner with escaped embedded quotes (as originally
     # sketched) loses its backslashes when the container's shell writes the file,
     # producing an invalid (unquoted-key) OMC_STAGE JSON line. A quoted heredoc
@@ -135,16 +160,16 @@ def test_watch_auto_build_runs_stage_via_shim_provider(container):
         f"mkdir -p {repo}/.omc/skills/build /shim && "
         f"printf '# build\\nrun true\\n' > {repo}/.omc/skills/build/SKILL.md && "
         "cat > /shim/claude <<'EOF'\n"
-        "#!/bin/sh\n"
-        "echo 'OMC_STAGE "
-        '{"stage": "build", "configured": true, "passed": true, "summary": "ok"}'
-        "'\n"
+        f"{_claude_build_shim(real_claude.strip())}"
         "EOF\n"
         "chmod +x /shim/claude"
     )
     rc, out = run_in(container, ["bash", "-c", seed])
     assert rc == 0, out
     shim_path = "PATH=/shim:/usr/local/bin:/usr/bin:/bin"
+    rc, status_text = run_in(container, ["env", shim_path, "claude", "auth", "status"])
+    assert rc == 0, status_text
+    assert json.loads(status_text)["loggedIn"] is True
     argv = ["env", shim_path, "omc", "watch", "--once", "--auto-build"]
     rc, out = run_in(container, argv, cwd=repo, timeout=300)
     assert rc == 0, out

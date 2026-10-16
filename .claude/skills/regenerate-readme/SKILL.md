@@ -17,7 +17,7 @@ CLI authority: a worktree's copied `.venv` may render help from the primary.
 
 | README sections | Required sources |
 |---|---|
-| Install, Update, Configure | `src/omc/cli/__init__.py`, `src/omc/config/schema.py`, `src/omc/installer.py`; frozen help for configure/install/update/uninstall |
+| Install, Update, Configure | `src/omc/cli/__init__.py`, `src/omc/config/schema.py`, `src/omc/installer.py`, `src/omc/reconcile.py`; frozen help for configure/install/update/uninstall |
 | Keep knowledge fresh with `omc watch` | The watch parser, module docstring and tick/hook behavior in `src/omc/watch.py`, `.config/wt.toml`; frozen watch help |
 | Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/finish/SKILL.md`, `skills/review/SKILL.md` for authority and stage semantics |
 | How omc is put together | `src/omc/distribution/AGENTS.md`, `src/omc/toolctx.py`, `src/omc/providers/base.py`, `src/omc/internal.py`; `skills/gitnexus-explain/SKILL.md` for query routing; verdict contracts in the relevant skills |
@@ -105,6 +105,11 @@ such as `sol:high`, blank follows the provider default; take the per-provider
 defaults table from `default_task_model` in `src/omc/providers/*.py`; plan
 tasks carry a `Complexity:` label, missing means medium); Documentation
 provider, backend and model; Native notifications; Branch prefix; Base branch.
+Stale-model reconciliation (`src/omc/reconcile.py`): design/implement/review
+check the session models, dependency watch the docs model, against the
+provider's listing with no model turn when current; a leaf still unlisted after
+one refresh is remapped by the provider's default model to a listed full id,
+saved and narrated; a failed remap saves nothing.
 Show `--defaults` and repeatable `--set` with two keys in one example.
 Keep docs defaults separate from the Orchestrator model: standard coding tier, Claude
 CLI `sonnet`/API latest matching full id; explicit aliases resolved on save.
@@ -121,8 +126,10 @@ old root symlinks/ignore entries remain and duplicate symlinks may be removed.
 #### `` ## Keep knowledge fresh with `omc watch` `` — target 45 lines
 
 Open with snapshots: stale primary knowledge means stale worktree docs and
-stale explain answers. Worktrunk copies useful gitignored files, including
-`.env`, `.venv` and `.omc/docs/`, but excludes `.gitnexus/` and `target/`.
+stale explain answers. omc copies the primary's `.omc/` (docs included) into
+every new worktree itself, adding only missing files; the repo's Worktrunk
+config copies its other gitignored files, such as `.env` and `.venv`, and this
+repo's excludes `.gitnexus/` and `target/`.
 The graph stays primary; worktrees build without a copied `target/` cache.
 Bold rule: run watch in a terminal in the primary checkout and leave it running.
 Show the useful `omc watch --enable-documentation --auto-build` command and
@@ -130,6 +137,7 @@ state both LLM-costly additions are opt-in.
 Five tick steps: fetch (base branch only); default off-branch/dirty/diverged
 warn-and-skip; fast-forward; refresh index with zero LLM cost; optional docs,
 post-watch hook, optional build. Keep off-branch untouched even with rebase.
+With docs or auto-build, each tick first reconciles those models (link Configure).
 Table: one row starting with each non-help option from the current parser:
 `--interval` (30 seconds), `--once` (repair/check now), `--enable-documentation`,
 `--auto-build`, `--rebase`, `--reset-gitnexus`, `--clear-mutex`.
@@ -167,7 +175,8 @@ Three command subsections:
 - Review: committed record gate, fresh `<slug>-audit` Claude session or
   `/omc:audit`; conformance review, fixes, record amendments, finish/publication.
 Shared flags table: provider overrides (`--claude`/`--codex`, no saved change),
-`--dry-run` (no session/worktree; design still probes/calls slug/ensures guidance),
+`--dry-run` (no session/worktree; design still probes/calls slug/ensures guidance;
+a stale configured model is reported as a would-be remap and the run stops),
 `--headless`, design-only `--no-mutex`. Codex direct syntax is `$omc:…`, not
 `/omc:…`; Claude resumes by name, repeated launch needs id; Codex lacks names.
 Nine one-line in-session skills: explain, index, document, explain-dependency,
@@ -188,7 +197,8 @@ Exactly three Mermaid diagrams, each with a short explanatory paragraph:
    project's `.omc/` skills/hook. CLI → ToolContext → git/wt/provider CLI/GitNexus;
    harness → skills → omc internal → CLI. Providers are argv adapters.
 2. Knowledge flowchart: watch → primary `.gitnexus/` and `.omc/docs/`;
-   worktrunk copies docs to worktree `.omc/docs/` with no copied graph;
+   omc's worktree cut copies the primary `.omc/` (only missing files), so docs
+   land in worktree `.omc/docs/` with no copied graph;
    rebase-main re-mirrors docs only. Explicitly show explain's queries routing
    to the PRIMARY graph via internal proxy, and primary docs as reference.
    `GITNEXUS_SHARED_STORE=off` keeps the primary graph local, without making
