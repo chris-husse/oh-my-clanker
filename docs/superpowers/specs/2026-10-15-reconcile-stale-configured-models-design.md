@@ -164,6 +164,9 @@ is stale (the backend needs a full id) and is remapped to one.
 
 Narration, one line per provider checked: `✓ claude models current
 (8 listed)`.
+In `omc watch` this line prints only on the first tick and on the first
+successful check after a failed one — see
+`2026-10-21-watch-hide-models-current-line-design.md`.
 
 ## 5. Step 2 — refresh, remap, write back (only on a mismatch)
 

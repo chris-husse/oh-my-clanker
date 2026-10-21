@@ -32,7 +32,10 @@ def _current_models(monkeypatch):
     import omc.watch as watch_mod
 
     monkeypatch.setattr(
-        watch_mod, "reconcile", lambda ctx, cfg, groups, *, say, dry_run: cfg, raising=False
+        watch_mod,
+        "reconcile",
+        lambda ctx, cfg, groups, *, say, dry_run, report_current: cfg,
+        raising=False,
     )
 
 
@@ -88,9 +91,10 @@ def test_watch_reconciles_selected_models_at_each_locked_tick(
 
     monkeypatch.setattr(watch_mod, "acquire_busy_narrated", busy_lock)
 
-    def fake_reconcile(ctx, cfg, leaves, *, say, dry_run):
+    def fake_reconcile(ctx, cfg, leaves, *, say, dry_run, report_current):
         assert locked and not dry_run
         assert leaves == groups
+        assert report_current is (not calls)
         assert cfg is (initial if not calls else remapped[0])
         assert cfg.llm.default == "claude"  # auto-build's orchestrator provider
         assert cfg.llm.docs.provider == "codex"  # docs provider differs
@@ -177,7 +181,8 @@ def test_watch_first_tick_reconcile_failure_fails_loud(tmp_path, monkeypatch):
 
     instance = _fake_watch_boot(monkeypatch, tmp_path)
 
-    def failing_reconcile(ctx, cfg, groups, *, say, dry_run):
+    def failing_reconcile(ctx, cfg, groups, *, say, dry_run, report_current):
+        assert report_current
         raise ConfigError("catalog unreachable")
 
     monkeypatch.setattr(watch_mod, "reconcile", failing_reconcile)
@@ -202,7 +207,7 @@ def test_watch_later_tick_reconcile_failure_warns_and_keeps_previous_cfg(
     third = Config()
     outcomes = [first, docsllm.ProbeFailed("GET /v1/models returned 503"), third]
 
-    def flaky_reconcile(ctx, cfg, groups, *, say, dry_run):
+    def flaky_reconcile(ctx, cfg, groups, *, say, dry_run, report_current):
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -226,6 +231,76 @@ def test_watch_later_tick_reconcile_failure_warns_and_keeps_previous_cfg(
     assert seen[2] is third
     err = capsys.readouterr().err
     assert err.count("✗ model reconciliation failed: GET /v1/models returned 503") == 1
+
+
+def test_watch_reports_current_on_entry_and_recovery_only(tmp_path, monkeypatch, capsys):
+    import omc.docsllm as docsllm
+    import omc.watch as watch_mod
+
+    instance = _fake_watch_boot(monkeypatch, tmp_path)
+    initial, first, third, fourth = Config(), Config(), Config(), Config()
+    outcomes = [first, docsllm.ProbeFailed("GET /v1/models returned 503"), third, fourth]
+    requested = []
+    inputs = []
+
+    def recording_reconcile(ctx, cfg, groups, *, say, dry_run, report_current):
+        assert groups == {"docs"} and not dry_run
+        requested.append(report_current)
+        inputs.append(cfg)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(watch_mod, "reconcile", recording_reconcile)
+    seen = []
+    monkeypatch.setattr(watch_mod, "_tick", lambda ctx, cfg, root, **k: seen.append(cfg) or None)
+    sleeps = []
+
+    def stop_after_four_ticks(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 4:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(watch_mod.time, "sleep", stop_after_four_ticks)
+    assert watch_mod.run_watch(object(), initial, interval=1, enable_documentation=True) == 0
+    assert requested == [True, False, True, False]
+    assert all(
+        actual is expected
+        for actual, expected in zip(inputs, [initial, first, first, third], strict=True)
+    )
+    assert all(
+        actual is expected
+        for actual, expected in zip(seen, [first, first, third, fourth], strict=True)
+    )
+    assert sleeps == [1, 1, 1, 1]
+    assert (
+        capsys.readouterr().err.count("✗ model reconciliation failed: GET /v1/models returned 503")
+        == 1
+    )
+    assert not instance.is_locked
+
+
+def test_watch_once_requests_current_report(tmp_path, monkeypatch):
+    import omc.watch as watch_mod
+
+    instance = _fake_watch_boot(monkeypatch, tmp_path)
+    cfg = Config()
+    requested = []
+
+    def recording_reconcile(ctx, current, groups, *, say, dry_run, report_current):
+        assert current is cfg and groups == {"docs"} and not dry_run
+        requested.append(report_current)
+        return current
+
+    monkeypatch.setattr(watch_mod, "reconcile", recording_reconcile)
+    seen = []
+    monkeypatch.setattr(watch_mod, "_tick", lambda ctx, current, root, **k: seen.append(current))
+
+    assert watch_mod.run_watch(object(), cfg, once=True, enable_documentation=True) == 0
+    assert requested == [True]
+    assert len(seen) == 1 and seen[0] is cfg
+    assert not instance.is_locked
 
 
 def _git(*args, cwd):

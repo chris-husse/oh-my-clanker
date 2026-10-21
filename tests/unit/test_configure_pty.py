@@ -102,7 +102,13 @@ print('RESULT:', flags, flush=True)
         deadline = time.monotonic() + 2
         while termios.tcgetattr(self.master)[3] & termios.ICANON:
             assert time.monotonic() < deadline, "Menu prompt appeared before cbreak mode was ready"
-            time.sleep(0.005)
+            # The child may wait for its pending output to drain before switching modes.
+            ready, _, _ = select.select([self.master], [], [], 0.005)
+            if ready:
+                try:
+                    self.output.extend(os.read(self.master, 65536))
+                except OSError:
+                    pass
 
     def send(self, data: bytes):
         self.wait_input_ready()
@@ -196,6 +202,40 @@ def test_default_renderer_can_navigate_nested_project_field(terminal):
     term.expect(b"LLM...", timeout=6)
     term.send(b"\x1b")
     term.finish()
+
+
+def test_wait_input_ready_drains_output_before_child_enters_cbreak():
+    master, slave = pty.openpty()
+    source = """
+import os
+import termios
+data = b'x' * 65536
+while data:
+    data = data[os.write(1, data):]
+settings = termios.tcgetattr(0)
+settings[3] &= ~termios.ICANON
+termios.tcsetattr(0, termios.TCSANOW, settings)
+os.write(1, b'READY')
+os.read(0, 1)
+"""
+    try:
+        proc = subprocess.Popen([sys.executable, "-c", source], stdin=slave, stdout=slave)
+    finally:
+        os.close(slave)
+    term = MenuTerminal.__new__(MenuTerminal)
+    term.master = master
+    term.output = bytearray()
+    term.cursor = 0
+    try:
+        term.wait_input_ready()
+        term.expect(b"READY")
+        os.write(master, b"x")
+        assert proc.wait(timeout=3) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=3)
+        os.close(master)
 
 
 def test_terminal_loss_is_an_error_and_does_not_loop(terminal):

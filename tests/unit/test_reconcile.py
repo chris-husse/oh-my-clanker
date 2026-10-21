@@ -398,6 +398,41 @@ def test_old_blank_session_config_is_current_without_turn_or_write(tmp_path):
     assert yaml_path.read_bytes() == before
 
 
+def test_current_models_can_suppress_all_clear_without_side_effects(tmp_path, monkeypatch):
+    ctx = _context(tmp_path)
+    ctx.home.mkdir()
+    yaml_path = ctx.home / "config.yaml"
+    yaml_path.write_text(
+        "schema_version: 1\nllm:\n  default: codex\n  providers:\n    codex:\n      model: ''\n"
+    )
+    loaded = store.load_global(ctx.home)
+    assert loaded is not None
+    cfg = Config(llm=loaded.llm)
+    before = yaml_path.read_bytes()
+    _codex_catalog(ctx, CODEX_CURRENT)
+    log = _cli_stub(ctx, "codex")
+    calls = []
+    catalog = under_test.taskmodels.catalog
+
+    def recording_catalog(ctx, provider, **kwargs):
+        calls.append(provider)
+        return catalog(ctx, provider, **kwargs)
+
+    monkeypatch.setattr(under_test.taskmodels, "catalog", recording_catalog)
+    lines = []
+
+    assert (
+        under_test.reconcile(
+            ctx, cfg, {"session"}, say=lines.append, dry_run=False, report_current=False
+        )
+        is cfg
+    )
+    assert calls == ["codex"]
+    assert lines == []
+    assert _calls(log) == []
+    assert yaml_path.read_bytes() == before
+
+
 def test_dry_run_reports_every_stale_leaf_before_success_sentinel(tmp_path):
     ctx = _context(tmp_path)
     cfg = _config(ctx, model="gpt-5-sol", tasks_review="gpt-5-astra")
@@ -498,6 +533,92 @@ def test_codex_stale_model_remaps_full_id_and_only_one_yaml_leaf(tmp_path, stale
         len([line for line in lines if line.startswith("→ model:") and "config updated" in line])
         == 1
     )
+
+
+def test_suppression_keeps_refresh_probe_and_remap_narration(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, model="gpt-5-sol")
+    _codex_catalog(ctx, CODEX_CURRENT)
+    log = _cli_stub(ctx, "codex", remap_output='{"model": "gpt-6-sol"}')
+    lines = []
+
+    under_test.reconcile(
+        ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False, report_current=False
+    )
+
+    assert lines.count("→ refreshing codex model list with the default model") == 1
+    assert lines.count("✓ default model works") == 1
+    assert (
+        len([line for line in lines if line.startswith("→ model:") and "config updated" in line])
+        == 1
+    )
+    saved = store.load_global(ctx.home)
+    assert saved is not None
+    assert saved.llm.providers["codex"].model == "gpt-6-sol"
+    assert cfg.llm.providers["codex"].model == "gpt-6-sol"
+    headless = _headless(_calls(log))
+    assert len(headless) == 2
+    assert headless[0] == ["exec", "--skip-git-repo-check", "Reply with exactly OK."]
+    assert headless[1][:2] == ["exec", "--skip-git-repo-check"]
+    assert len(headless[1]) == 3 and '"model"' in headless[1][2]
+
+
+def test_suppression_omits_current_provider_during_other_provider_remap(tmp_path):
+    for report_current in (False, True):
+        home = tmp_path / ("suppressed" if not report_current else "default")
+        home.mkdir()
+        ctx = _context(home)
+        cfg = _config(ctx, model="gpt-5-sol")
+        cfg.llm.docs.provider = "claude"
+        cfg.llm.providers["claude"] = ProviderConfig(docs_model="claude-sonnet-5-5")
+        store.save_global(ctx.home, GlobalConfig(llm=cfg.llm))
+        _codex_catalog(ctx, CODEX_CURRENT)
+        _claude_catalog(ctx)
+        codex_log = _cli_stub(ctx, "codex", remap_output='{"model": "gpt-6-sol"}')
+        claude_log = _cli_stub(ctx, "claude")
+        lines = []
+
+        kwargs = {} if report_current else {"report_current": False}
+        under_test.reconcile(
+            ctx, cfg, {"orchestrator", "docs"}, say=lines.append, dry_run=False, **kwargs
+        )
+
+        assert len([line for line in lines if line.startswith("→ model:")]) == 1
+        assert any("config updated" in line for line in lines)
+        saved = store.load_global(ctx.home)
+        assert saved is not None
+        assert saved.llm.providers["codex"].model == "gpt-6-sol"
+        assert len(_headless(_calls(codex_log))) == 2
+        assert _headless(_calls(claude_log)) == []
+        if report_current:
+            assert "✓ claude models current (3 listed)" in lines
+        else:
+            assert not any("models current" in line for line in lines)
+
+
+def test_failed_mixed_provider_remap_does_not_report_current(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, model="gpt-5-sol")
+    cfg.llm.docs.provider = "claude"
+    cfg.llm.providers["claude"] = ProviderConfig(docs_model="claude-sonnet-5-5")
+    store.save_global(ctx.home, GlobalConfig(llm=cfg.llm))
+    before = (ctx.home / "config.yaml").read_bytes()
+    _codex_catalog(ctx, CODEX_CURRENT)
+    _claude_catalog(ctx)
+    codex_log = _cli_stub(ctx, "codex", remap_output="remap rejected", remap_rc=7)
+    claude_log = _cli_stub(ctx, "claude")
+    lines = []
+
+    with pytest.raises(OmcError, match="remap rejected"):
+        under_test.reconcile(ctx, cfg, {"orchestrator", "docs"}, say=lines.append, dry_run=False)
+
+    assert lines.count("→ refreshing codex model list with the default model") == 1
+    assert lines.count("✓ default model works") == 1
+    assert not any("models current" in line for line in lines)
+    assert (ctx.home / "config.yaml").read_bytes() == before
+    assert cfg.llm.providers["codex"].model == "gpt-5-sol"
+    assert len(_headless(_calls(codex_log))) == 2
+    assert _headless(_calls(claude_log)) == []
 
 
 def test_two_claude_leaves_share_one_default_remap_turn(tmp_path):
