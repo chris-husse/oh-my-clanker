@@ -450,6 +450,7 @@ def run_watch(
     if auto_build:
         model_groups.add("orchestrator")
     first_tick = True
+    last_reconcile_failed = False
     try:
         while True:
             # Busy lock held for the WHOLE busy portion (tick + hooks): free ⇔ idle.
@@ -458,11 +459,20 @@ def run_watch(
                     # The first tick is the command's entry: fail loud. Later
                     # ticks warn-and-skip, keeping the previous cfg.
                     try:
-                        cfg = reconcile(ctx, cfg, model_groups, say=_say, dry_run=False)
+                        cfg = reconcile(
+                            ctx,
+                            cfg,
+                            model_groups,
+                            say=_say,
+                            dry_run=False,
+                            report_current=first_tick or last_reconcile_failed,
+                        )
+                        last_reconcile_failed = False
                     except OmcError as exc:
                         if first_tick:
                             raise
                         _say(f"✗ model reconciliation failed: {exc}")
+                        last_reconcile_failed = True
                 first_tick = False
                 reset_progress = ResetProgress()
                 last = _tick(

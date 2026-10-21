@@ -202,6 +202,7 @@ def reconcile(
     *,
     say: Callable[[str], object],
     dry_run: bool,
+    report_current: bool = True,
 ) -> Config:
     """Check only selected model leaves, then remap stale values as one transaction.
 
@@ -268,15 +269,21 @@ def reconcile(
 
     stale = stale_leaves()
     current_providers = {leaf.provider for leaf in selected} - {leaf.provider for leaf in stale}
-    for provider in sorted(current_providers):
-        ids = {
-            model.id
-            for (name, _), models in catalogs.items()
-            if name == provider and models is not None
-            for model in models
-        }
-        say(f"✓ {provider} models current ({len(ids)} listed)")
+
+    def say_current_models() -> None:
+        if not report_current:
+            return
+        for provider in sorted(current_providers):
+            ids = {
+                model.id
+                for (name, _), models in catalogs.items()
+                if name == provider and models is not None
+                for model in models
+            }
+            say(f"✓ {provider} models current ({len(ids)} listed)")
+
     if not stale:
+        say_current_models()
         return cfg
 
     answers: dict[tuple[str, str], str] = {}
@@ -305,4 +312,5 @@ def reconcile(
             f"→ {leaf.path}: {leaf.value} is unavailable; {leaf.provider} "
             f"(default model) picked {value}; config updated"
         )
+    say_current_models()
     return cfg
