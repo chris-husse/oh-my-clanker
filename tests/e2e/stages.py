@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 
 MANIFEST = "/tmp/omc-stage.json"
 SNAPSHOT_LABELS = (
@@ -85,8 +86,10 @@ def hold_image(tag: str, name: str) -> None:
     image and the stage snapshots vanished mid-run with no Docker event left
     in the (256-entry) buffer. The daemon refuses to remove an image that a
     container references, so one `sleep infinity` per image is the whole
-    defence. Holders live until `scripts/e2e.sh prune`, like the images; a
-    holder that already exists (same source id, earlier run) is kept."""
+    defence. The runner's `prune_stale` removes a holder 72 h after its
+    creation once its tree is not the current one, and manual
+    `scripts/e2e.sh prune` removes it immediately; a holder that already
+    exists (same source id, earlier run) is kept."""
     try:
         subprocess.run(
             [
@@ -99,6 +102,8 @@ def hold_image(tag: str, name: str) -> None:
                 "omc.e2e=holder",
                 "--label",
                 f"omc.e2e.source={source_id()}",
+                "--label",
+                f"omc.e2e.created={int(time.time())}",
                 tag,
                 "sleep",
                 "infinity",
