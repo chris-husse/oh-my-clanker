@@ -21,6 +21,7 @@ source_id=$(
     GIT_INDEX_FILE="$tmp_index" git -C "$root" add -A >/dev/null 2>&1
     GIT_INDEX_FILE="$tmp_index" git -C "$root" write-tree | cut -c1-12
 )
+holder_ttl=$((72 * 3600))
 image="omc-e2e:${source_id}"
 export OMC_E2E_PREBUILT_IMAGE="$image" OMC_E2E_PREBUILT_SOURCE="$source_id" OMC_E2E_SOURCE_ID="$source_id"
 # Ryuk (testcontainers' reaper) prunes images when a session ends — including
@@ -35,6 +36,69 @@ for arg in "$@"; do [ "$arg" = "--collect-only" ] && collect_only=1; done
 no_docker=${OMC_E2E_NO_DOCKER:-0}
 [ "$collect_only" = 1 ] && no_docker=1
 
+prune_stale() {
+    [ "$no_docker" = 1 ] && return 0
+    local now holders holder details holder_id holder_source created tag tag_source
+    local pinned_sources=" $source_id "
+    local -a stale_ids=() stage_tags=() base_tags=()
+    now=$(date +%s)
+    holders=$(docker ps -aq --filter label=omc.e2e=holder)
+    while IFS= read -r holder; do
+        [ -z "$holder" ] && continue
+        # A delimiter keeps a missing label (which Docker may print as
+        # <no value>) from shifting the source and creation fields.
+        if ! details=$(docker inspect --format \
+            '{{.Id}}|{{index .Config.Labels "omc.e2e.source"}}|{{index .Config.Labels "omc.e2e.created"}}' "$holder"); then
+            echo "could not inspect E2E holder $holder; nothing pruned" >&2
+            return 1
+        fi
+        IFS='|' read -r holder_id holder_source created <<< "$details"
+        if [ -z "$holder_id" ]; then
+            echo "could not inspect E2E holder $holder; nothing pruned" >&2
+            return 1
+        fi
+        if [ "$holder_source" != "$source_id" ] && \
+            { [[ ! "$created" =~ ^[0-9]+$ ]] || (( now - 10#$created > holder_ttl )); }; then
+            stale_ids+=("$holder_id")
+        else
+            pinned_sources+=" $holder_source "
+        fi
+    done <<< "$holders"
+
+    if [ "${#stale_ids[@]}" -gt 0 ]; then
+        docker rm -f "${stale_ids[@]}" >/dev/null
+    fi
+
+    local images
+    images=$(docker images --format '{{.Repository}}:{{.Tag}}')
+    while IFS= read -r tag; do
+        case "$tag" in
+            omc-e2e-stage:*|omc-e2e:*)
+                tag_source=${tag##*:}
+                tag_source=${tag_source##*-}
+                ;;
+            *) continue ;;
+        esac
+        [[ $tag_source =~ ^[0-9a-f]{12}$ ]] || continue
+        [[ $pinned_sources == *" $tag_source "* ]] && continue
+        case "$tag" in
+            omc-e2e-stage:*) stage_tags+=("$tag") ;;
+            omc-e2e:*) base_tags+=("$tag") ;;
+        esac
+    done <<< "$images"
+
+    # Children first: on classic Docker storage, removing a base tag while
+    # snapshots exist leaves its layers behind as a dangling parent.
+    if [ "${#stage_tags[@]}" -gt 0 ]; then
+        docker rmi -f "${stage_tags[@]}" >/dev/null
+    fi
+    if [ "${#base_tags[@]}" -gt 0 ]; then
+        docker rmi -f "${base_tags[@]}" >/dev/null
+    fi
+    if [ "${#stale_ids[@]}" -gt 0 ] || [ "${#stage_tags[@]}" -gt 0 ] || [ "${#base_tags[@]}" -gt 0 ]; then
+        echo "pruned ${#stale_ids[@]} stale holders and $((${#stage_tags[@]} + ${#base_tags[@]})) images (older than 72 h)" >&2
+    fi
+}
 ensure_image() {
     [ "$no_docker" = 1 ] && return 0
     if ! docker image inspect "$image" >/dev/null 2>&1; then
@@ -48,12 +112,14 @@ hold_image() {
     # remove it mid-run (Docker Desktop's kubelet under disk pressure deleted
     # every container-less image every ~10 s, observed 2026-10-06; see
     # tests/e2e/stages.py:hold_image, which does the same for snapshots).
-    # Holders live until `prune`, like the images they pin.
+    # `prune_stale` removes a holder 72 h after its creation once its tree
+    # is not the current one; manual `prune` removes it immediately.
     [ "$no_docker" = 1 ] && return 0
     local name="omc-e2e-holder-base-${source_id}"
     if ! docker container inspect "$name" >/dev/null 2>&1; then
         docker run -d --name "$name" --label omc.e2e=holder \
-            --label "omc.e2e.source=${source_id}" "$image" sleep infinity >/dev/null
+            --label "omc.e2e.source=${source_id}" \
+            --label "omc.e2e.created=$(date +%s)" "$image" sleep infinity >/dev/null
     fi
 }
 sweep() {
@@ -69,7 +135,8 @@ run_golden() {
         -p no:cacheprovider "$root/tests/e2e/golden" "$@"
     [ "$no_docker" = 1 ] && return 0
     # The stages' side effect is the point: refuse to continue without snapshots.
-    if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q -- "^omc-e2e-stage:.*-${source_id}\$"; then
+    # Read the whole listing: grep -q can SIGPIPE Docker under pipefail.
+    if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -- "^omc-e2e-stage:.*-${source_id}\$" >/dev/null; then
         echo "golden path left no stage snapshots for ${source_id}" >&2
         return 1
     fi
@@ -79,8 +146,8 @@ run_rest() {
         --dist loadgroup -p no:cacheprovider "$@"
 }
 prune() {
-    # Explicit housekeeping, never automatic: a concurrent run on another
-    # checkout may be using an image this checkout considers stale.
+    # Immediate cleanup of every other tree; automatic pruning above uses
+    # a 72 h threshold for holders with a valid creation label.
     # Holders first: a running holder blocks even `rmi -f` of its image.
     docker ps -aq --filter label=omc.e2e=holder \
         | xargs docker inspect --format '{{.Id}} {{index .Config.Labels "omc.e2e.source"}}' 2>/dev/null \
@@ -91,9 +158,9 @@ prune() {
     echo "kept images for ${source_id}; removed the rest" >&2
 }
 case "$mode" in
-    golden) ensure_image; hold_image; sweep; run_golden "$@" ;;
-    rest) ensure_image; hold_image; run_rest "$@" ;;
-    all) ensure_image; hold_image; sweep; run_golden "$@"; run_rest "$@" ;;
+    golden) prune_stale; ensure_image; hold_image; sweep; run_golden "$@" ;;
+    rest) prune_stale; ensure_image; hold_image; run_rest "$@" ;;
+    all) prune_stale; ensure_image; hold_image; sweep; run_golden "$@"; run_rest "$@" ;;
     prune) prune ;;
     *) echo "usage: scripts/e2e.sh [golden|rest|all|prune] [pytest args]" >&2; exit 2 ;;
 esac

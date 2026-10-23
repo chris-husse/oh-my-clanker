@@ -61,7 +61,11 @@ path including the `implemented` stage (and writes its snapshot);
 runs the implement-triggering variations against existing snapshots. Images
 are keyed by the working tree's content hash (`git write-tree` on a temporary
 index), so an identical tree reuses its image and snapshots exactly, and any
-edit gets a new id; `just e2e-prune` is the only thing that deletes images.
+edit gets a new id. Every E2E run removes other-tree holders created more
+than 72 hours ago (or missing a valid creation label), then other-tree E2E
+images without a remaining holder.
+`just e2e-prune` immediately removes everything except the current tree's
+holders and images.
 
 Ryuk and snapshots: testcontainers' reaper prunes images when its session
 ends, and the stage snapshots went with it even after overriding the
