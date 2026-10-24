@@ -179,9 +179,13 @@ Shared flags table: provider overrides (`--claude`/`--codex`, no saved change),
 a stale configured model is reported as a would-be remap and the run stops),
 `--headless`, design-only `--no-mutex`. Codex direct syntax is `$omc:…`, not
 `/omc:…`; Claude resumes by name, repeated launch needs id; Codex lacks names.
-Nine one-line in-session skills: explain, index, document, explain-dependency,
+Ten one-line in-session skills: explain, index, document, explain-dependency,
 investigate (env-locked read-only evidence; investigation-context is required and
-its `envs/<env>.md` briefings define the environments), rebase-main, check-wt-config, finish, integrate.
+its `envs/<env>.md` briefings define the environments), rebase-main,
+check-wt-config, finish, integrate, and `/omc:mr-review <mr-link>` (review a
+colleague's GitLab MR or GitHub PR against the intent its author linked, post the
+comments that survive reconciliation unattended with an automated-review footer,
+and keep the full review trail on disk).
 The rebase-main row and finish prose say only `.omc/docs/` is mirrored, while
 explain queries the primary graph.
 Explain optional check/build/verify/review semantics, order, standalone forms,
