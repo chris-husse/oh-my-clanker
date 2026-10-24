@@ -206,7 +206,8 @@ def reconcile(
 ) -> Config:
     """Check only selected model leaves, then remap stale values as one transaction.
 
-    CLI catalogs are refreshed once per stale provider. API documentation
+    A stale Claude CLI catalog gets one no-model refresh turn. Codex's live
+    catalog read is already its refresh. API documentation
     catalogs are already live, but their remap still uses the provider CLI's
     default model. A successful dry run reports every stale leaf and signals
     the command dispatcher to stop before it resolves any model.
@@ -257,12 +258,13 @@ def reconcile(
             say(f"· {leaf.path}: {leaf.value} is unavailable (would remap)")
         raise DryRunStale()
 
-    refresh = {leaf.provider for leaf in stale if leaf.source == "cli"}
+    refresh = {
+        leaf.provider for leaf in stale if leaf.source == "cli" and leaf.provider == "claude"
+    }
     for provider in sorted(refresh):
         say(f"→ refreshing {provider} model list with the default model")
-        # Both CLIs refresh their picker cache during a no-model headless turn.
-        # This also protects a newly released, hand-entered full ID that was
-        # absent only from yesterday's catalog.
+        # Claude refreshes its per-org picker catalog during a no-model turn.
+        # Codex has already read its launched binary's live catalog above.
         ok, detail = docsllm.cli_model_probe(ctx, provider, "")
         docsllm._step(say, ok, detail)
         catalogs[(provider, "cli")] = taskmodels.catalog(ctx, provider)

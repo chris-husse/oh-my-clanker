@@ -117,12 +117,11 @@ def _probe_docs(
 
 def _probe_task_models(ctx: ToolContext, gcfg: GlobalConfig, *, before: GlobalConfig) -> None:
     """Validate changed model leaves before any file write: one live probe per
-    distinct effective value per provider, and one Codex list refresh per run
-    (seven leaves pinned to one id cost one turn, not seven)."""
+    distinct effective value per provider (seven leaves pinned to one id cost
+    one validation, not seven)."""
     for name, pcfg in gcfg.llm.providers.items():
         previous = before.llm.providers.get(name, ProviderConfig())
         probed: set[tuple[str, str]] = set()
-        refreshed = False
         for task in taskmodels.TASKS:
             value = pcfg.model if task == "orchestrator" else getattr(pcfg.tasks, task)
             old = previous.model if task == "orchestrator" else getattr(previous.tasks, task)
@@ -133,13 +132,7 @@ def _probe_task_models(ctx: ToolContext, gcfg: GlobalConfig, *, before: GlobalCo
                 _say(f"· {name} {task}: {key[0]} already validated in this run")
                 continue
             probed.add(key)
-            taskmodels.validate_selection(
-                ctx, name, value, task=task, say=_say, refresh=not refreshed
-            )
-            # Only a Codex *family* leaf refreshes the list; a full id is
-            # probed directly and leaves the list untouched.
-            if name == "codex" and key[0].partition(":")[0] in get_provider(name).families():
-                refreshed = True
+            taskmodels.validate_selection(ctx, name, value, task=task, say=_say)
 
 
 def _apply_settings(

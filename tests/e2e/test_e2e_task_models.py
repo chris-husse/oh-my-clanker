@@ -11,35 +11,27 @@ from .harness import configure_omc, require_token, run_in
 pytestmark = [pytest.mark.e2e, pytest.mark.e2e_provider("codex")]
 
 
-def test_codex_family_uses_real_model_list(container):
-    require_token("codex")
-    pinned = configure_omc(container, "codex")
-    require_codex_ready(container)
-
-    # Codex 0.158 refreshes models_cache.json during a no-model exec. This
-    # exercises the provider's real list path before omc resolves the family.
-    rc, out = run_in(
-        container,
-        ["codex", "exec", "--skip-git-repo-check", "Reply with exactly READY"],
-        timeout=240,
-    )
-    assert rc == 0 and "READY" in out, out
-    rc, raw = run_in(
-        container,
-        [
-            "python3",
-            "-c",
-            "import json, os, pathlib; "
-            "p=pathlib.Path(os.environ['CODEX_HOME'])/'models_cache.json'; "
-            "print(json.dumps(json.loads(p.read_text())['models']))",
-        ],
-    )
-    if rc != 0:
+def _expected_visible_sol_slug(raw: str) -> str:
+    try:
+        payload = json.loads(raw)
+        models = payload["models"]
+        if not isinstance(models, list):
+            raise ValueError("models is not a list")
+        for item in models:
+            if (
+                not isinstance(item["slug"], str)
+                or not item["slug"]
+                or not isinstance(item["priority"], int)
+            ):
+                raise ValueError("invalid slug or priority")
+            if not isinstance(item["visibility"], str) or not isinstance(item["display_name"], str):
+                raise ValueError("invalid visibility or display_name")
+    except (KeyError, TypeError, ValueError) as exc:
         pytest.fail(
-            "Codex did not write CODEX_HOME/models_cache.json after a no-model exec; "
-            "run `just codex-login`, then retry the Codex gate."
+            f"`codex debug models` returned an invalid model list ({exc}); "
+            "update Codex, run `just codex-login`, then rerun "
+            "`just codex-gate tests/e2e/test_e2e_task_models.py`."
         )
-    models = json.loads(raw)
     visible_sol = [
         item
         for item in models
@@ -52,7 +44,23 @@ def test_codex_family_uses_real_model_list(container):
             "Update Codex, run `just codex-login` for an account with Sol access, "
             "and rerun `just codex-gate tests/e2e/test_e2e_task_models.py`."
         )
-    expected = min(visible_sol, key=lambda item: item["priority"])["slug"]
+    return min(visible_sol, key=lambda item: item["priority"])["slug"]
+
+
+def test_codex_family_uses_real_model_list(container):
+    require_token("codex")
+    pinned = configure_omc(container, "codex")
+    require_codex_ready(container)
+
+    # Ask the binary omc launches, rather than another client's shared cache.
+    rc, raw = run_in(container, ["codex", "debug", "models"], timeout=240, stdout_only=True)
+    if rc != 0:
+        pytest.fail(
+            f"`codex debug models` failed (exit {rc}): {raw[-500:]}; "
+            "run `just codex-login`, then rerun "
+            "`just codex-gate tests/e2e/test_e2e_task_models.py`."
+        )
+    expected = _expected_visible_sol_slug(raw)
 
     rc, out = run_in(
         container, ["omc", "configure", "--set", "llm.providers.codex.tasks.simple=sol"]

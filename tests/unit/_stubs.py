@@ -7,30 +7,20 @@ import shlex
 import stat
 from pathlib import Path
 
-
-def seed_codex_model_cache(home: Path) -> None:
-    """Give isolated launch tests the same model-list shape as Codex's picker."""
-    cache = home / ".codex" / "models_cache.json"
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(
-        json.dumps(
-            {
-                "models": [
-                    {
-                        "slug": f"gpt-6-{family}",
-                        "display_name": f"GPT-6-{family.title()}",
-                        "visibility": "list",
-                        "priority": 1,
-                        "supported_reasoning_levels": [
-                            {"effort": effort, "description": effort.title()}
-                            for effort in ("medium", "high")
-                        ],
-                    }
-                    for family in ("astra", "sol")
-                ]
-            }
-        )
-    )
+DEFAULT_CODEX_CATALOG: dict[str, object] = {
+    "models": [
+        {
+            "slug": f"gpt-6-{family}",
+            "display_name": f"GPT-6-{family.title()}",
+            "visibility": "list",
+            "priority": 1,
+            "supported_reasoning_levels": [
+                {"effort": effort, "description": effort.title()} for effort in ("medium", "high")
+            ],
+        }
+        for family in ("astra", "sol")
+    ]
+}
 
 
 def make_stub(
@@ -59,6 +49,36 @@ def make_stub(
     path.write_text(
         f"#!/bin/sh\n{log}{envlog}/bin/cat <<'OMC_STUB_EOF'\n{stdout}\nOMC_STUB_EOF\n"
         f"{err}exit {rc}\n"
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return path
+
+
+def make_codex_stub(
+    bindir: Path,
+    *,
+    catalog: dict[str, object] | str,
+    catalog_rc: int = 0,
+    stdout: str = "",
+    rc: int = 0,
+    argv_log: Path | None = None,
+) -> Path:
+    """Route `debug models` separately from launches on an isolated PATH."""
+    bindir.mkdir(parents=True, exist_ok=True)
+    path = bindir / "codex"
+    body = json.dumps(catalog) if isinstance(catalog, dict) else catalog
+    log = f"printf '%s\\n' \"$*\" >> {shlex.quote(str(argv_log))}\n" if argv_log else ""
+    path.write_text(
+        "#!/bin/sh\n"
+        f"{log}"
+        'case "$1 $2" in\n'
+        '  "debug models")\n'
+        f"    /bin/cat <<'OMC_CODEX_MODELS_EOF'\n{body}\nOMC_CODEX_MODELS_EOF\n"
+        f"    exit {catalog_rc} ;;\n"
+        "  *)\n"
+        f"    /bin/cat <<'OMC_CODEX_LAUNCH_EOF'\n{stdout}\nOMC_CODEX_LAUNCH_EOF\n"
+        f"    exit {rc} ;;\n"
+        "esac\n"
     )
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return path

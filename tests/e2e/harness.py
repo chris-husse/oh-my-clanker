@@ -93,8 +93,8 @@ def detect_auth_failure(output: str) -> str | None:
     return None
 
 
-def run_in(container, argv, *, env=None, cwd=None, timeout=600):
-    """Exec argv in the container; returns (rc, combined-output).
+def run_in(container, argv, *, env=None, cwd=None, timeout=600, stdout_only=False):
+    """Exec argv in the container; return (rc, combined output or stdout only).
 
     A provider auth failure anywhere in that output fails the test right here,
     with the remediation — otherwise it resurfaces later as a confusing
@@ -105,11 +105,19 @@ def run_in(container, argv, *, env=None, cwd=None, timeout=600):
         cmd = f"cd {shlex.quote(cwd)} && {cmd}"
     wrapped = ["timeout", str(timeout), "bash", "-lc", cmd]
     envs = {k: v for k, v in (env or {}).items()}
-    result = container.get_wrapped_container().exec_run(wrapped, environment=envs or None)
-    output = result.output.decode(errors="replace")
-    remediation = detect_auth_failure(output)
+    result = container.get_wrapped_container().exec_run(
+        wrapped, environment=envs or None, demux=stdout_only
+    )
+    if stdout_only:
+        stdout, stderr = result.output
+        output = (stdout or b"").decode(errors="replace")
+        auth_output = output + (stderr or b"").decode(errors="replace")
+    else:
+        output = result.output.decode(errors="replace")
+        auth_output = output
+    remediation = detect_auth_failure(auth_output)
     if remediation is not None:
-        pytest.fail(f"provider auth failed in container: {remediation}\n\n{output}")
+        pytest.fail(f"provider auth failed in container: {remediation}\n\n{auth_output}")
     return result.exit_code, output
 
 

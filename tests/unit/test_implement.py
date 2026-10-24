@@ -11,7 +11,14 @@ from omc.errors import Refusal
 from omc.implement import IMPLEMENT_ALLOWED_TOOLS, IMPLEMENT_SEED, run_implement
 from omc.toolctx import ToolContext
 
-from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, seed_codex_model_cache, stub_env
+from ._stubs import (
+    DEFAULT_CODEX_CATALOG,
+    HEALTHY_PLUGINS,
+    make_claude_stub,
+    make_codex_stub,
+    make_stub,
+    stub_env,
+)
 
 SLUG = "proj-1-fix-login"
 RECORD = f"docs/superpowers/specs/2026-10-02-{SLUG}-design.md"
@@ -43,10 +50,9 @@ def _worktree(tmp_path, *, branch=f"feature/{SLUG}", record=True, commit=True):
 def _ctx(tmp_path, repo, monkeypatch, *, provider_stdout=""):
     """Real git on PATH (the gate runs real git), stubbed claude/codex/wt."""
     bindir = tmp_path / "bin"
-    seed_codex_model_cache(tmp_path)
     make_claude_stub(bindir, plugins=HEALTHY_PLUGINS, stdout=provider_stdout)
     make_stub(bindir, "wt", stdout="wt 0.1")
-    make_stub(bindir, "codex", stdout="codex 0.156.1")
+    make_codex_stub(bindir, catalog=DEFAULT_CODEX_CATALOG, stdout="codex 0.156.1")
     git_dir = os.path.dirname(shutil.which("git"))
     monkeypatch.chdir(repo)
     return ToolContext.from_env(stub_env(bindir, SHELL="/bin/bash", PATH=f"{bindir}:{git_dir}"))

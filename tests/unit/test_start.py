@@ -12,11 +12,12 @@ from omc.start import run_start
 from omc.toolctx import ToolContext
 
 from ._stubs import (
+    DEFAULT_CODEX_CATALOG,
     HEALTHY_PLUGINS,
     make_claude_stub,
+    make_codex_stub,
     make_stub,
     remote_marketplace,
-    seed_codex_model_cache,
     stub_env,
 )
 
@@ -53,14 +54,13 @@ def _make_git_stub(bindir, *, branch_exists=False):
 
 
 def full_env(tmp_path, *, verdict=OK_VERDICT, wt_json=None):
-    seed_codex_model_cache(tmp_path)
     bindir = tmp_path / "bin"
     _make_git_stub(bindir)
     # argv-aware claude stub: `plugin list --json` reports a healthy omc +
     # superpowers (so ensure_plugin leaves them alone); everything else — the
     # slug call — answers with the verdict.
     make_claude_stub(bindir, plugins=HEALTHY_PLUGINS, stdout=verdict)
-    make_stub(bindir, "codex", stdout=verdict)
+    make_codex_stub(bindir, catalog=DEFAULT_CODEX_CATALOG, stdout=verdict)
     make_stub(bindir, "wt", stdout=json.dumps(wt_json or {"path": str(tmp_path / "wtree")}))
     return ToolContext.from_env(stub_env(bindir, SHELL="/bin/bash"))
 
