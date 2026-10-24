@@ -81,7 +81,7 @@ Provider defaults are:
 
 Implementation plan tasks carry a `Complexity: simple | medium | high` label; a missing label means medium.
 
-Configured models are checked against the provider's current model list before `omc design`, `omc implement` and `omc review` launch (Orchestrator and task models), before `omc dependency watch` (Documentation model) and on watch ticks that use them; a blank choice is checked as the provider default. When everything is listed, the check costs no model turn and writes nothing. A model still missing after one list refresh, such as a retired full id or a dropped family, is remapped: the provider CLI's default model picks a listed full model id, omc saves it to `~/.omc/config.yaml` and prints one line per remap. A failed remap stops the command and saves nothing.
+Configured models are checked against the provider's current model list before `omc design`, `omc implement` and `omc review` launch (Orchestrator and task models), before `omc dependency watch` (Documentation model) and on watch ticks that use them; a blank choice is checked as the provider default. When everything is listed, the check costs no model turn and writes nothing. For Codex, omc reads `codex debug models` on the binary it launches and immediately remaps a still-stale value. Claude gets one no-model list refresh before remap. The provider CLI's default model picks a listed full model id, omc saves it to `~/.omc/config.yaml` and prints one line per remap. A failed remap stops the command and saves nothing.
 
 For scripts, use `--defaults` or repeat `--set`:
 

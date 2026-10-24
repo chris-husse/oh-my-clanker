@@ -107,9 +107,11 @@ tasks carry a `Complexity:` label, missing means medium); Documentation
 provider, backend and model; Native notifications; Branch prefix; Base branch.
 Stale-model reconciliation (`src/omc/reconcile.py`): design/implement/review
 check the session models, dependency watch the docs model, against the
-provider's listing with no model turn when current; a leaf still unlisted after
-one refresh is remapped by the provider's default model to a listed full id,
-saved and narrated; a failed remap saves nothing.
+provider's listing with no model turn when current. Codex reads `codex debug
+models` on the binary it launches and remaps a still-stale value immediately;
+Claude keeps one no-model list refresh before remap. The provider's default
+model picks a listed full id, which is saved and narrated; a failed remap
+saves nothing.
 Show `--defaults` and repeatable `--set` with two keys in one example.
 Keep docs defaults separate from the Orchestrator model: standard coding tier, Claude
 CLI `sonnet`/API latest matching full id; explicit aliases resolved on save.

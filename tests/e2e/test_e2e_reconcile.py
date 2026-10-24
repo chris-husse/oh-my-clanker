@@ -75,21 +75,45 @@ print(json.dumps({entry['id']: [option['id'] for option in
             )
             assert rc == 0, raw
     else:
-        script = """\
-import json, os, pathlib, sys
-home = pathlib.Path(os.environ.get('CODEX_HOME') or pathlib.Path.home() / '.codex')
-path = home / 'models_cache.json'
-if not path.is_file():
-    sys.exit('Codex catalog missing; run `just codex-login`, then rerun '
-             '`just codex-gate tests/e2e/test_e2e_reconcile.py`')
-print(json.dumps({entry['slug']: [level['effort'] for level in
-                  entry['supported_reasoning_levels']]
-                  for entry in json.loads(path.read_text())['models']
-                  if entry['visibility'] == 'list'}))
-"""
-        rc, raw = run_in(container, ["python3", "-c", script], timeout=240)
-        assert rc == 0, raw
-    models = {model_id: set(efforts) for model_id, efforts in json.loads(raw).items()}
+        rc, raw = run_in(container, ["codex", "debug", "models"], timeout=240, stdout_only=True)
+        if rc != 0:
+            pytest.fail(
+                f"`codex debug models` failed (exit {rc}): {raw[-500:]}; "
+                "run `just codex-login`, then rerun "
+                "`just codex-gate tests/e2e/test_e2e_reconcile.py`."
+            )
+        try:
+            entries = json.loads(raw)["models"]
+            if not isinstance(entries, list):
+                raise ValueError("models is not a list")
+            for entry in entries:
+                if not isinstance(entry["slug"], str) or not entry["slug"]:
+                    raise ValueError("invalid model ID")
+                if not isinstance(entry["visibility"], str):
+                    raise ValueError("invalid visibility")
+                levels = entry["supported_reasoning_levels"]
+                if not isinstance(levels, list) or not all(
+                    isinstance(level["effort"], str) for level in levels
+                ):
+                    raise ValueError("invalid supported_reasoning_levels")
+            models = {
+                entry["slug"]: {level["effort"] for level in entry["supported_reasoning_levels"]}
+                for entry in entries
+                if entry["visibility"] == "list"
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            pytest.fail(
+                f"`codex debug models` returned an invalid model list ({exc}); "
+                "update Codex, run `just codex-login`, then rerun "
+                "`just codex-gate tests/e2e/test_e2e_reconcile.py`."
+            )
+    if provider == "claude":
+        models = {model_id: set(efforts) for model_id, efforts in json.loads(raw).items()}
+    if not models and provider == "codex":
+        pytest.fail(
+            "`codex debug models` returned no visible models; update Codex, "
+            "run `just codex-login`, then rerun `just codex-gate tests/e2e/test_e2e_reconcile.py`."
+        )
     assert models, f"{provider} returned an empty current model catalog"
     return models
 
