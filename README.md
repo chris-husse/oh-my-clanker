@@ -202,6 +202,7 @@ Useful in-session skills:
 | `/omc:document` | Generate architecture docs in `.omc/docs/gitnexus/docs/` from that graph. |
 | `/omc:explain-dependency [<name>] <question>` | Explain a library/service at a pinned commit (default: its remote HEAD); first ask indexes it without LLM cost. |
 | `/omc:investigate <environment> <prompt>` | Run a read-only, environment-locked investigation with evidence and query workers; requires `.omc/skills/investigation-context`, whose `envs/<env>.md` briefings define the environments, and refuses without it. |
+| `/omc:mr-review <mr-link>` | Review a colleague's GitLab MR or GitHub PR against the intent its author linked, post the comments that survive reconciliation unattended with an automated-review footer, and keep the full review trail on disk. |
 | `/omc:rebase-main` | Rebase onto the latest base and re-mirror `.omc/docs/` from the primary; explain still queries the primary graph. |
 | `/omc:check-wt-config` | Review existing worktree config for faithful copies; `omc watch` seeds a starter when absent. |
 | `/omc:finish` | Publish the branch, also available without an audit. |
