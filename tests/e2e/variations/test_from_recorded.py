@@ -76,7 +76,13 @@ def test_failing_verify_blocks_implementation_handoff(stage_session):
         ["git", "rev-list", "--count", f"{recorded['head']}..HEAD"],
         cwd=m["worktree"],
     )
-    assert rc == 0 and int(commits.strip()) >= 1, f"no new task commits after record: {commits}"
+    assert rc == 0 and int(commits.strip()) >= 1, (
+        f"no new task commits after record: {commits!r} (git rc={rc})\n"
+        f"recorded head: {recorded['head']}\n"
+        f"current head: {after['head']}\n"
+        f"stage markers: {markers!r}\n"
+        f"implementation answer: {turn['text']}"
+    )
     plans = [
         path
         for path in after["spec_plan"]

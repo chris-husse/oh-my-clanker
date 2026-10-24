@@ -32,17 +32,20 @@ def test_wait_for_lock_blocks_until_released(tmp_path):
     holder = path.open("a+b")
     fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
     waiter = path.open("a+b")
-    released = []
 
     def release():
         time.sleep(0.3)
         fcntl.flock(holder, fcntl.LOCK_UN)
-        released.append(time.monotonic())
 
-    threading.Thread(target=release).start()
-    started = time.monotonic()
-    wait_for_lock(waiter, timeout=5, poll=0.05)
-    assert released and time.monotonic() - started >= 0.3
+    release_thread = threading.Thread(target=release)
+    release_thread.start()
+    try:
+        wait_for_lock(waiter, timeout=5, poll=0.05)
+    finally:
+        release_thread.join(timeout=5)
+    assert not release_thread.is_alive()
+    with pytest.raises(BlockingIOError):
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def test_wait_for_lock_times_out(tmp_path):

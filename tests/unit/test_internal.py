@@ -801,21 +801,31 @@ def test_refresh_unconfigured_exits_2(tmp_path, capsys, monkeypatch):
 
 
 def test_refresh_waits_for_busy_lock_holder(tmp_path, capsys, monkeypatch):
+    from omc import internal
     from omc.toolctx import ToolContext
-    from omc.watchlock import busy_lock
+    from omc.watchlock import BUSY_WAIT_MSG, busy_lock
 
     from .test_watchlock import _hold_in_subprocess
 
     repo, wt, calls, _ = _gitnexus_env_with_config(tmp_path, monkeypatch)
     _seed_fresh_index(repo)
     lock = busy_lock(ToolContext.from_env(), cwd=str(repo))
-    p = _hold_in_subprocess(lock.lock_file, 1.5)
+    p = _hold_in_subprocess(lock.lock_file, None)
+    original_say = internal._say
+
+    def say_and_release(msg):
+        original_say(msg)
+        if msg == BUSY_WAIT_MSG:
+            p.stdin.close()
+
+    monkeypatch.setattr(internal, "_say", say_and_release)
     old = _chdir(repo)
     try:
         rc = run_internal(["gitnexus", "refresh"])
     finally:
         os.chdir(old)
-    p.wait()
+        p.stdin.close()
+        p.wait(timeout=5)
     assert rc == 0
     assert "· waiting for another omc knowledge refresh to finish" in capsys.readouterr().err
 

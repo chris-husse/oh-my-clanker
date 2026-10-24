@@ -223,7 +223,7 @@ while still answering from the local graph.
 
 Finish rebases and refreshes the worktree's `.omc/docs/`, squashes to one commit, and runs **check → build → verify → review** before pushing with `--force-with-lease`; tracked files a stage changes are amended into the commit. The commit message is the MR/PR description generated from the diff, a compare URL is printed, and **you open the MR/PR**. Finish then moves the ticket to In Review on a best-effort basis and offers to close the worktree (the unmerged branch survives), address review comments with amend/re-push, or discuss the change. Stacked branches are refused.
 
-Project stages live in `.omc/skills/<stage>/SKILL.md`: check is the frequent unit gate, build builds the world without tests, verify is full E2E at major milestones, and review judges the diff. Each can run as `/omc:<stage>`; unconfigured project stages are no-ops. Review always adds omc's grug complexity lens: Important findings need a fix or a waiver in the design record's “Deliberate complexity” section. An unresolved finding or failed gate stops publication.
+Project stages live in `.omc/skills/<stage>/SKILL.md`: check is the frequent unit gate, build builds the world without tests, verify is full E2E at major milestones, and review judges the diff. Each can run as `/omc:<stage>`; unconfigured project stages are no-ops. Review always adds omc's grug complexity lens and human-review lens for human MR review rules. Important findings from either need a fix or a waiver in the design record's “Deliberate complexity” section; Minor findings are advisory. An unresolved finding, unavailable lens or failed gate stops publication.
 
 ## How omc is put together
 
@@ -329,7 +329,7 @@ omc is developed with omc: keep watch running in the primary checkout and start 
 | `.omc/skills/check` | Frequent quick gate: the unit suite. |
 | `.omc/skills/build` | World build during finish: format check, lint and package build, without tests. |
 | `.omc/skills/verify` | Docker golden lifecycle, then variations and smoke in parallel; 300 s per test. Codex gate when Codex code changed; tokens from gitignored `.env`, never public runners. Docker is required. |
-| `.omc/skills/review` | Branch diff checked against this repo's rules, plus omc's grug lens. |
+| `.omc/skills/review` | Branch diff checked against this repo's rules, plus omc's grug and human-review lenses. |
 | `.omc/skills/explain-context` | Where truth lives and the order sources take precedence. |
 | `.gitignore` | The primary `.gitnexus/` graph and generated `.omc/docs/` stay uncommitted; omc's worktree cut copies docs into worktrees. |
 | `docs/superpowers/specs/`, `docs/superpowers/plans/` | Dated design records and implementation plans. |
