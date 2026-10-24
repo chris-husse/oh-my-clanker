@@ -287,6 +287,23 @@ def test_readme_starts_with_regeneration_banner():
     assert (root / link.group(1)).is_file()
 
 
+def test_readme_documents_human_review():
+    root = Path(__file__).resolve().parents[2]
+    recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
+    lifecycle = recipe.split("#### `` ## The lifecycle:", 1)[1].split(
+        "#### `## How omc is put together`", 1
+    )[0]
+    readme = (root / "README.md").read_text()
+    review_stage = readme.split("Project stages live", 1)[1].split("## How omc is put together", 1)[
+        0
+    ]
+    for text in (lifecycle, review_stage):
+        assert "grug" in text
+        assert "human-review" in text
+        important = text.split("Important", 1)[1][:120]
+        assert "fix" in important and "waiver" in important
+
+
 def test_readme_documents_gitnexus_storage_contract():
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
     architecture = readme.split("## How omc is put together", 1)[1].split("## Prerequisites", 1)[0]

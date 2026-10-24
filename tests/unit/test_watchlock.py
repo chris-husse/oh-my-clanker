@@ -29,14 +29,24 @@ _HOLDER = (
     "_lock = FileLock(sys.argv[1])\n"
     "_lock.acquire()\n"
     "print('held', flush=True)\n"
-    "time.sleep(float(sys.argv[2]))\n"
+    "if sys.argv[2] == 'until-stdin':\n"
+    "    sys.stdin.readline()\n"
+    "else:\n"
+    "    time.sleep(float(sys.argv[2]))\n"
 )
 
 
 def _hold_in_subprocess(path, seconds):
-    """Acquire `path` in a child process; returns after the child confirms."""
+    """Acquire `path` in a child process; None holds until stdin closes."""
     p = subprocess.Popen(
-        [sys.executable, "-c", _HOLDER, str(path), str(seconds)],
+        [
+            sys.executable,
+            "-c",
+            _HOLDER,
+            str(path),
+            "until-stdin" if seconds is None else str(seconds),
+        ],
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
     )

@@ -185,8 +185,8 @@ its `envs/<env>.md` briefings define the environments), rebase-main, check-wt-co
 The rebase-main row and finish prose say only `.omc/docs/` is mirrored, while
 explain queries the primary graph.
 Explain optional check/build/verify/review semantics, order, standalone forms,
-no-op unconfigured project stages, always-on grug review and Important
-fix/waiver into Deliberate complexity. Finish rebases/mirrors, squashes with
+no-op unconfigured project stages, always-on grug and human-review lenses,
+and Important fix/waiver into Deliberate complexity. Finish rebases/mirrors, squashes with
 MR description, gates before force-with-lease; user opens MR. Preserve finish
 without audit and close-worktree/review-comments/discuss continuations.
 
@@ -248,7 +248,8 @@ agents run just recipes. Table with all ten surfaces and what each ensures:
 `.omc/skills/check` (unit gate);
 `.omc/skills/build` (format/lint/package, no tests); `.omc/skills/verify`
 (Docker golden then parallel variations/smoke, 300 s, Codex when changed,
-gitignored .env tokens); `.omc/skills/review` (rules + grug);
+gitignored .env tokens); `.omc/skills/review` (project rules + grug +
+human-review);
 `.omc/skills/explain-context` (truth order); `.gitignore` (primary-only graph
 and worktree docs, both uncommitted);
 `docs/superpowers/specs/`, `docs/superpowers/plans/` (dated records/plans).

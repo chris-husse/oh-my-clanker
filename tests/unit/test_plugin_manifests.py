@@ -47,6 +47,96 @@ def test_codex_plugin_manifest():
     assert data["skills"] == "./skills/"
 
 
+def _human_review_rule_ids():
+    path = ROOT / "skills" / "human-review" / "mr-feedback-rules.md"
+    assert path.is_file(), f"missing bundled rules: {path}"
+    lines = path.read_text().splitlines()
+    assert lines and re.fullmatch(r"# [^#\s].*", lines[0]), "rules need a first-line title"
+
+    counts = {}
+    ids = set()
+    slugs = set()
+    category = None
+    rule = None
+    body = []
+    preamble = []
+
+    def finish_rule():
+        if rule is None:
+            return
+        content = list(body)
+        while content and not content[0].strip():
+            content.pop(0)
+        while content and not content[-1].strip():
+            content.pop()
+        flags = [i for i, line in enumerate(content) if line.startswith("Flag:")]
+        fines = [i for i, line in enumerate(content) if line.startswith("Fine:")]
+        assert len(flags) == len(fines) == 1, f"{rule}: need one Flag: and Fine:"
+        flag, fine = flags[0], fines[0]
+        assert 0 < flag < fine, f"{rule}: principle, Flag:, Fine: order"
+        assert re.match(r"Flag:\s+\S", content[flag]), f"{rule}: empty Flag:"
+        assert re.match(r"Fine:\s+\S", content[fine]), f"{rule}: empty Fine:"
+        assert all(line.strip() for line in content), f"{rule}: extra paragraph"
+
+    for line in lines[1:]:
+        if line.startswith("#"):
+            finish_rule()
+            body = []
+            rule = None
+            if line.startswith("###"):
+                match = re.fullmatch(r"### ([a-z][a-z0-9-]*)/([a-z][a-z0-9-]*)", line)
+                assert match, f"malformed rule heading: {line}"
+                assert match[1] == category, f"rule outside enclosing category: {line}"
+                rule = f"{match[1]}/{match[2]}"
+                assert match[2] not in slugs, f"duplicate slug: {match[2]}"
+                slugs.add(match[2])
+                ids.add(rule)
+                counts[category] += 1
+            else:
+                match = re.fullmatch(r"## ([a-z][a-z0-9-]*)", line)
+                assert match, f"malformed category heading: {line}"
+                category = match[1]
+                assert category not in counts, f"duplicate category: {category}"
+                counts[category] = 0
+        elif rule is not None:
+            body.append(line)
+        elif category is None:
+            preamble.append(line)
+        else:
+            assert not line.strip(), f"text outside rule in {category}: {line}"
+
+    finish_rule()
+    assert "Format, which review tooling parses:" in "\n".join(preamble)
+    return ids, counts
+
+
+def test_human_review_rules_grammar():
+    ids, counts = _human_review_rule_ids()
+    assert counts == {
+        "types": 1,
+        "structure": 6,
+        "data-flow": 2,
+        "control-flow": 1,
+        "errors": 3,
+        "observability": 3,
+        "naming": 1,
+        "docs": 2,
+        "tests": 6,
+        "scope": 4,
+        "config": 2,
+    }
+    assert len(ids) == 31
+
+
+def test_human_review_reference_slug_parity():
+    rules, _ = _human_review_rule_ids()
+    path = ROOT / "skills" / "human-review" / "mr-feedback-reference.md"
+    assert path.is_file(), f"missing bundled reference: {path}"
+    headings = [line for line in path.read_text().splitlines() if line.startswith("###")]
+    assert all(re.fullmatch(r"### [a-z][a-z0-9-]*/[a-z][a-z0-9-]*", line) for line in headings)
+    assert {line.removeprefix("### ") for line in headings} == rules
+
+
 def test_distributed_plugin_payloads_match_supported_providers():
     payloads = {path.parent.name for path in ROOT.glob(".*-plugin/plugin.json")}
     payloads.update(path.parents[1].name for path in ROOT.glob(".*/plugins/*.js"))
@@ -84,6 +174,7 @@ INTERNAL_SKILLS = (
     "gitnexus-explain",
     "ticket-sync",
     "grug",
+    "human-review",
 )
 
 
@@ -106,6 +197,52 @@ def test_internal_skills_marked_internal():
         assert "not meant for direct invocation" in m.group(1)
 
 
+def test_human_review_skill_contract():
+    text = (ROOT / "skills" / "human-review" / "SKILL.md").read_text()
+    prose = " ".join(text.split())
+    frontmatter = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert frontmatter, "human-review: missing frontmatter"
+    assert "Internal" in frontmatter.group(1)
+    assert "not meant for direct invocation" in frontmatter.group(1)
+
+    for needle in (
+        "$ARGUMENTS",
+        "mr-feedback-rules.md",
+        "Flag:",
+        "Fine:",
+        "human-review:<category>/<slug>",
+        "Deliberate complexity",
+        "Important",
+        "Minor",
+        "ambiguous",
+        "Never Critical",
+        "invalid rules",
+        "rules consulted",
+    ):
+        assert needle in text, f"human-review skill missing {needle!r}"
+
+    for needle in (
+        "Do not read `mr-feedback-reference.md`",
+        "Do not read project conventions",
+        "Do not read source files outside the diff",
+        "Do not run knowledge-graph queries",
+        "Do not edit files",
+        "Do not dispatch workers",
+    ):
+        assert needle in prose, f"human-review skill missing isolation rule {needle!r}"
+    assert "/omc:human-review" not in text
+
+    for needle in (
+        "missing, unreadable, or invalid",
+        "human-review: invalid rules — <reason>",
+        "single line and zero findings",
+        "failed base resolution, fetch, or diff",
+        "human-review: cannot resolve base <base>; skipping the lens",
+        "return with zero findings",
+    ):
+        assert needle in prose, f"human-review skill missing failure contract {needle!r}"
+
+
 def test_finish_skill_contract():
     text = (ROOT / "skills" / "finish" / "SKILL.md").read_text()
     for needle in (
@@ -126,6 +263,13 @@ def test_finish_skill_contract():
     assert order == sorted(order), (
         "finish must order squash -> check -> build -> verify -> review -> push"
     )
+    stage = text.split("## Step 4", 1)[1].split("## Step 5", 1)[0]
+    tracked_changes = stage.split("- A stage that changed TRACKED files", 1)[1].split(
+        "- Unconfigured", 1
+    )[0]
+    unconfigured_review = stage.split("- Unconfigured", 1)[1]
+    assert "grug and human-review" in tracked_changes
+    assert "grug and human-review" in unconfigured_review
 
 
 def test_stage_proxy_contract():
@@ -175,6 +319,62 @@ def test_review_proxy_dispatches_grug_judgment_on_review_choice():
     assert "grug diff <base>" in judgment
     assert "main session" in judgment
     assert "orchestrator model" in judgment
+
+
+def test_review_proxy_runs_human_review():
+    text = (ROOT / "skills" / "review" / "SKILL.md").read_text()
+    prose = " ".join(text.split())
+    steps = text.split("## Steps", 1)[1]
+    judgment = " ".join(
+        steps.split("3. **Grug lens.**", 1)[1].split("- **Grug unavailable.", 1)[0].split()
+    )
+
+    assert "human-review" in judgment, "review must invoke the bundled human lens"
+    assert steps.index(".omc/skills/review") < steps.index("grug diff <base>")
+    assert steps.index(".omc/skills/review") < steps.index("human-review <base>")
+    for needle in (
+        "Dispatch a grug judge worker",
+        "Dispatch a human-review judge worker",
+        "tasks.review.model",
+        "tasks.review.effort",
+        "parallel",
+        "grug first",
+        "fresh or partial-history fork",
+        "orchestrator model",
+        "no worker can be dispatched",
+        "inline",
+        "main session owns disposition",
+    ):
+        assert needle in judgment, f"review judgment missing {needle!r}"
+
+    for failure in (
+        "human-review skill unavailable — plugin stale? run omc update",
+        "human-review: invalid rules",
+    ):
+        location = text.index(failure)
+        assert '"passed": false' in text[location - 400 : location + 200]
+    assert "skip both lenses" in prose
+    assert "failed fetch" in prose and "does not fail" in prose
+
+    for needle in (
+        "Important findings from both lenses",
+        "overlapping hunk",
+        "one fix and one `/omc:check`",
+        "revert",
+        "human-review:<category>/<slug>",
+        "Deliberate complexity",
+        "one numbered list",
+        "Minor findings from both lenses",
+        "never gate",
+    ):
+        assert needle in prose, f"review disposition missing {needle!r}"
+    assert text.index("Fix first, Review") < text.index("**waive**") < text.index("batched")
+    assert "project stage ok; grug 0 findings; human-review" in text
+    assert "no project review stage; grug 0 findings; human-review" in text
+    assert "describes the PROJECT stage only" in prose
+    assert "both lenses ran, human-review's rules were valid" in prose
+    for stage in ("check", "build", "verify"):
+        assert "human-review" not in (ROOT / "skills" / stage / "SKILL.md").read_text()
 
 
 def test_squash_skill_contract():
