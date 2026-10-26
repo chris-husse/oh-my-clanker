@@ -16,6 +16,8 @@ from omc.config import store
 from omc.config.schema import GlobalConfig, ProjectConfig, SecretsConfig
 from omc.toolctx import ToolContext
 
+from ._stubs import DEFAULT_CODEX_CATALOG, make_codex_stub
+
 _PROJECT = Path(__file__).resolve().parents[2]
 
 
@@ -27,6 +29,9 @@ class MenuTerminal:
         self.home.mkdir()
         self.repo = tmp_path / "repo"
         self.repo.mkdir()
+        bindir = tmp_path / "bin"
+        make_codex_stub(bindir, catalog=DEFAULT_CODEX_CATALOG)
+        stub_path = f"{bindir}:{os.environ.get('PATH', '')}"
         initial = GlobalConfig()
         initial.llm.default = "codex"
         if seed_config:
@@ -46,7 +51,7 @@ from omc.config.schema import GlobalConfig, ProjectConfig
 from omc.errors import Refusal
 from omc.toolctx import ToolContext
 home = Path({str(self.home)!r})
-ctx = ToolContext(home=home, env={{}})
+ctx = ToolContext(home=home, env={{"HOME": {str(self.home)!r}, "PATH": {stub_path!r}}})
 gcfg = store.load_global(home) or GlobalConfig()
 try:
     flags = configure._run_menu(
@@ -73,7 +78,7 @@ print('RESULT:', flags, flush=True)
                 stdout=slave,
                 stderr=slave,
                 cwd=_PROJECT,
-                env={**os.environ, "PYTHONPATH": str(_PROJECT / "src")},
+                env={**os.environ, "PYTHONPATH": str(_PROJECT / "src"), "PATH": stub_path},
                 start_new_session=True,
             )
         finally:

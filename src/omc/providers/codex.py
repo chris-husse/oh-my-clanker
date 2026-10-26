@@ -34,9 +34,6 @@ class CodexProvider(Provider):
         # Codex 0.158 loads this global AGENTS.md in every session.
         return self._instruction_dir(env, "CODEX_HOME", ".codex") / "AGENTS.md"
 
-    def model_list_path(self, env: Mapping[str, str]) -> Path:
-        return self._instruction_dir(env, "CODEX_HOME", ".codex") / "models_cache.json"
-
     def models(self):
         return []  # free-text entry; codex model ids move fast
 

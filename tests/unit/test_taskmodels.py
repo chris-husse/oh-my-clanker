@@ -1,6 +1,5 @@
 import json
 import shlex
-import stat
 
 import pytest
 
@@ -17,14 +16,25 @@ from omc.taskmodels import (
 )
 from omc.toolctx import ToolContext
 
+from . import _stubs
 from ._stubs import make_stub, stub_env
 
 
 def _ctx(tmp_path):
-    return ToolContext.from_env({"HOME": str(tmp_path), "CODEX_HOME": str(tmp_path / "codex")})
+    return ToolContext.from_env(
+        {
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "PATH": str(tmp_path / "bin"),
+        }
+    )
 
 
-def _cache(tmp_path, models):
+def _codex_stub(tmp_path, models):
+    return _stubs.make_codex_stub(tmp_path / "bin", catalog={"models": models})
+
+
+def _plant_cache(tmp_path, models):
     path = tmp_path / "codex" / "models_cache.json"
     path.parent.mkdir()
     path.write_text(json.dumps({"models": models}))
@@ -43,8 +53,173 @@ def _model(slug, display, priority, *, visibility="list", levels=("medium", "hig
     }
 
 
+def test_other_client_cache_cannot_choose_launch_model(tmp_path):
+    from omc import reconcile
+    from omc.config import store
+    from omc.config.schema import GlobalConfig
+    from omc.session import session_plan
+
+    bindir = tmp_path / "bin"
+    make_stub(
+        bindir,
+        "codex",
+        stdout=json.dumps({"models": [_model("gpt-6-sol", "GPT-6-Sol", 1)]}),
+    )
+    ctx = ToolContext.from_env(stub_env(bindir))
+    cache = tmp_path / ".codex" / "models_cache.json"
+    cache.parent.mkdir()
+    cache.write_text(
+        json.dumps(
+            {"client_version": "0.159.2", "models": [_model("gpt-6.1-sol", "GPT-6.1-Sol", 0)]}
+        )
+    )
+    cfg = Config()
+    cfg.llm.default = "codex"
+    store.save_global(ctx.home, GlobalConfig(llm=cfg.llm))
+    config_path = ctx.home / "config.yaml"
+    before = config_path.read_bytes()
+
+    plan = session_plan(
+        ctx, cfg, seed="/omc:implement", slug="s", session_name="s", title="t", cwd="."
+    )
+    assert plan.session_argv[plan.session_argv.index("-m") + 1] == "gpt-6-sol"
+    assert "gpt-6.1-sol" not in plan.session_argv
+    lines = []
+    assert reconcile.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False) is cfg
+    assert lines == ["✓ codex models current (1 listed)"]
+    assert config_path.read_bytes() == before
+
+
+def test_make_codex_stub_routes_debug_models_and_records_calls(tmp_path):
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv"
+    catalog = {"models": [_model("gpt-6-sol", "GPT-6-Sol", 1)]}
+    _stubs.make_codex_stub(bindir, catalog=catalog, stdout="launch reply", argv_log=log)
+    ctx = ToolContext.from_env(stub_env(bindir))
+
+    listed = ctx.run_bounded(["codex", "debug", "models"], timeout=1)
+    launched = ctx.run_bounded(["codex", "exec", "hello"], timeout=1)
+    assert listed.returncode == 0 and json.loads(listed.stdout) == catalog
+    assert launched.returncode == 0 and launched.stdout.strip() == "launch reply"
+    assert log.read_text().splitlines() == ["debug models", "exec hello"]
+
+
+def test_debug_models_prefers_visible_priority_and_efforts(tmp_path):
+    bindir = tmp_path / "bin"
+    _stubs.make_codex_stub(
+        bindir,
+        catalog={
+            "models": [
+                _model("gpt-hidden-sol", "GPT Sol", 0, visibility="hide"),
+                _model("gpt-solar", "GPT Solar", 0),
+                _model("gpt-6-sol", "GPT-6-Sol", 1, levels=("high",)),
+                _model("gpt-old-sol", "GPT Sol", 9),
+            ]
+        },
+    )
+    ctx = ToolContext.from_env(stub_env(bindir))
+    assert resolve_choice(ctx, "codex", "sol:high", validate_effort=True) == ModelChoice(
+        "gpt-6-sol", "high"
+    )
+
+
+@pytest.mark.parametrize("body", ["", "{broken", "[]", '{"models":[{"slug":1}]}'])
+def test_debug_models_invalid_output_never_uses_cache(tmp_path, body):
+    bindir = tmp_path / "bin"
+    _stubs.make_codex_stub(bindir, catalog=body)
+    _plant_cache(tmp_path, [_model("gpt-6.1-sol", "GPT-6.1-Sol", 0)])
+    ctx = ToolContext.from_env(stub_env(bindir, CODEX_HOME=str(tmp_path / "codex")))
+    with pytest.raises(ConfigError, match="codex debug models"):
+        resolve_choice(ctx, "codex", "sol")
+
+
+def test_debug_models_nonzero_and_timeout_never_use_cache(tmp_path, monkeypatch):
+    bindir = tmp_path / "bin"
+    _stubs.make_codex_stub(bindir, catalog="CLI failed", catalog_rc=17)
+    _plant_cache(tmp_path, [_model("gpt-6.1-sol", "GPT-6.1-Sol", 0)])
+    ctx = ToolContext.from_env(stub_env(bindir, CODEX_HOME=str(tmp_path / "codex")))
+    with pytest.raises(ConfigError, match=r"codex debug models.*17.*CLI failed"):
+        resolve_choice(ctx, "codex", "sol")
+
+    def timed_out(*args, **kwargs):
+        raise TimeoutError("deadline exceeded")
+
+    monkeypatch.setattr(ctx, "run_bounded", timed_out)
+    with pytest.raises(ConfigError, match=r"codex debug models.*timed out"):
+        taskmodels.catalog(ctx, "codex")
+
+
+def test_debug_models_undecodable_output_names_command(tmp_path, monkeypatch):
+    ctx = ToolContext.from_env(stub_env(tmp_path / "bin"))
+
+    def undecodable(*args, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(ctx, "run_bounded", undecodable)
+    with pytest.raises(ConfigError, match="codex debug models"):
+        resolve_choice(ctx, "codex", "sol")
+
+
+def test_debug_models_missing_binary_has_install_hint(tmp_path):
+    ctx = ToolContext.from_env(stub_env(tmp_path / "bin"))
+    with pytest.raises(ConfigError, match=r"codex debug models.*npm install -g @openai/codex"):
+        resolve_choice(ctx, "codex", "sol")
+
+
+def test_debug_models_uses_bundled_stdout_and_ignores_stderr(tmp_path):
+    bindir = tmp_path / "bin"
+    script = _stubs.make_codex_stub(
+        bindir, catalog={"models": [_model("gpt-6-sol", "GPT-6-Sol", 1)]}
+    )
+    script.write_text(
+        script.read_text().replace("#!/bin/sh\n", "#!/bin/sh\nprintf 'not logged in\\n' >&2\n")
+    )
+    ctx = ToolContext.from_env(stub_env(bindir))
+    assert resolve_choice(ctx, "codex", "sol") == ModelChoice("gpt-6-sol", "")
+
+
+def test_debug_models_passes_codex_home(tmp_path):
+    bindir = tmp_path / "bin"
+    script = _stubs.make_codex_stub(
+        bindir, catalog={"models": [_model("gpt-6-sol", "GPT-6-Sol", 1)]}
+    )
+    seen = tmp_path / "seen-codex-home"
+    script.write_text(
+        script.read_text().replace(
+            "#!/bin/sh\n", f"#!/bin/sh\nprintf '%s' \"$CODEX_HOME\" > {shlex.quote(str(seen))}\n"
+        )
+    )
+    codex_home = tmp_path / "custom-codex-home"
+    ctx = ToolContext.from_env(stub_env(bindir, CODEX_HOME=str(codex_home)))
+    assert resolve_choice(ctx, "codex", "sol") == ModelChoice("gpt-6-sol", "")
+    assert seen.read_text() == str(codex_home)
+
+
+def test_debug_models_memo_is_per_context(tmp_path):
+    bindir = tmp_path / "bin"
+    log = tmp_path / "calls"
+    _stubs.make_codex_stub(
+        bindir,
+        catalog={
+            "models": [
+                _model("gpt-6-sol", "GPT-6-Sol", 1),
+                _model("gpt-6-astra", "GPT-6-Astra", 1),
+            ]
+        },
+        argv_log=log,
+    )
+    cfg = Config()
+    cfg.llm.default = "codex"
+    ctx = ToolContext.from_env(stub_env(bindir))
+    for task in taskmodels.TASKS:
+        assert task_choice(ctx, cfg, task).model_arg in {"gpt-6-sol", "gpt-6-astra"}
+    assert log.read_text().splitlines() == ["debug models"]
+    task_choice(ToolContext.from_env(stub_env(bindir)), cfg, "orchestrator")
+    assert log.read_text().splitlines() == ["debug models", "debug models"]
+
+
 def test_codex_resolves_newest_visible_exact_family_word(tmp_path):
-    _cache(
+    _codex_stub(
         tmp_path,
         [
             _model("gpt-old-sol", "GPT Sol", 5),
@@ -67,13 +242,13 @@ def test_full_ids_and_claude_aliases_need_no_cache(tmp_path):
     )
 
 
-def test_missing_cache_and_unavailable_family_offer_actionable_choices(tmp_path):
+def test_missing_binary_and_unavailable_family_offer_actionable_choices(tmp_path):
     ctx = _ctx(tmp_path)
-    with pytest.raises(ConfigError, match="run omc configure"):
+    with pytest.raises(ConfigError, match="npm install -g @openai/codex"):
         resolve_choice(ctx, "codex", "sol")
-    _cache(tmp_path, [_model("gpt-6-astra", "GPT-6-Astra", 1)])
+    _codex_stub(tmp_path, [_model("gpt-6-astra", "GPT-6-Astra", 1)])
     with pytest.raises(ConfigError, match="astra"):
-        resolve_choice(ctx, "codex", "sol")
+        resolve_choice(_ctx(tmp_path), "codex", "sol")
 
 
 @pytest.mark.parametrize(
@@ -96,16 +271,14 @@ def test_missing_cache_and_unavailable_family_offer_actionable_choices(tmp_path)
         ),
     ],
 )
-def test_malformed_cache_names_file(tmp_path, body):
-    path = tmp_path / "codex" / "models_cache.json"
-    path.parent.mkdir()
-    path.write_text(body)
-    with pytest.raises(ConfigError, match="models_cache.json"):
+def test_malformed_debug_models_names_command(tmp_path, body):
+    _stubs.make_codex_stub(tmp_path / "bin", catalog=body)
+    with pytest.raises(ConfigError, match="codex debug models"):
         resolve_choice(_ctx(tmp_path), "codex", "sol")
 
 
 def test_model_effort_checked_only_for_configure_probe(tmp_path):
-    _cache(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1, levels=("medium",))])
+    _codex_stub(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1, levels=("medium",))])
     ctx = _ctx(tmp_path)
     assert resolve_choice(ctx, "codex", "sol:high") == ModelChoice("gpt-6-sol", "high")
     with pytest.raises(ConfigError, match="medium"):
@@ -113,7 +286,7 @@ def test_model_effort_checked_only_for_configure_probe(tmp_path):
 
 
 def test_task_defaults_and_explicit_values(tmp_path):
-    _cache(
+    _codex_stub(
         tmp_path,
         [
             _model("gpt-6-sol", "GPT-6-Sol", 1),
@@ -132,7 +305,7 @@ def test_task_defaults_and_explicit_values(tmp_path):
 
 
 def test_model_options_default_first_other_last_and_live_efforts(tmp_path):
-    _cache(
+    _codex_stub(
         tmp_path,
         [
             _model("gpt-6-sol", "GPT-6-Sol", 1, levels=("medium", "high")),
@@ -151,48 +324,43 @@ def test_model_options_default_first_other_last_and_live_efforts(tmp_path):
     assert "Opus (high)" in model_options(_ctx(tmp_path), "claude", "orchestrator")
 
 
-def test_codex_picker_falls_back_to_families_without_cache(tmp_path):
-    options = model_options(_ctx(tmp_path), "codex", "design")
-    assert list(options.values()) == ["", "astra", "sol", "__other__"]
-
-
-def test_codex_picker_falls_back_to_families_on_unreadable_cache(tmp_path):
-    path = tmp_path / "codex" / "models_cache.json"
-    path.parent.mkdir()
-    path.write_text("{broken")
+def test_codex_picker_falls_back_to_families_without_binary(tmp_path):
     warnings = []
     options = model_options(_ctx(tmp_path), "codex", "design", warn=warnings.append)
     assert list(options.values()) == ["", "astra", "sol", "__other__"]
-    assert len(warnings) == 1 and "models_cache.json" in warnings[0]
-    with pytest.raises(ConfigError, match="models_cache.json"):
+    assert len(warnings) == 1 and "codex debug models" in warnings[0]
+
+
+def test_codex_picker_falls_back_to_families_on_invalid_cli_output(tmp_path):
+    _stubs.make_codex_stub(tmp_path / "bin", catalog="{broken")
+    warnings = []
+    options = model_options(_ctx(tmp_path), "codex", "design", warn=warnings.append)
+    assert list(options.values()) == ["", "astra", "sol", "__other__"]
+    assert len(warnings) == 1 and "codex debug models" in warnings[0]
+    with pytest.raises(ConfigError, match="codex debug models"):
         resolve_choice(_ctx(tmp_path), "codex", "sol")
 
 
 def test_reasoning_levels_need_only_an_effort(tmp_path):
     model = _model("gpt-6-sol", "GPT-6-Sol", 1)
     model["supported_reasoning_levels"] = [{"effort": "high"}]
-    _cache(tmp_path, [model])
+    _codex_stub(tmp_path, [model])
     assert resolve_choice(_ctx(tmp_path), "codex", "sol:high", validate_effort=True) == (
         ModelChoice("gpt-6-sol", "high")
     )
 
 
-def test_codex_selection_probes_default_model_and_reads_refreshed_cache(tmp_path):
+def test_codex_family_selection_reads_catalog_without_model_turn(tmp_path):
     codex_home = tmp_path / "codex"
     codex_home.mkdir()
     bindir = tmp_path / "bin"
-    bindir.mkdir()
     argv_log = tmp_path / "argv"
-    fixture = json.dumps({"models": [_model("gpt-6-sol", "GPT-6-Sol", 1)]})
-    stub = bindir / "codex"
-    stub.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' \"$*\" > {shlex.quote(str(argv_log))}\n"
-        f"/bin/cat > {shlex.quote(str(codex_home / 'models_cache.json'))} <<'CACHE'\n"
-        f"{fixture}\nCACHE\n"
-        "printf 'OK\\n'\n"
+    _stubs.make_codex_stub(
+        bindir,
+        catalog={"models": [_model("gpt-6-sol", "GPT-6-Sol", 1)]},
+        stdout="OK",
+        argv_log=argv_log,
     )
-    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
     ctx = ToolContext.from_env(
         {"HOME": str(tmp_path), "CODEX_HOME": str(codex_home), "PATH": str(bindir)}
     )
@@ -200,7 +368,7 @@ def test_codex_selection_probes_default_model_and_reads_refreshed_cache(tmp_path
     assert validate_selection(
         ctx, "codex", "sol:high", task="medium", say=said.append
     ) == ModelChoice("gpt-6-sol", "high")
-    assert argv_log.read_text().strip() == "exec --skip-git-repo-check Reply with exactly OK."
+    assert argv_log.read_text().splitlines() == ["debug models"]
     assert said[-1] == "✓ sol:high → gpt-6-sol (high)"
 
 
@@ -222,21 +390,19 @@ def test_claude_selection_asks_for_exact_id_once_without_storing_it(tmp_path, mo
     assert said[-1] == "✓ fable → claude-fable-5-1"
 
 
-def test_codex_selection_requires_refreshed_cache_and_supported_effort(tmp_path, monkeypatch):
+def test_codex_selection_requires_catalog_and_supported_effort(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     monkeypatch.setattr(
         "omc.docsllm.cli_model_probe", lambda *a, **kw: (True, "default model works")
     )
-    with pytest.raises(ConfigError, match="open codex once to fetch its model list"):
+    with pytest.raises(ConfigError, match="codex debug models"):
         validate_selection(ctx, "codex", "sol", task="simple", say=lambda _: None)
-    _cache(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1, levels=("medium",))])
+    _codex_stub(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1, levels=("medium",))])
     with pytest.raises(ConfigError, match="supported efforts: medium"):
-        validate_selection(ctx, "codex", "sol:high", task="medium", say=lambda _: None)
+        validate_selection(_ctx(tmp_path), "codex", "sol:high", task="medium", say=lambda _: None)
 
 
-def test_codex_selection_without_refresh_reuses_cache_and_full_id_probes_itself(
-    tmp_path, monkeypatch
-):
+def test_codex_selection_reuses_catalog_and_full_id_probes_itself(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(
         "omc.docsllm.cli_model_probe", lambda *a, **kw: (calls.append((a[2:], kw)) or True, "OK")
@@ -247,12 +413,24 @@ def test_codex_selection_without_refresh_reuses_cache_and_full_id_probes_itself(
         ctx, "codex", "gpt-6-sol:high", task="medium", say=lambda _: None
     ) == ModelChoice("gpt-6-sol", "high")
     assert calls == [(("gpt-6-sol",), {"effort": "high"})]
-    # refresh=False resolves against the list already on disk, no turn spent.
-    _cache(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1)])
+    # A family resolves against the context's already-read catalog without a turn.
+    log = tmp_path / "codex-argv"
+    _stubs.make_codex_stub(
+        tmp_path / "bin",
+        catalog={"models": [_model("gpt-6-sol", "GPT-6-Sol", 1)]},
+        argv_log=log,
+    )
+    model_options(ctx, "codex", "medium")
+    _stubs.make_codex_stub(
+        tmp_path / "bin",
+        catalog={"models": [_model("gpt-6.1-sol", "GPT-6.1-Sol", 0)]},
+        argv_log=log,
+    )
     assert validate_selection(
-        ctx, "codex", "sol:high", task="medium", say=lambda _: None, refresh=False
+        ctx, "codex", "sol:high", task="medium", say=lambda _: None
     ) == ModelChoice("gpt-6-sol", "high")
     assert len(calls) == 1
+    assert log.read_text().splitlines() == ["debug models"]
 
 
 def test_probe_key_drops_claude_task_effort_but_keeps_orchestrator_effort():
@@ -265,7 +443,7 @@ def test_probe_key_drops_claude_task_effort_but_keeps_orchestrator_effort():
 
 
 def test_default_clear_resolves_effective_value(tmp_path, monkeypatch):
-    _cache(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1)])
+    _codex_stub(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1)])
     calls = []
     monkeypatch.setattr(
         "omc.docsllm.cli_model_probe", lambda *a, **kw: (calls.append((a, kw)) or True, "OK")
@@ -273,7 +451,7 @@ def test_default_clear_resolves_effective_value(tmp_path, monkeypatch):
     assert validate_selection(
         _ctx(tmp_path), "codex", "", task="medium", say=lambda _: None
     ) == ModelChoice("gpt-6-sol", "high")
-    assert len(calls) == 1
+    assert calls == []
 
 
 def test_session_and_headless_launch_use_orchestrator_and_provider_env(tmp_path):
@@ -281,7 +459,7 @@ def test_session_and_headless_launch_use_orchestrator_and_provider_env(tmp_path)
 
     from omc.session import run_headless, session_plan
 
-    _cache(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1)])
+    _codex_stub(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1)])
     cfg = Config()
     cfg.llm.default = "codex"
     plan = session_plan(
@@ -303,14 +481,20 @@ def test_session_and_headless_launch_use_orchestrator_and_provider_env(tmp_path)
 
     class CaptureCtx:
         env = _ctx(tmp_path).env
+        runtime_cache = {}
 
         def run(self, argv, cwd=None, extra_env=None):
             self.argv = argv
             self.extra_env = extra_env
             return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-        def read_text(self, path):
-            return path.read_text()
+        def run_bounded(self, argv, *, timeout):
+            assert argv == ["codex", "debug", "models"]
+            return SimpleNamespace(
+                stdout=json.dumps({"models": [_model("gpt-6-sol", "GPT-6-Sol", 1)]}),
+                stderr="",
+                returncode=0,
+            )
 
     ctx = CaptureCtx()
     assert run_headless(ctx, cfg, "/omc:implement", ".", "s") == 0
@@ -413,15 +597,21 @@ def test_slug_uses_codex_orchestrator_model_and_effort(tmp_path):
 
     from omc.slug import fetch_slug
 
-    _cache(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1)])
+    _codex_stub(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1)])
     cfg = Config()
     cfg.llm.default = "codex"
 
     class CaptureCtx:
         env = _ctx(tmp_path).env
+        runtime_cache = {}
 
-        def read_text(self, path):
-            return path.read_text()
+        def run_bounded(self, argv, *, timeout):
+            assert argv == ["codex", "debug", "models"]
+            return SimpleNamespace(
+                stdout=json.dumps({"models": [_model("gpt-6-sol", "GPT-6-Sol", 1)]}),
+                stderr="",
+                returncode=0,
+            )
 
         def run(self, argv, extra_env=None):
             self.argv = argv
@@ -449,6 +639,7 @@ def test_internal_models_verdict_and_refusals(tmp_path, capsys, monkeypatch):
 
     monkeypatch.setenv("OMC_HOME", str(tmp_path / "omc"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     monkeypatch.delenv("OMC_PROVIDER", raising=False)
     assert run_internal(["models"]) == 2
     line = capsys.readouterr().out.strip()
@@ -472,8 +663,10 @@ def test_internal_models_verdict_and_refusals(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("OMC_PROVIDER", "codex")
     assert run_internal(["models"]) == 2
     payload = json.loads(capsys.readouterr().out.strip().split(" ", 1)[1])
-    assert payload["ok"] is False and "run omc configure" in payload["message"]
-    _cache(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1), _model("gpt-6-astra", "GPT-6-Astra", 1)])
+    assert payload["ok"] is False and "codex debug models" in payload["message"]
+    _codex_stub(
+        tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1), _model("gpt-6-astra", "GPT-6-Astra", 1)]
+    )
     assert run_internal(["models"]) == 0
     payload = json.loads(capsys.readouterr().out.strip().split(" ", 1)[1])
     assert payload["provider"] == "codex"
@@ -525,7 +718,7 @@ def test_internal_models_uses_only_global_config(tmp_path, capsys, monkeypatch, 
 
 
 def test_codex_catalog_orders_visible_exact_families_and_keeps_supported_efforts(tmp_path):
-    _cache(
+    _codex_stub(
         tmp_path,
         [
             _model("gpt-5-sol", "GPT Sol", 9, levels=("medium",)),
@@ -554,17 +747,15 @@ def test_codex_catalog_orders_visible_exact_families_and_keeps_supported_efforts
     assert not taskmodels.compatible("gpt-6-sol", "medium", listed)
 
 
-def test_codex_catalog_uses_codex_home_and_distinguishes_missing_from_malformed(tmp_path):
+def test_codex_catalog_refresh_replaces_missing_and_malformed_results(tmp_path):
     ctx = _ctx(tmp_path)
-    with pytest.raises(taskmodels.CatalogMissing, match="models_cache.json.*open codex once"):
+    with pytest.raises(ConfigError, match="codex debug models"):
         taskmodels.catalog(ctx, "codex")
-    path = tmp_path / "codex" / "models_cache.json"
-    path.parent.mkdir()
-    path.write_text('{"models": ["not a model"]}')
-    with pytest.raises(ConfigError, match="models_cache.json") as exc:
+    _stubs.make_codex_stub(tmp_path / "bin", catalog='{"models": ["not a model"]}')
+    with pytest.raises(ConfigError, match="codex debug models") as exc:
         taskmodels.catalog(ctx, "codex")
     assert not isinstance(exc.value, taskmodels.CatalogMissing)
-    path.write_text(json.dumps({"models": [_model("gpt-6-sol", "GPT Sol", 1)]}))
+    _codex_stub(tmp_path, [_model("gpt-6-sol", "GPT Sol", 1)])
     assert taskmodels.catalog(ctx, "codex") == [
         taskmodels.CatalogModel("gpt-6-sol", "sol", ("medium", "high"))
     ]

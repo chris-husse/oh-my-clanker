@@ -36,6 +36,7 @@ class ToolContext:
     uv_env: dict[str, str] = field(default_factory=dict)
     wt_bin: str = "wt"
     git_bin: str = "git"
+    runtime_cache: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> ToolContext:

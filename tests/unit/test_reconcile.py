@@ -242,8 +242,7 @@ def _config(ctx: ToolContext, provider: str = "codex", **leaves: str) -> Config:
 
 
 def _codex_catalog(ctx: ToolContext, models: list[tuple[str, str, tuple[str, ...]]]) -> Path:
-    path = Path(ctx.env["HOME"]) / ".codex" / "models_cache.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = Path(ctx.env["HOME"]) / "codex.catalog.json"
     path.write_text(
         json.dumps(
             {
@@ -308,9 +307,6 @@ def _cli_stub(
     provider: str,
     *,
     auth_status: dict[str, object] | None = None,
-    refreshed: tuple[Path, str] | None = None,
-    refresh_output: str = "OK",
-    refresh_rc: int = 0,
     remap_output: str = "",
     remap_rc: int = 0,
     remap_edit: tuple[Path, str] | None = None,
@@ -336,14 +332,17 @@ with Path({str(log)!r}).open("a") as handle:
 if {provider!r} == "claude" and args == ["auth", "status"]:
     print(json.dumps({status!r}))
     sys.exit(0)
+if {provider!r} == "codex" and args == ["debug", "models"]:
+    catalog = Path({str(Path(ctx.env["HOME"]) / "codex.catalog.json")!r})
+    if not catalog.exists():
+        print("catalog unavailable", file=sys.stderr)
+        sys.exit(1)
+    print(catalog.read_text())
+    sys.exit(0)
 prompt = args[1] if {provider!r} == "claude" else args[-1]
 if prompt == "Reply with exactly OK.":
-    refreshed = {None if refreshed is None else (str(refreshed[0]), refreshed[1])!r}
-    if refreshed is not None:
-        Path(refreshed[0]).parent.mkdir(parents=True, exist_ok=True)
-        Path(refreshed[0]).write_text(refreshed[1])
-    print({refresh_output!r})
-    sys.exit({refresh_rc})
+    print("OK")
+    sys.exit(0)
 edit = {None if remap_edit is None else (str(remap_edit[0]), remap_edit[1])!r}
 if edit is not None:
     Path(edit[0]).write_text(edit[1])
@@ -357,6 +356,20 @@ sys.exit({remap_rc})
 
 
 def _calls(log: Path) -> list[list[str]]:
+    # Older assertions focus on model turns; catalog reads are separately
+    # covered by the taskmodels regression and reader tests.
+    return (
+        [
+            args
+            for line in log.read_text().splitlines()
+            if (args := json.loads(line)) != ["debug", "models"]
+        ]
+        if log.exists()
+        else []
+    )
+
+
+def _all_calls(log: Path) -> list[list[str]]:
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
 
@@ -462,20 +475,49 @@ def test_dry_run_reports_every_stale_leaf_before_success_sentinel(tmp_path):
     assert (ctx.home / "config.yaml").read_bytes() == before
 
 
-def test_refresh_rereads_cli_catalog_and_preserves_new_original_id(tmp_path):
+def test_codex_current_check_and_session_use_same_priority_winner(tmp_path):
+    from omc.session import session_plan
+
     ctx = _context(tmp_path)
-    cfg = _config(ctx, model="gpt-7-sol")
+    cfg = _config(ctx, model="sol:high")
     before = (ctx.home / "config.yaml").read_bytes()
     path = _codex_catalog(ctx, CODEX_CURRENT)
-    fresh = path.read_text().replace("gpt-6-sol", "gpt-7-sol")
-    log = _cli_stub(ctx, "codex", refreshed=(path, fresh))
+    log = _cli_stub(ctx, "codex")
     lines = []
 
     under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False)
+    path.write_text(path.read_text().replace('"slug": "gpt-6-sol"', '"slug": "gpt-6.1-sol"'))
+    plan = session_plan(
+        ctx, cfg, seed="/omc:implement", slug="fix", session_name="fix", title="fix", cwd="."
+    )
 
-    assert _headless(_calls(log)) == [["exec", "--skip-git-repo-check", "Reply with exactly OK."]]
+    assert lines == ["✓ codex models current (2 listed)"]
+    assert _all_calls(log) == [["debug", "models"]]
+    assert plan.session_argv[plan.session_argv.index("-m") + 1] == "gpt-6-sol"
     assert (ctx.home / "config.yaml").read_bytes() == before
-    assert cfg.llm.providers["codex"].model == "gpt-7-sol"
+
+
+def test_codex_reconcile_reads_again_each_time(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, model="sol:high")
+    _codex_catalog(ctx, CODEX_CURRENT)
+    log = _cli_stub(ctx, "codex")
+
+    under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lambda _: None, dry_run=False)
+    under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lambda _: None, dry_run=False)
+    assert _all_calls(log) == [["debug", "models"], ["debug", "models"]]
+
+
+def test_codex_reconcile_retries_after_failed_first_read(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, model="sol:high")
+    log = _cli_stub(ctx, "codex")
+
+    with pytest.raises(ConfigError, match="codex debug models"):
+        under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lambda _: None, dry_run=False)
+    _codex_catalog(ctx, CODEX_CURRENT)
+    under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lambda _: None, dry_run=False)
+    assert _all_calls(log) == [["debug", "models"], ["debug", "models"]]
 
 
 def test_missing_claude_catalog_after_refresh_has_path_and_open_hint(tmp_path):
@@ -491,17 +533,19 @@ def test_missing_claude_catalog_after_refresh_has_path_and_open_hint(tmp_path):
     assert (ctx.home / "config.yaml").read_bytes() == before
 
 
-def test_failed_refresh_reports_redacted_probe_detail_and_preserves_yaml(tmp_path):
+def test_failed_codex_remap_reports_redacted_probe_detail_and_preserves_yaml(tmp_path):
     ctx = _context(tmp_path)
     cfg = _config(ctx, model="gpt-5-sol")
     _codex_catalog(ctx, CODEX_CURRENT)
-    log = _cli_stub(ctx, "codex", refresh_output="rejected model default", refresh_rc=7)
+    log = _cli_stub(ctx, "codex", remap_output="rejected model default", remap_rc=7)
     before = (ctx.home / "config.yaml").read_bytes()
 
     with pytest.raises(OmcError, match="rejected model 'default model'"):
         under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lambda _: None, dry_run=False)
 
-    assert _headless(_calls(log)) == [["exec", "--skip-git-repo-check", "Reply with exactly OK."]]
+    calls = _all_calls(log)
+    assert calls[0] == ["debug", "models"]
+    assert len(calls) == 2 and calls[1][:2] == ["exec", "--skip-git-repo-check"]
     assert (ctx.home / "config.yaml").read_bytes() == before
 
 
@@ -519,11 +563,12 @@ def test_codex_stale_model_remaps_full_id_and_only_one_yaml_leaf(tmp_path, stale
 
     returned = under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False)
 
-    calls = _headless(_calls(log))
-    assert calls[0] == ["exec", "--skip-git-repo-check", "Reply with exactly OK."]
+    calls = _all_calls(log)
+    assert calls[0] == ["debug", "models"]
     assert len(calls) == 2
     assert calls[1][:2] == ["exec", "--skip-git-repo-check"] and len(calls[1]) == 3
     assert "model" in calls[1][-1] and "gpt-6-astra" in calls[1][-1]
+    assert not any("refreshing codex model list" in line for line in lines)
     updated = store.load_global(ctx.home)
     assert updated is not None and original is not None
     assert updated.llm.providers["codex"].model == answer
@@ -535,7 +580,7 @@ def test_codex_stale_model_remaps_full_id_and_only_one_yaml_leaf(tmp_path, stale
     )
 
 
-def test_suppression_keeps_refresh_probe_and_remap_narration(tmp_path):
+def test_suppression_keeps_codex_remap_narration(tmp_path):
     ctx = _context(tmp_path)
     cfg = _config(ctx, model="gpt-5-sol")
     _codex_catalog(ctx, CODEX_CURRENT)
@@ -546,8 +591,7 @@ def test_suppression_keeps_refresh_probe_and_remap_narration(tmp_path):
         ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False, report_current=False
     )
 
-    assert lines.count("→ refreshing codex model list with the default model") == 1
-    assert lines.count("✓ default model works") == 1
+    assert not any("refreshing codex model list" in line for line in lines)
     assert (
         len([line for line in lines if line.startswith("→ model:") and "config updated" in line])
         == 1
@@ -556,11 +600,10 @@ def test_suppression_keeps_refresh_probe_and_remap_narration(tmp_path):
     assert saved is not None
     assert saved.llm.providers["codex"].model == "gpt-6-sol"
     assert cfg.llm.providers["codex"].model == "gpt-6-sol"
-    headless = _headless(_calls(log))
-    assert len(headless) == 2
-    assert headless[0] == ["exec", "--skip-git-repo-check", "Reply with exactly OK."]
-    assert headless[1][:2] == ["exec", "--skip-git-repo-check"]
-    assert len(headless[1]) == 3 and '"model"' in headless[1][2]
+    calls = _all_calls(log)
+    assert calls[0] == ["debug", "models"]
+    assert len(calls) == 2 and calls[1][:2] == ["exec", "--skip-git-repo-check"]
+    assert len(calls[1]) == 3 and '"model"' in calls[1][2]
 
 
 def test_suppression_omits_current_provider_during_other_provider_remap(tmp_path):
@@ -588,7 +631,7 @@ def test_suppression_omits_current_provider_during_other_provider_remap(tmp_path
         saved = store.load_global(ctx.home)
         assert saved is not None
         assert saved.llm.providers["codex"].model == "gpt-6-sol"
-        assert len(_headless(_calls(codex_log))) == 2
+        assert len(_headless(_calls(codex_log))) == 1
         assert _headless(_calls(claude_log)) == []
         if report_current:
             assert "✓ claude models current (3 listed)" in lines
@@ -612,12 +655,11 @@ def test_failed_mixed_provider_remap_does_not_report_current(tmp_path):
     with pytest.raises(OmcError, match="remap rejected"):
         under_test.reconcile(ctx, cfg, {"orchestrator", "docs"}, say=lines.append, dry_run=False)
 
-    assert lines.count("→ refreshing codex model list with the default model") == 1
-    assert lines.count("✓ default model works") == 1
+    assert not any("refreshing codex model list" in line for line in lines)
     assert not any("models current" in line for line in lines)
     assert (ctx.home / "config.yaml").read_bytes() == before
     assert cfg.llm.providers["codex"].model == "gpt-5-sol"
-    assert len(_headless(_calls(codex_log))) == 2
+    assert len(_headless(_calls(codex_log))) == 1
     assert _headless(_calls(claude_log)) == []
 
 
@@ -869,7 +911,7 @@ def test_invalid_or_failed_batched_remap_keeps_yaml_and_memory_unchanged(tmp_pat
     with pytest.raises(OmcError):
         under_test.reconcile(ctx, cfg, {"session"}, say=lambda _: None, dry_run=False)
 
-    assert len(_headless(_calls(log))) == 2
+    assert len(_headless(_calls(log))) == 1
     assert (ctx.home / "config.yaml").read_bytes() == before
     assert cfg.llm.providers["codex"].model == "gpt-5-sol"
     assert cfg.llm.providers["codex"].tasks.review == "gpt-5-astra"

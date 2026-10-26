@@ -38,7 +38,7 @@ class CatalogModel:
 
 
 class CatalogMissing(ConfigError):
-    """A provider CLI has not written its model cache yet; one refresh may help."""
+    """Claude has not written its model catalog yet; one refresh may help."""
 
 
 @dataclass(frozen=True)
@@ -50,16 +50,10 @@ class _ListedModel:
     efforts: tuple[str, ...]
 
 
-def _model_list(ctx: ToolContext, *, missing_ok: bool = False) -> list[_ListedModel] | None:
-    path = get_provider("codex").model_list_path(ctx.env)
-    try:
-        raw = ctx.read_text(path)
-    except FileNotFoundError as exc:
-        if missing_ok:
-            return None
-        raise ConfigError(f"Codex model list missing at {path}; run omc configure") from exc
-    except (OSError, UnicodeError) as exc:
-        raise ConfigError(f"cannot read Codex model list {path}: {exc}") from exc
+_CODEX_MODELS_KEY = "omc.taskmodels.codex_models"
+
+
+def _parse_codex_models(raw: str) -> list[_ListedModel]:
     try:
         data = json.loads(raw)
         if not isinstance(data, dict) or not isinstance(data.get("models"), list):
@@ -92,7 +86,51 @@ def _model_list(ctx: ToolContext, *, missing_ok: bool = False) -> list[_ListedMo
             models.append(_ListedModel(slug, display, priority, visibility, tuple(efforts)))
         return models
     except (json.JSONDecodeError, ValueError) as exc:
-        raise ConfigError(f"invalid Codex model list {path}: {exc}") from exc
+        raise ConfigError(
+            f"invalid codex debug models output: {exc}; output: {raw[-200:]!r}"
+        ) from exc
+
+
+def _codex_models(ctx: ToolContext, *, refresh: bool) -> list[_ListedModel]:
+    """Read the launched Codex binary's catalog once per context, unless refreshed."""
+    if not refresh and _CODEX_MODELS_KEY in ctx.runtime_cache:
+        cached = ctx.runtime_cache[_CODEX_MODELS_KEY]
+        if isinstance(cached, ConfigError):
+            raise cached
+        return cached  # type: ignore[return-value]
+    try:
+        # Codex 0.158 prints the cache entry shape as {"models": [...]} on stdout.
+        # It refreshes by its own 300 s TTL and client_version rule; logged-out
+        # clients print the bundled list. Warnings on stderr do not spoil stdout.
+        cp = ctx.run_bounded(["codex", "debug", "models"], timeout=docsllm.AUTH_STATUS_TIMEOUT)
+        if cp.returncode != 0:
+            tail = (cp.stderr or cp.stdout or "").strip()[-200:]
+            raise ConfigError(f"codex debug models failed (exit {cp.returncode}): {tail}")
+        models = _parse_codex_models(cp.stdout or "")
+    except FileNotFoundError as exc:
+        error = ConfigError(
+            f"codex debug models unavailable: Codex CLI not found on PATH; "
+            f"{get_provider('codex').install_hint()}"
+        )
+        ctx.runtime_cache[_CODEX_MODELS_KEY] = error
+        raise error from exc
+    except TimeoutError as exc:
+        error = ConfigError(f"codex debug models timed out: {exc}")
+        ctx.runtime_cache[_CODEX_MODELS_KEY] = error
+        raise error from exc
+    except UnicodeError as exc:
+        error = ConfigError(f"codex debug models returned undecodable output: {exc}")
+        ctx.runtime_cache[_CODEX_MODELS_KEY] = error
+        raise error from exc
+    except OSError as exc:
+        error = ConfigError(f"codex debug models failed: {exc}")
+        ctx.runtime_cache[_CODEX_MODELS_KEY] = error
+        raise error from exc
+    except ConfigError as exc:
+        ctx.runtime_cache[_CODEX_MODELS_KEY] = exc
+        raise
+    ctx.runtime_cache[_CODEX_MODELS_KEY] = models
+    return models
 
 
 def _matches_family(model: _ListedModel, family: str) -> bool:
@@ -106,15 +144,10 @@ def _cheap(provider: str, model_id: str) -> bool:
 
 
 def _codex_catalog(ctx: ToolContext) -> list[CatalogModel]:
-    path = get_provider("codex").model_list_path(ctx.env)
-    models = _model_list(ctx, missing_ok=True)
-    if models is None:
-        raise CatalogMissing(
-            f"Codex model list missing at {path}; open codex once to fetch its model list"
-        )
+    models = _codex_models(ctx, refresh=True)
     families = get_provider("codex").families()
     result: list[CatalogModel] = []
-    # Codex's visible cache priority is the picker's preference order.
+    # Codex's visible catalog priority is the picker's preference order.
     for model in sorted(models, key=lambda item: item.priority):
         if model.visibility != "list" or _cheap("codex", model.slug):
             continue
@@ -276,7 +309,7 @@ def compatible(value: str, effort: str, models: list[CatalogModel]) -> bool:
     return not effort or model.efforts is None or effort in model.efforts
 
 
-def _family_model(models: list[_ListedModel], family: str, path: Path) -> _ListedModel:
+def _family_model(models: list[_ListedModel], family: str, source: str) -> _ListedModel:
     visible = [m for m in models if m.visibility == "list"]
     matches = [m for m in visible if _matches_family(m, family)]
     if not matches:
@@ -286,7 +319,7 @@ def _family_model(models: list[_ListedModel], family: str, path: Path) -> _Liste
             if any(_matches_family(m, name) for m in visible)
         ]
         offered = ", ".join(available) if available else "none"
-        raise ConfigError(f"{family} is unavailable in {path}; available families: {offered}")
+        raise ConfigError(f"{family} is unavailable in {source}; available families: {offered}")
     return min(matches, key=lambda model: model.priority)
 
 
@@ -301,15 +334,14 @@ def resolve_choice(
         raise ConfigError(f"empty {provider} task model cannot be resolved without a task default")
     if provider != "codex" or family not in adapter.families():
         return ModelChoice(family, effort)
-    path = adapter.model_list_path(ctx.env)
-    model = _family_model(_model_list(ctx), family, path)
+    model = _family_model(_codex_models(ctx, refresh=False), family, "codex debug models")
     if validate_effort and effort and effort not in model.efforts:
         offered = ", ".join(model.efforts) or "none"
         raise ConfigError(
             f"{family}:{effort} is unavailable for {model.slug}; supported efforts: {offered}"
         )
     # Live Codex agent dispatch accepted exact gpt-6-sol/high and
-    # gpt-6-astra/high slugs; the verdict can pass the cache slug directly
+    # gpt-6-astra/high slugs; the verdict can pass the catalog slug directly
     # without translating it to a preset name.
     return ModelChoice(model.slug, effort)
 
@@ -339,20 +371,17 @@ def model_options(
 ) -> dict[str, str]:
     """Picker labels to stored values, ordered default/families/Other.
 
-    A missing or unreadable Codex list degrades to the families-only picker
-    (reported once through ``warn``); the configure probe rewrites the list
-    before any value is saved, so the menu itself never fails on it.
+    A failing Codex CLI read degrades to families only. Repeated pickers
+    reuse the context's memoized error; the menu's ``warn_once`` avoids
+    repeating the warning.
     """
     adapter = get_provider(provider)
     default = adapter.default_task_model(task)
     options = {f"Provider default ({default})": ""}
-    # An explicitly isolated ToolContext may have no home at all (for example
-    # a preview/menu test). In that case there is no cache to read and the
-    # documented family-only picker is the available choice.
     models = None
-    if provider == "codex" and (ctx.env.get("HOME") or ctx.env.get("CODEX_HOME")):
+    if provider == "codex":
         try:
-            models = _model_list(ctx, missing_ok=True)
+            models = _codex_models(ctx, refresh=False)
         except ConfigError as exc:
             if warn is not None:
                 warn(f"· {exc}; Codex task pickers show families only")
@@ -395,14 +424,12 @@ def validate_selection(
     *,
     task: str,
     say: Callable[[str], object],
-    refresh: bool = True,
 ) -> ModelChoice:
     """Probe a changed picker value before saving it; return the effective choice.
 
     The caller keeps ``value`` in config, including a blank default. Resolved
     Codex slugs and Claude's reported id are only shown to the user.
-    ``refresh=False`` reuses a Codex model list refreshed earlier in the same
-    configure run instead of spending another headless turn on it.
+    Codex family choices use the catalog already read on this context.
     """
     wanted, effort = probe_key(provider, value, task)
     family = wanted.partition(":")[0]
@@ -413,22 +440,7 @@ def validate_selection(
         docsllm._step(say, ok, detail)
         return ModelChoice(family, effort)
     if provider == "codex":
-        if refresh:
-            # Codex 0.158: a no-model exec uses the account default and
-            # refreshes the same models_cache.json shown by the interactive
-            # model picker.
-            say("→ refreshing Codex model list with the default model")
-            ok, detail = docsllm.cli_model_probe(ctx, provider, "")
-            docsllm._step(say, ok, detail)
-        try:
-            choice = resolve_choice(ctx, provider, wanted, validate_effort=True)
-        except ConfigError as exc:
-            path = get_provider(provider).model_list_path(ctx.env)
-            if "model list missing" in str(exc):
-                raise ConfigError(
-                    f"Codex model list missing at {path}; open codex once to fetch its model list"
-                ) from exc
-            raise
+        choice = resolve_choice(ctx, provider, wanted, validate_effort=True)
         suffix = f" ({choice.effort})" if choice.effort else ""
         say(f"✓ {wanted} → {choice.model_arg}{suffix}")
         return choice

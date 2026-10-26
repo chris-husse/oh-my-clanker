@@ -11,7 +11,13 @@ from omc.config import store
 from omc.config.schema import GlobalConfig, ProjectConfig, ProviderConfig, SecretsConfig
 from omc.toolctx import ToolContext
 
-from ._stubs import HEALTHY_PLUGINS, make_claude_stub, make_stub, seed_codex_model_cache
+from ._stubs import (
+    DEFAULT_CODEX_CATALOG,
+    HEALTHY_PLUGINS,
+    make_claude_stub,
+    make_codex_stub,
+    make_stub,
+)
 
 
 def _home(tmp_path, monkeypatch, *, plugins=HEALTHY_PLUGINS, install_rc=0):
@@ -25,8 +31,7 @@ def _home(tmp_path, monkeypatch, *, plugins=HEALTHY_PLUGINS, install_rc=0):
     # temp HOME). The real PATH stays behind it: the chain step needs git.
     bindir = tmp_path / "bin"
     calls = make_claude_stub(bindir, plugins=plugins, install_rc=install_rc)
-    make_stub(bindir, "codex", stdout="OK")
-    seed_codex_model_cache(tmp_path)
+    make_codex_stub(bindir, catalog=DEFAULT_CODEX_CATALOG, stdout="OK")
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
     monkeypatch.chdir(tmp_path)  # outside any git repo
     _CLAUDE_CALLS[str(home)] = calls
@@ -548,7 +553,7 @@ def test_changed_task_leaves_probe_once_each_and_unchanged_leaf_does_not(tmp_pat
     gcfg.llm.providers["claude"].model = "opus"
     seen = []
 
-    def validate(_ctx, provider, value, *, task, say, refresh=True):
+    def validate(_ctx, provider, value, *, task, say):
         seen.append((provider, value, task))
         return None
 
@@ -569,13 +574,49 @@ def test_changed_task_leaves_probe_once_each_and_unchanged_leaf_does_not(tmp_pat
     assert store.load_global(home).llm.providers["claude"].tasks.plan == "sonnet"
 
 
-def test_identical_task_values_probe_once_and_codex_refreshes_once(tmp_path, monkeypatch):
+def test_codex_family_selection_reads_catalog_without_model_turn_and_full_id_probes_once(
+    tmp_path, monkeypatch
+):
+    home = _home(tmp_path, monkeypatch)
+    log = tmp_path / "codex-argv"
+    make_codex_stub(tmp_path / "bin", catalog=DEFAULT_CODEX_CATALOG, stdout="OK", argv_log=log)
+    ctx = ToolContext(home=home, env=dict(os.environ))
+    gcfg = GlobalConfig()
+
+    configure._apply_settings(
+        ctx,
+        None,
+        gcfg,
+        ProjectConfig(),
+        SecretsConfig(),
+        ["llm.providers.codex.tasks.plan=astra:high"],
+    )
+    assert log.read_text().splitlines() == ["debug models"]
+
+    configure._apply_settings(
+        ctx,
+        None,
+        gcfg,
+        ProjectConfig(),
+        SecretsConfig(),
+        ["llm.providers.codex.model=gpt-6-sol:high"],
+    )
+    assert log.read_text().splitlines() == [
+        "debug models",
+        (
+            "exec --skip-git-repo-check -m gpt-6-sol -c "
+            "model_reasoning_effort=high Reply with exactly OK."
+        ),
+    ]
+
+
+def test_identical_task_values_validate_once_per_effective_value(tmp_path, monkeypatch):
     home = _home(tmp_path, monkeypatch)
     ctx = ToolContext(home=home, env=dict(os.environ))
     seen = []
 
-    def validate(_ctx, provider, value, *, task, say, refresh=True):
-        seen.append((provider, value, task, refresh))
+    def validate(_ctx, provider, value, *, task, say):
+        seen.append((provider, value, task))
         return None
 
     monkeypatch.setattr(configure.taskmodels, "validate_selection", validate)
@@ -589,39 +630,16 @@ def test_identical_task_values_probe_once_and_codex_refreshes_once(tmp_path, mon
         [f"llm.providers.claude.{leaf}=claude-sonnet-5-5" for leaf in leaves]
         + ["llm.providers.codex.tasks.plan=astra", "llm.providers.codex.tasks.high=astra:high"],
     )
-    # Seven changed leaves, one Claude probe (same id, no effort anywhere) and
-    # two Codex probes of which only the first refreshes the model list.
+    # Seven changed leaves, one Claude validation (same id, no effort anywhere)
+    # and two distinct Codex validations.
     assert seen == [
-        ("claude", "claude-sonnet-5-5", "orchestrator", True),
-        ("codex", "astra", "plan", True),
-        ("codex", "astra:high", "high", False),
+        ("claude", "claude-sonnet-5-5", "orchestrator"),
+        ("codex", "astra", "plan"),
+        ("codex", "astra:high", "high"),
     ]
     saved = store.load_global(home)
     assert saved.llm.providers["claude"].tasks.simple == "claude-sonnet-5-5"
     assert saved.llm.providers["codex"].tasks.high == "astra:high"
-
-
-def test_codex_full_id_probe_does_not_count_as_a_list_refresh(tmp_path, monkeypatch):
-    home = _home(tmp_path, monkeypatch)
-    ctx = ToolContext(home=home, env=dict(os.environ))
-    seen = []
-
-    def validate(_ctx, provider, value, *, task, say, refresh=True):
-        seen.append((value, task, refresh))
-        return None
-
-    monkeypatch.setattr(configure.taskmodels, "validate_selection", validate)
-    configure._apply_settings(
-        ctx,
-        None,
-        GlobalConfig(),
-        ProjectConfig(),
-        SecretsConfig(),
-        ["llm.providers.codex.model=gpt-6-astra", "llm.providers.codex.tasks.plan=sol"],
-    )
-    # The full id is probed directly and never touches the list, so the first
-    # family leaf after it must still refresh.
-    assert seen == [("gpt-6-astra", "orchestrator", True), ("sol", "plan", True)]
 
 
 def test_failed_task_probe_preserves_prior_config_file(tmp_path, monkeypatch):

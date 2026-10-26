@@ -4,6 +4,8 @@ from omc.config.schema import Config, ProviderConfig
 from omc.session import session_plan
 from omc.toolctx import ToolContext
 
+from ._stubs import DEFAULT_CODEX_CATALOG, make_codex_stub, stub_env
+
 
 def _ctx():
     return ToolContext.from_env({"HOME": "/nowhere", "PATH": "/nowhere", "SHELL": "/bin/bash"})
@@ -111,6 +113,33 @@ def test_session_plan_wires_notifications_for_the_provider_that_takes_argv():
     joined = " ".join(plan.session_argv)
     assert "tui.notifications=true" in joined and "notify=" not in joined
     assert plan.env == {"OMC_SLUG": "s", "OMC_PROVIDER": "codex", "GITNEXUS_SHARED_STORE": "off"}
+
+
+def test_session_plan_resolves_codex_family_from_cli_catalog(tmp_path):
+    bindir = tmp_path / "bin"
+    calls = tmp_path / "codex-argv"
+    make_codex_stub(bindir, catalog=DEFAULT_CODEX_CATALOG, argv_log=calls)
+    ctx = ToolContext.from_env(stub_env(bindir, SHELL="/bin/bash"))
+    cfg = Config()
+    cfg.llm.default = "codex"
+    cfg.llm.providers["codex"] = ProviderConfig(model="sol:high")
+
+    plan = session_plan(
+        ctx, cfg, seed="/omc:implement", slug="s", session_name="s", title="t", cwd="."
+    )
+    assert plan.session_argv == [
+        "codex",
+        "-c",
+        "tui.terminal_title=[]",
+        "-m",
+        "gpt-6-sol",
+        "-c",
+        "tui.notifications=true",
+        "-c",
+        "model_reasoning_effort=high",
+        "/omc:implement",
+    ]
+    assert calls.read_text().splitlines() == ["debug models"]
 
 
 def test_run_headless_keeps_its_shape_and_defaults():

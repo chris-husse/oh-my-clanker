@@ -14,7 +14,7 @@ from omc.config.schema import Config
 from omc.toolctx import ToolContext
 from omc.watch import run_watch
 
-from ._stubs import make_stub, seed_codex_model_cache
+from ._stubs import DEFAULT_CODEX_CATALOG, make_codex_stub
 
 
 @pytest.fixture(autouse=True)
@@ -991,10 +991,9 @@ def test_codex_auto_build_uses_resolved_orchestrator_argv(tmp_path, capsys, monk
     _, repo = _repo_with_origin(tmp_path)
     _seed_build_stage(repo)
     ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    seed_codex_model_cache(tmp_path)
-    make_stub(
+    make_codex_stub(
         tmp_path / "bin",
-        "codex",
+        catalog=DEFAULT_CODEX_CATALOG,
         stdout='OMC_STAGE {"stage":"build","configured":true,"passed":true,"summary":"ok"}',
     )
     cfg = Config()
@@ -1022,25 +1021,26 @@ def test_codex_auto_build_uses_resolved_orchestrator_argv(tmp_path, capsys, monk
     assert calls[0][-1].startswith("\n# omc build (project-stage proxy)")
 
 
-@pytest.mark.parametrize("cache_state", ["missing", "malformed"])
+@pytest.mark.parametrize("catalog_state", ["unavailable", "malformed"])
 def test_auto_build_model_resolution_failure_does_not_stop_watch_loop(
-    tmp_path, capsys, cache_state
+    tmp_path, capsys, catalog_state
 ):
     origin, repo = _repo_with_origin(tmp_path)
     _seed_build_stage(repo)
     _push_remote_commit(origin, tmp_path)
     ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    make_stub(tmp_path / "bin", "codex", stdout="codex 1.0")
-    if cache_state == "malformed":
-        path = tmp_path / ".codex" / "models_cache.json"
-        path.parent.mkdir()
-        path.write_text("{broken")
+    if catalog_state == "malformed":
+        make_codex_stub(tmp_path / "bin", catalog="{broken")
+    else:
+        make_codex_stub(tmp_path / "bin", catalog="catalog unavailable", catalog_rc=1)
     cfg = Config()
     cfg.llm.default = "codex"
     assert _run_loop(repo, ctx, ticks=2, cfg=cfg, auto_build=True) == 0
     err = capsys.readouterr().err
     assert "✗ auto-build failed" in err
-    assert "models_cache.json" in err
+    assert any(
+        "codex debug models" in line for line in err.splitlines() if "auto-build failed" in line
+    )
     assert "· stopped" in err
 
 

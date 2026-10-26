@@ -17,19 +17,20 @@ from omc.config.schema import GlobalConfig, ProjectConfig, SecretsConfig
 from omc.errors import Refusal
 from omc.toolctx import ToolContext
 
-from ._stubs import seed_codex_model_cache
+from ._stubs import DEFAULT_CODEX_CATALOG, make_codex_stub
 
 
 @pytest.fixture(autouse=True)
 def _stub_task_model_probe(monkeypatch):
-    # Menu tests exercise persistence and tag replay. The subprocess/cache
+    # Menu tests exercise persistence and tag replay. The subprocess/catalog
     # contract has its own restricted-PATH test in test_taskmodels.py.
     monkeypatch.setattr(configure.taskmodels, "validate_selection", lambda *a, **kw: None)
 
 
 def _menu(tmp_path: Path, *, root: Path | None = None):
-    seed_codex_model_cache(tmp_path)
-    ctx = ToolContext(home=tmp_path / "home", env={"HOME": str(tmp_path)})
+    bindir = tmp_path / "bin"
+    make_codex_stub(bindir, catalog=DEFAULT_CODEX_CATALOG)
+    ctx = ToolContext(home=tmp_path / "home", env={"HOME": str(tmp_path), "PATH": str(bindir)})
     gcfg, pcfg, scfg = GlobalConfig(), ProjectConfig(), SecretsConfig()
     session = configure._compose_menu(ctx, root, gcfg, pcfg, scfg)
     return session, (ctx, gcfg, pcfg, scfg)
@@ -126,12 +127,28 @@ def test_task_picker_options_and_default_clear(tmp_path, monkeypatch):
     assert store.load_global(ctx.home).llm.providers["codex"].tasks.medium == ""
 
 
-def test_unreadable_codex_cache_degrades_pickers_and_warns_once(tmp_path, capsys):
-    (tmp_path / ".codex").mkdir(exist_ok=True)
-    (tmp_path / ".codex" / "models_cache.json").write_text("{broken")
-    ctx = ToolContext(home=tmp_path / "home", env={"HOME": str(tmp_path)})
+def test_failed_codex_catalog_degrades_seven_pickers_and_warns_once(tmp_path, capsys):
+    bindir = tmp_path / "bin"
+    log = tmp_path / "codex-argv"
+    make_codex_stub(bindir, catalog="{broken", argv_log=log)
+    ctx = ToolContext(home=tmp_path / "home", env={"HOME": str(tmp_path), "PATH": str(bindir)})
     session = configure._compose_menu(ctx, None, GlobalConfig(), ProjectConfig(), SecretsConfig())
     codex = session.root["LLM"]["codex"]
+    assert list(codex["Orchestrator model"]._build_options()) == [
+        "Provider default (sol:high)",
+        "Astra",
+        "Sol",
+        "Other (type a model id)",
+    ]
+    for label in (
+        "Design",
+        "Plan",
+        "Review",
+        "Simple Complexity Task",
+        "Medium Complexity Task",
+        "High Complexity Task",
+    ):
+        assert list(codex["Task models"][label]._build_options())[1:3] == ["Astra", "Sol"]
     assert list(codex["Task models"]["Design"]._build_options()) == [
         "Provider default (astra)",
         "Astra",
@@ -140,7 +157,26 @@ def test_unreadable_codex_cache_degrades_pickers_and_warns_once(tmp_path, capsys
     ]
     assert "Opus (high)" in session.root["LLM"]["claude"]["Orchestrator model"]._build_options()
     err = capsys.readouterr().err
-    assert err.count("models_cache.json") == 1 and "families only" in err
+    assert err.count("codex debug models") == 1 and "families only" in err
+    assert log.read_text().splitlines() == ["debug models"]
+
+
+def test_missing_codex_binary_degrades_seven_pickers_and_warns_once(tmp_path, capsys):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    ctx = ToolContext(home=tmp_path / "home", env={"HOME": str(tmp_path), "PATH": str(bindir)})
+    session = configure._compose_menu(ctx, None, GlobalConfig(), ProjectConfig(), SecretsConfig())
+    codex = session.root["LLM"]["codex"]
+    assert list(codex["Orchestrator model"]._build_options()) == [
+        "Provider default (sol:high)",
+        "Astra",
+        "Sol",
+        "Other (type a model id)",
+    ]
+    for tag in codex["Task models"].values():
+        assert list(tag._build_options())[1:3] == ["Astra", "Sol"]
+    err = capsys.readouterr().err
+    assert err.count("codex debug models") == 1 and "families only" in err
 
 
 def test_failed_task_picker_edit_and_renderer_replay_keep_prior_value(tmp_path, monkeypatch):

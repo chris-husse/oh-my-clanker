@@ -57,19 +57,6 @@ def test_provider_task_contracts(name, families, efforts, defaults):
         provider.default_task_model("bogus")
 
 
-def test_codex_model_list_path_uses_supplied_environment_only(tmp_path):
-    provider = get_provider("codex")
-    assert provider.model_list_path({"CODEX_HOME": str(tmp_path / "chosen")}) == (
-        tmp_path / "chosen" / "models_cache.json"
-    )
-    assert provider.model_list_path({"HOME": str(tmp_path)}) == (
-        tmp_path / ".codex" / "models_cache.json"
-    )
-    assert provider.model_list_path({"CODEX_HOME": "~/custom", "HOME": str(tmp_path)}) == (
-        tmp_path / "custom" / "models_cache.json"
-    )
-
-
 @pytest.mark.parametrize("name", ("claude", "codex"))
 def test_effort_argv_builders_append_provider_specific_flag(name):
     provider = get_provider(name)
