@@ -851,6 +851,96 @@ marketplace snapshots") already matches this precisely.
 assertion (`codex == [["codex", "plugin", "marketplace", "upgrade"]]`) is
 unchanged.
 
+**2026-10-27 correction:** The preceding conclusion established snapshot
+refresh only. It did not prove that the registered source matches uv's install
+receipt, or that an already installed plugin acquires refreshed skill files.
+The unqualified upgrade and its old unit assertion were removed by the
+receipt-driven update below.
+
+### Codex receipt-driven update (2026-10-27)
+
+The host CLI probe ran against `codex-cli 0.158.0` with disposable `HOME`,
+`CODEX_HOME`, `OMC_HOME`, and `UV_TOOL_DIR`. The Docker E2E image used its pinned
+Codex 0.156.1, also in a private home. No account or model session was needed.
+
+- `codex plugin marketplace list --json` returned
+  `{"marketplaces":[{"name":"oh-my-clanker","root":"/fixture/A",`
+  `"marketplaceSource":{"sourceType":"local","source":"/fixture/A"}}]}`.
+  Deleting A's `.claude-plugin/marketplace.json` caused this listing and
+  `codex plugin list --json` to fail with "marketplace root does not contain a
+  supported manifest". `codex plugin marketplace remove oh-my-clanker --json`
+  still succeeded, and adding B recovered the listing.
+- `codex plugin marketplace add SOURCE --json` returned `marketplaceName`,
+  `installedRoot`, and `alreadyAdded`. The chosen registration was rechecked
+  through `marketplaceSource.source`, rather than inferred from the add exit
+  code. `marketplace upgrade oh-my-clanker --json` is the supported targeted
+  command for Git snapshots; local sources use their directory directly.
+- `codex plugin add omc@oh-my-clanker --json` returned `pluginId`, `version`,
+  and `installedPath`. Repeating it after changing `skills/start/SKILL.md`
+  under the unchanged version recopied the new bytes into that installed
+  path. `plugin list --json` reported the canonical entry in `installed`
+  with `pluginId`, `version`, `installed: true`, `enabled: true`, `source`, and
+  `marketplaceSource`. Marketplace remove/add can leave an installed entry
+  visible again; the final plugin add is still needed to refresh its bytes.
+
+The red Docker reproducer first needed its helper to ignore Codex's temporary
+home PATH-alias warning on stderr. Once fixed, `just e2e-rest
+tests/e2e/test_e2e_codex_plugin_update.py -k rebinds` failed for the intended
+reason: after `run_update` read receipt B, Codex still listed A. With the
+focused operation, all three real-CLI scenarios passed: A-to-B rebinding and
+repeat update, deleted-manifest repair with an unrelated installed sentinel,
+and same-version local source advancement. Production now verifies the
+registered root, canonical enabled entry, installed manifest, cache path, and
+every offered `skills/**/SKILL.md` byte before reporting Codex success.
+
+### Codex Git snapshot and installed payload advancement (2026-10-27)
+
+Task 2 exercised the real `codex-cli 0.156.1` in the Docker E2E image (host
+CLI: `codex-cli 0.158.0`). The fixture ran a test-owned foreground HTTP
+server for a disposable bare Git repository, with a Git URL rewrite in the
+private test environment. The uv receipt remained a supported GitHub URL,
+`https://github.com/omc-test/update-fixture.git`; the resolver selected
+`omc-test/update-fixture`. No production receipt form was added.
+
+The fixture installed commit A through Codex and checked **A in the installed
+cache before advancing the origin**. Commit B kept the plugin version at
+`0.1.40`, changed `skills/start/SKILL.md` and its `support.txt`, added
+`skills/new/SKILL.md`, and removed `skills/obsolete/SKILL.md`. After `omc
+update`, Codex still reported the receipt-selected repository and the same
+marketplace snapshot root. Both that snapshot and the canonical installed
+plugin had B's changed bytes and file set. A repeated update left one
+registration, one installed entry, and one canonical version directory.
+The existing local-source E2E likewise showed unchanged-version installed
+skill advancement. Both use supported `marketplace upgrade` / `plugin add`
+commands; the plugin registry and cache are never edited by production code.
+
+The first Git E2E was red with snapshot A still installed. `run_update`
+reported the Codex operation's actual failure: remote preflight's scratch
+`CODEX_HOME` did not exist, which Codex 0.156.1 rejects before marketplace
+add. Creating that directory made the same test green. Adversarial unit
+cases then showed two more red verification gaps: differing support bytes
+and an extra stale skill file passed the prior SKILL.md-only check. The
+verifier now reads and compares every relative file and byte under
+`skills/`, and rejects missing, extra, symlinked, or unreadable payloads.
+Malformed listings/manifests, wrong manifest skills paths, disabled or missing
+canonical entries, and noncanonical installed paths also fail closed. The
+installer suppresses the Codex success line on failure and continues other
+providers under its existing best-effort exit policy.
+
+Final evidence: focused Codex/installer/provider unit files **120 passed**;
+`just check` **1,802 passed, 7 existing PTY deprecation warnings**;
+`just e2e-rest tests/e2e/test_e2e_codex_plugin_update.py` **4 passed**;
+Ruff lint passed. The selected Git test passed through `just e2e-rest ... -k
+git_snapshot`. The `just e2e-tests ... -k git_snapshot` entry point stopped
+in its golden phase with **10 deselected / exit 5** because the selector
+names only a rest-phase test. The exact unfiltered `just e2e-tests
+tests/e2e/test_e2e_codex_plugin_update.py` command then ran golden Claude
+tests and stopped before the Codex rest phase: **3 passed, 2 failed, 5
+deselected**. `test_stage_recorded` rejected a repeated Claude notification
+result in `tests/e2e/conversation.py:291`; `test_stage_implemented` could not
+start because its recorded prerequisite had failed. These golden Claude
+failures did not exercise the Codex update test file.
+
 ### Chain v2 E2E (`tests/e2e/test_e2e_chain.py`)
 
 `test_chain_creates_and_migrates_in_container` drives two scenarios inside a

@@ -75,9 +75,32 @@ class CodexProvider(Provider):
     def install_hint(self):
         return "npm install -g @openai/codex"
 
-    def plugin_update_argvs(self, marketplace_source: str | None = None):
-        # Refreshes ALL configured git marketplace snapshots (no per-marketplace
-        # filter exists); plugins resolve from the refreshed snapshot. Verified
-        # empirically in docker/PLUGIN-NOTES.md (Task 9 records the run).
-        # marketplace_source is unused: codex has no scriptable per-marketplace add.
-        return [["codex", "plugin", "marketplace", "upgrade"]]
+    # Codex 0.158.0 (local CLI, 2026-10-27): marketplace list and plugin list
+    # expose JSON; add/remove mutate the named registration only. A repeated
+    # `plugin add --json` recopies skill bytes even at the same version and
+    # reports installedPath. Marketplace upgrade accepts a specific name and
+    # refreshes only Git snapshots; local sources need no marketplace upgrade.
+    # A broken local manifest makes both list commands fail, but marketplace
+    # remove by known name still succeeds, permitting a supported repair.
+    def plugin_marketplace_list_argv(self) -> list[str]:
+        return ["codex", "plugin", "marketplace", "list", "--json"]
+
+    def plugin_marketplace_add_argv(self, source: str) -> list[str]:
+        return ["codex", "plugin", "marketplace", "add", source, "--json"]
+
+    def plugin_marketplace_remove_argv(self) -> list[str]:
+        return ["codex", "plugin", "marketplace", "remove", "oh-my-clanker", "--json"]
+
+    def plugin_marketplace_upgrade_argv(self) -> list[str]:
+        return ["codex", "plugin", "marketplace", "upgrade", "oh-my-clanker", "--json"]
+
+    def plugin_list_argv(self) -> list[str]:
+        return ["codex", "plugin", "list", "--json"]
+
+    def plugin_add_argv(self) -> list[str]:
+        return ["codex", "plugin", "add", "omc@oh-my-clanker", "--json"]
+
+    def plugin_update_argvs(self, marketplace_source: str | None = None) -> list[list[str]]:
+        # The generic argv loop cannot verify registration and installed bytes.
+        # installer.run_update uses plugin.update_codex_plugin for Codex.
+        return []

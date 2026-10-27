@@ -77,6 +77,11 @@ The plan stores complexity, never model ids."
 Execute the plan via `superpowers:subagent-driven-development` — a fresh
 subagent per task; its own checkpoints and reviews apply.
 
+Require each implementation worker to commit each task's tested changes before
+returning. The task commits belong to Phase 2, before the milestone gate; do
+not defer them to the Phase 3 handoff commit. After the task review, confirm
+the worker's commit exists before running that task's `/omc:check`.
+
 For each implementation task, read its `Complexity:` value and dispatch the
 worker with the matching `OMC_MODELS` task choice: `simple`, `medium`, or
 `high`. A plan missing `Complexity:` defaults to `medium`. Dispatch spec,
@@ -106,6 +111,10 @@ cannot answer and genuine blockers.
 
 ## Phase 2b — milestone gate
 
+Before `/omc:build`, confirm at least one task commit exists after the
+design-record commit. If none exists, Phase 2 is unfinished: finish and commit
+the implementation task before entering this gate.
+
 After the last task's subagent and reviews pass, its green `/omc:check`
 supplies this milestone's check. Invoke `/omc:build`, then `/omc:verify` as
 black-box project-stage proxies. Before invoking verify, announce on its own
@@ -115,8 +124,10 @@ an unconfigured stage with `"configured": false`. A missing verdict is a
 failure, even if the invocation otherwise appears successful.
 
 For any red stage, follow the behavior layer's stage-gate rule: bounded fix-forward, then a CRITICAL stop. Do not enter Phase 3 or make a handoff
-commit while the gate is red. After a required answer, resume this gate and
-the remaining phases under the same `/omc:implement` authorization.
+commit while the gate is red. On a red gate, keep those task commits and the
+plan uncommitted; the gate blocks only the handoff commit. After a required
+answer, resume this gate and the remaining phases under the same
+`/omc:implement` authorization.
 
 ## Phase 3 — hand off
 
