@@ -318,3 +318,30 @@ def test_claude_native_notification_fragment_and_unchanged_argv(enabled, channel
         "m",
         "s",
     ]
+
+
+def test_claude_served_catalog_override_is_one_settings_argument():
+    p = get_provider("claude")
+    plain = p.headless_argv("Reply with exactly OK.", model="")
+    assert plain == ["claude", "-p", "Reply with exactly OK.", "--output-format", "text"]
+    assert p.headless_argv("Reply with exactly OK.", model="", served_catalog=False) == plain
+    override = p.headless_argv("Reply with exactly OK.", model="", served_catalog=True)
+    assert override == [
+        *plain,
+        "--settings",
+        '{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}',
+    ]
+    # ONE argv element that Claude Code parses as JSON itself; never shell-quoted.
+    assert json.loads(override[-1]) == {"env": {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": ""}}
+    with_tools = p.headless_argv(
+        "x", model="m1", effort="high", allowed_tools=["mcp__jira"], served_catalog=True
+    )
+    assert with_tools[-2:] == ["--allowed-tools", "mcp__jira"]  # variadic flag stays LAST
+    assert with_tools[-4:-2] == ["--settings", override[-1]]
+    assert with_tools[:3] == ["claude", "-p", "x"]
+
+
+def test_codex_accepts_and_ignores_served_catalog():
+    p = get_provider("codex")
+    assert p.headless_argv("x", model="m", served_catalog=True) == p.headless_argv("x", model="m")
+    assert "--settings" not in p.headless_argv("x", model="", served_catalog=True)

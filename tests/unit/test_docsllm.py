@@ -364,3 +364,18 @@ def test_auth_status_raises_the_existing_probe_failure_message(tmp_path, stdout,
         docsllm.auth_status(ctx, "claude")
     assert str(exc.value) == message
     assert docsllm.cli_connection_probe(ctx, "claude") == (False, message)
+
+
+def test_cli_model_probe_forwards_served_catalog_to_the_argv(tmp_path):
+    ctx, _, calls = _ctx(tmp_path, {})
+    assert docsllm.cli_model_probe(ctx, "claude", "", served_catalog=True) == (
+        True,
+        "default model works",
+    )
+    assert calls.read_text().strip() == (
+        "-p Reply with exactly OK. --output-format text --settings "
+        '{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}'
+    )
+    ctx, _, calls = _ctx(tmp_path / "plain", {})
+    assert docsllm.cli_model_probe(ctx, "claude", "") == (True, "default model works")
+    assert "--settings" not in calls.read_text()

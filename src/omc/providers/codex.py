@@ -37,9 +37,12 @@ class CodexProvider(Provider):
     def models(self):
         return []  # free-text entry; codex model ids move fast
 
-    def headless_argv(self, prompt, *, model, effort="", allowed_tools=None, session_name=""):
+    def headless_argv(
+        self, prompt, *, model, effort="", allowed_tools=None, session_name="", served_catalog=False
+    ):
         # `codex exec` is the non-interactive entry point; prompt is the trailing
-        # positional; -m is the model flag. allowed_tools has no codex equivalent.
+        # positional; -m is the model flag. allowed_tools has no codex equivalent;
+        # served_catalog has none either (`codex debug models` is already live).
         # --skip-git-repo-check: verified against codex 0.144 — without it, exec
         # refuses to run in a directory the user hasn't interactively trusted,
         # which a headless one-shot call can never satisfy.

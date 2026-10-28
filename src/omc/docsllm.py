@@ -208,11 +208,14 @@ def cli_model_probe(
     prompt: str = HEADLESS_PROBE_PROMPT,
     effort: str = "",
     return_output: bool = False,
+    served_catalog: bool = False,
 ) -> tuple[bool, str]:
     """One headless turn on the user's login. run_bounded, not run: `claude -p`
-    spawns MCP grandchildren that a plain subprocess timeout would orphan."""
+    spawns MCP grandchildren that a plain subprocess timeout would orphan.
+    ``served_catalog`` is forwarded to the provider's argv builder (the Claude
+    catalog refresh turn, reconcile.py)."""
     p = get_provider(provider)
-    argv = p.headless_argv(prompt, model=model, effort=effort)
+    argv = p.headless_argv(prompt, model=model, effort=effort, served_catalog=served_catalog)
     shown = model or "default model"
     try:
         # cwd=ctx.home: run the probe OUTSIDE whatever project the user typed

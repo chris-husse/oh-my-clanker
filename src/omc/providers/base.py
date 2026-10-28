@@ -37,12 +37,18 @@ class Provider(ABC):
         effort: str = "",
         allowed_tools: list[str] | None = None,
         session_name: str = "",
+        served_catalog: bool = False,
     ) -> list[str]:
         """One-shot print-mode run against the user's system config.
 
         ``session_name`` names the resulting session where the CLI supports it
         (claude: ``-n``, resumable via ``--resume <name>`` — verified live);
         providers without session naming ignore it.
+
+        ``served_catalog`` asks the CLI to fetch its served model catalog on
+        this turn even where the user's settings would stop it (claude: an
+        inline ``--settings`` env override; design record 2026-10-27 §4.1).
+        Providers without such a catalog ignore it.
         """
 
     @abstractmethod
