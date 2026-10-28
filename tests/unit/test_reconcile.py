@@ -221,9 +221,11 @@ def test_parser_rejects_ambiguous_or_trailing_json_content(output):
 def _context(tmp_path: Path) -> ToolContext:
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    return ToolContext.from_env(
+    ctx = ToolContext.from_env(
         {"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "omc"), "PATH": str(bindir)}
     )
+    ctx.now_ms = lambda: NOW_MS  # the Claude fixture is fresh by default under this clock
+    return ctx
 
 
 def _config(ctx: ToolContext, provider: str = "codex", **leaves: str) -> Config:
@@ -273,32 +275,53 @@ CLAUDE_CURRENT = [
     ("claude-fable-5-5", "fable", ("medium", "high")),
     ("claude-sonnet-5-5", "sonnet", ("medium", "high")),
 ]
+FETCHED_AT = 1792065600000
+NOW_MS = FETCHED_AT + 10 * 60_000  # the faked clock: ten minutes after the fixture's fetch
+FRESH_STALE_AT = FETCHED_AT + 62 * 60_000  # Claude's own ~62 min window: fresh under NOW_MS
+PAST_STALE_AT = FETCHED_AT + 5 * 60_000  # five whole minutes past under NOW_MS
+# Literal on purpose: the stub script must not import omc at write time.
+SERVED_CATALOG_SETTINGS = '{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}'
+REFRESH_TURN = [
+    "-p",
+    "Reply with exactly OK.",
+    "--output-format",
+    "text",
+    "--settings",
+    SERVED_CATALOG_SETTINGS,
+]
 
 
-def _claude_catalog(ctx: ToolContext, models=CLAUDE_CURRENT) -> Path:
-    path = Path(ctx.env["HOME"]) / "claude-state" / "cache" / "model-catalog" / "org-main-a-cc.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "fetchedAt": 1792065600000,
-                "catalog": {
-                    "config": {
-                        "models": [
-                            {
-                                "id": model_id,
-                                "short_name": family.title(),
-                                "thinking": {
-                                    "effort_options": [{"id": effort} for effort in efforts]
-                                },
-                            }
-                            for model_id, family, efforts in models
-                        ]
+def _claude_catalog_path(ctx: ToolContext) -> Path:
+    return Path(ctx.env["HOME"]) / "claude-state" / "cache" / "model-catalog" / "org-main-a-cc.json"
+
+
+def _claude_catalog_text(models=CLAUDE_CURRENT, *, stale_at: object = FRESH_STALE_AT) -> str:
+    data: dict[str, object] = {
+        "fetchedAt": FETCHED_AT,
+        "catalog": {
+            "config": {
+                "models": [
+                    {
+                        "id": model_id,
+                        "short_name": family.title(),
+                        "thinking": {"effort_options": [{"id": effort} for effort in efforts]},
                     }
-                },
+                    for model_id, family, efforts in models
+                ]
             }
-        )
-    )
+        },
+    }
+    if stale_at is not None:
+        data["staleAt"] = stale_at
+    return json.dumps(data)
+
+
+def _claude_catalog(
+    ctx: ToolContext, models=CLAUDE_CURRENT, *, stale_at: object = FRESH_STALE_AT
+) -> Path:
+    path = _claude_catalog_path(ctx)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_claude_catalog_text(models, stale_at=stale_at))
     return path
 
 
@@ -310,8 +333,15 @@ def _cli_stub(
     remap_output: str = "",
     remap_rc: int = 0,
     remap_edit: tuple[Path, str] | None = None,
+    written_catalog: str | None = None,
+    written_on_turn: int = 1,
 ) -> Path:
-    """Real argv through a restricted PATH; only the external CLI is replaced."""
+    """Real argv through a restricted PATH; only the external CLI is replaced.
+
+    ``written_catalog``: catalog JSON the Claude stub writes to the fixture path
+    when — and only when — a turn carries the ``--settings`` override, on the
+    ``written_on_turn``-th such turn (the flag-cache layer needs two).
+    """
     log = Path(ctx.env["HOME"]) / f"{provider}.argv.jsonl"
     status = (
         auth_status
@@ -327,7 +357,8 @@ import json
 import sys
 from pathlib import Path
 args = sys.argv[1:]
-with Path({str(log)!r}).open("a") as handle:
+log = Path({str(log)!r})
+with log.open("a") as handle:
     handle.write(json.dumps(args) + "\\n")
 if {provider!r} == "claude" and args == ["auth", "status"]:
     print(json.dumps({status!r}))
@@ -339,6 +370,15 @@ if {provider!r} == "codex" and args == ["debug", "models"]:
         sys.exit(1)
     print(catalog.read_text())
     sys.exit(0)
+override = {SERVED_CATALOG_SETTINGS!r}
+served = {written_catalog!r}
+if {provider!r} == "claude" and served is not None and "--settings" in args:
+    if args[args.index("--settings") + 1] == override:
+        turns = sum(1 for line in log.read_text().splitlines() if override in json.loads(line))
+        if turns >= {written_on_turn}:
+            target = Path({str(_claude_catalog_path(ctx))!r})
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(served)
 prompt = args[1] if {provider!r} == "claude" else args[-1]
 if prompt == "Reply with exactly OK.":
     print("OK")
@@ -520,20 +560,6 @@ def test_codex_reconcile_retries_after_failed_first_read(tmp_path):
     assert _all_calls(log) == [["debug", "models"], ["debug", "models"]]
 
 
-def test_missing_claude_catalog_after_refresh_has_path_and_open_hint(tmp_path):
-    ctx = _context(tmp_path)
-    cfg = _config(ctx, "claude", model="claude-opus-4-1")
-    log = _cli_stub(ctx, "claude")
-    before = (ctx.home / "config.yaml").read_bytes()
-
-    with pytest.raises(ConfigError, match=r"cache/model-catalog") as exc:
-        under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lambda _: None, dry_run=False)
-    assert "open claude once" not in str(exc.value)
-
-    assert _headless(_calls(log)) == [["-p", "Reply with exactly OK.", "--output-format", "text"]]
-    assert (ctx.home / "config.yaml").read_bytes() == before
-
-
 def test_failed_codex_remap_reports_redacted_probe_detail_and_preserves_yaml(tmp_path):
     ctx = _context(tmp_path)
     cfg = _config(ctx, model="gpt-5-sol")
@@ -678,11 +704,11 @@ def test_two_claude_leaves_share_one_default_remap_turn(tmp_path):
     under_test.reconcile(ctx, cfg, {"session"}, say=lines.append, dry_run=False)
 
     calls = _headless(_calls(log))
-    assert calls[0] == ["-p", "Reply with exactly OK.", "--output-format", "text"]
     assert (
-        len(calls) == 2 and calls[1][:1] == ["-p"] and calls[1][2:] == ["--output-format", "text"]
+        len(calls) == 1 and calls[0][:1] == ["-p"] and calls[0][2:] == ["--output-format", "text"]
     )
-    assert '"model"' in calls[1][1] and '"tasks.review"' in calls[1][1]
+    assert '"model"' in calls[0][1] and '"tasks.review"' in calls[0][1]
+    assert not any(line.startswith("→ refreshing") for line in lines)
     persisted = store.load_global(ctx.home)
     assert persisted is not None
     assert persisted.llm.providers["claude"].model == "claude-opus-5-5"
@@ -742,14 +768,14 @@ def test_api_key_stale_id_remaps_to_listed_id_keeping_effort(tmp_path):
     assert saved is not None
     assert saved.llm.providers["claude"].model == "claude-opus-5-5:max"
     assert cfg.llm.providers["claude"].model == "claude-opus-5-5:max"
-    assert len(_headless(_calls(log))) == 2
+    assert len(_headless(_calls(log))) == 1
     assert len([line for line in lines if "model:" in line and "config updated" in line]) == 1
     written = (ctx.home / "config.yaml").read_bytes()
 
     under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False)
 
     assert (ctx.home / "config.yaml").read_bytes() == written
-    assert len(_headless(_calls(log))) == 2
+    assert len(_headless(_calls(log))) == 1
 
 
 def test_cli_docs_model_remaps_and_keeps_other_provider_leaves(tmp_path):
@@ -765,7 +791,7 @@ def test_cli_docs_model_remaps_and_keeps_other_provider_leaves(tmp_path):
     assert persisted.llm.providers["claude"].docs_model == "claude-sonnet-5-5"
     assert persisted.llm.providers["claude"].tasks.review == "opus"
     assert cfg.llm.providers["claude"].docs_model == "claude-sonnet-5-5"
-    assert len(_headless(_calls(log))) == 2
+    assert len(_headless(_calls(log))) == 1
 
 
 @pytest.mark.parametrize("backend", ["cli", "api"])
@@ -798,7 +824,7 @@ def test_saved_docs_effort_remaps_to_full_id_without_effort(tmp_path, monkeypatc
     docs_run = docs_llm_for(cfg)
     assert docs_run.model == "claude-sonnet-5-5"
     assert docs_run.wiki_args[docs_run.wiki_args.index("--model") + 1] == "claude-sonnet-5-5"
-    assert len(_headless(_calls(log))) == (2 if backend == "cli" else 1)
+    assert len(_headless(_calls(log))) == 1
     assert len([line for line in lines if "docs_model" in line and "config updated" in line]) == 1
 
 
@@ -828,9 +854,9 @@ def test_api_docs_and_cli_session_use_separate_catalogs_but_one_remap_turn(tmp_p
     assert len(gets) == 1 and gets[0][0] == "https://api.anthropic.com/v1/models?limit=1000"
     assert gets[0][1]["x-api-key"] == "secret-token-1234"
     calls = _headless(_calls(log))
-    assert len(calls) == 2  # CLI session stale: one refresh; API docs: no extra refresh
-    assert calls[0] == ["-p", "Reply with exactly OK.", "--output-format", "text"]
-    assert '"model"' in calls[1][1] and '"docs_model"' in calls[1][1]
+    assert len(calls) == 1  # fresh CLI catalog: no refresh; API docs: no refresh; one remap
+    assert calls[0][:1] == ["-p"] and calls[0][2:] == ["--output-format", "text"]
+    assert '"model"' in calls[0][1] and '"docs_model"' in calls[0][1]
     assert all("--model" not in call and "-m" not in call for call in calls)
     persisted = store.load_global(ctx.home)
     assert persisted is not None
@@ -963,3 +989,224 @@ def test_concurrent_edit_to_same_leaf_uses_last_writer_wins(tmp_path):
     persisted = store.load_global(ctx.home)
     assert persisted is not None
     assert persisted.llm.providers["codex"].model == "gpt-6-sol"
+
+
+def _catalog_dir(ctx: ToolContext) -> Path:
+    return _claude_catalog_path(ctx).parent
+
+
+def test_missing_claude_catalog_is_created_by_one_override_turn_without_remap(tmp_path):
+    """G4: with nonessential traffic disabled in user settings only the override turn
+    writes the file."""
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-5-5")
+    before = (ctx.home / "config.yaml").read_bytes()
+    log = _cli_stub(ctx, "claude", written_catalog=_claude_catalog_text())
+    lines = []
+
+    assert under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False) is cfg
+
+    assert _headless(_calls(log)) == [REFRESH_TURN]
+    assert lines == [
+        "→ refreshing claude model list (nonessential traffic enabled)",
+        "✓ default model works",
+        "✓ claude models current (3 listed)",
+    ]
+    assert _claude_catalog_path(ctx).exists()
+    assert (ctx.home / "config.yaml").read_bytes() == before
+
+
+def test_second_override_turn_writes_the_catalog_when_the_first_only_thaws_flags(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-5-5")
+    log = _cli_stub(ctx, "claude", written_catalog=_claude_catalog_text(), written_on_turn=2)
+    lines = []
+
+    under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False)
+
+    assert _headless(_calls(log)) == [REFRESH_TURN, REFRESH_TURN]
+    assert lines.count("→ refreshing claude model list (nonessential traffic enabled)") == 2
+    assert lines[-1] == "✓ claude models current (3 listed)"
+
+
+def test_catalog_still_missing_after_two_override_turns_fails_loud_without_a_third(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-4-1")
+    before = (ctx.home / "config.yaml").read_bytes()
+    log = _cli_stub(ctx, "claude")  # never writes a catalog
+    lines = []
+
+    with pytest.raises(ConfigError) as caught:
+        under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False)
+
+    message = str(caught.value)
+    assert message == (
+        f"Claude model catalog missing under {_catalog_dir(ctx)} after two refresh turns; "
+        "check the [servedCatalog] lines in ~/.claude/debug/latest"
+    )
+    assert _headless(_calls(log)) == [REFRESH_TURN, REFRESH_TURN]
+    assert lines.count("→ refreshing claude model list (nonessential traffic enabled)") == 2
+    assert not any("→ model:" in line for line in lines)
+    assert (ctx.home / "config.yaml").read_bytes() == before
+
+
+def test_past_stale_at_spends_one_override_turn_then_remaps_against_the_new_list(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-4-1")
+    _claude_catalog(ctx, stale_at=PAST_STALE_AT)
+    log = _cli_stub(
+        ctx,
+        "claude",
+        written_catalog=_claude_catalog_text(),
+        remap_output='{"model": "claude-opus-5-5"}',
+    )
+    lines = []
+
+    under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False)
+
+    calls = _headless(_calls(log))
+    assert len(calls) == 2 and calls[0] == REFRESH_TURN
+    assert calls[1][:1] == ["-p"] and calls[1][2:] == ["--output-format", "text"]
+    assert '"model"' in calls[1][1]
+    assert lines[0] == "→ refreshing claude model list (nonessential traffic enabled)"
+    assert not any("past its refresh time" in line for line in lines)
+    saved = store.load_global(ctx.home)
+    assert saved is not None and saved.llm.providers["claude"].model == "claude-opus-5-5"
+
+
+def test_fresh_catalog_with_a_stale_leaf_goes_straight_to_the_remap_turn(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-4-1")
+    _claude_catalog(ctx)  # fresh under NOW_MS
+    log = _cli_stub(ctx, "claude", remap_output='{"model": "claude-opus-5-5"}')
+    lines = []
+
+    under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False)
+
+    calls = _headless(_calls(log))
+    assert len(calls) == 1 and "--settings" not in calls[0] and '"model"' in calls[0][1]
+    assert not any(line.startswith("→ refreshing") for line in lines)
+    assert cfg.llm.providers["claude"].model == "claude-opus-5-5"
+
+
+@pytest.mark.parametrize("stale_at", [None, "soon", True], ids=["absent", "string", "bool"])
+def test_unusable_stale_at_counts_as_stale_without_an_error(tmp_path, stale_at):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-5-5")
+    _claude_catalog(ctx, stale_at=stale_at)
+    log = _cli_stub(ctx, "claude", written_catalog=_claude_catalog_text())
+    lines = []
+
+    under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False)
+
+    assert _headless(_calls(log)) == [REFRESH_TURN]
+    assert lines[-1] == "✓ claude models current (3 listed)"
+
+
+def test_catalog_still_old_after_two_turns_narrates_age_and_continues(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-4-1")
+    _claude_catalog(ctx, stale_at=PAST_STALE_AT)
+    # The override turns never rewrite the catalog: the stub has no written_catalog.
+    log = _cli_stub(ctx, "claude", remap_output='{"model": "claude-opus-5-5"}')
+    lines = []
+
+    under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False)
+
+    calls = _headless(_calls(log))
+    assert calls[:2] == [REFRESH_TURN, REFRESH_TURN] and len(calls) == 3
+    age = "· claude catalog is 5 min past its refresh time; continuing with the cached list"
+    assert age in lines
+    remap = next(index for index, line in enumerate(lines) if line.startswith("→ model:"))
+    assert lines.index(age) < remap
+    saved = store.load_global(ctx.home)
+    assert saved is not None and saved.llm.providers["claude"].model == "claude-opus-5-5"
+
+
+def test_dry_run_with_missing_catalog_reports_would_refresh_and_runs_no_turn(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-4-1")
+    before = (ctx.home / "config.yaml").read_bytes()
+    log = _cli_stub(ctx, "claude", written_catalog=_claude_catalog_text())
+    lines = []
+
+    with pytest.raises(under_test.DryRunStale):
+        under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=True)
+
+    assert lines == [f"· Claude model catalog missing under {_catalog_dir(ctx)}; would refresh"]
+    assert _headless(_calls(log)) == []
+    assert not _claude_catalog_path(ctx).exists()
+    assert (ctx.home / "config.yaml").read_bytes() == before
+
+
+def test_dry_run_with_old_catalog_reports_age_then_per_leaf_verdicts_without_turn(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-4-1", tasks_review="opus")
+    _claude_catalog(ctx, stale_at=PAST_STALE_AT)
+    log = _cli_stub(ctx, "claude", written_catalog=_claude_catalog_text())
+    lines = []
+
+    with pytest.raises(under_test.DryRunStale):
+        under_test.reconcile(ctx, cfg, {"session"}, say=lines.append, dry_run=True)
+
+    assert lines[0] == "· claude catalog is 5 min past its refresh time; would refresh"
+    assert "· model: claude-opus-4-1 is unavailable (would remap)" in lines
+    assert not any(line.startswith("· tasks.review:") for line in lines)  # opus is listed
+    assert _headless(_calls(log)) == []
+
+
+def test_dry_run_with_fresh_catalog_and_current_leaves_is_unchanged(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-5-5")
+    _claude_catalog(ctx)
+    log = _cli_stub(ctx, "claude", written_catalog=_claude_catalog_text())
+    lines = []
+
+    assert under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=True) is cfg
+
+    assert lines == ["✓ claude models current (3 listed)"]
+    assert _headless(_calls(log)) == []
+
+
+def test_later_tick_spends_no_turn_and_prints_no_freshness_line(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-4-1")
+    _claude_catalog(ctx, stale_at=PAST_STALE_AT)
+    log = _cli_stub(
+        ctx,
+        "claude",
+        written_catalog=_claude_catalog_text(),
+        remap_output='{"model": "claude-opus-5-5"}',
+    )
+    lines = []
+
+    under_test.reconcile(
+        ctx, cfg, {"orchestrator"}, say=lines.append, dry_run=False, command_start=False
+    )
+
+    calls = _all_calls(log)
+    assert calls[0] == ["auth", "status"]
+    headless = _headless(calls)
+    assert len(headless) == 1 and "--settings" not in headless[0]  # the remap only
+    assert not any("refresh" in line for line in lines)
+    saved = store.load_global(ctx.home)
+    assert saved is not None and saved.llm.providers["claude"].model == "claude-opus-5-5"
+
+
+def test_later_tick_with_missing_catalog_fails_without_a_turn(tmp_path):
+    ctx = _context(tmp_path)
+    cfg = _config(ctx, "claude", model="claude-opus-4-1")
+    before = (ctx.home / "config.yaml").read_bytes()
+    log = _cli_stub(ctx, "claude", written_catalog=_claude_catalog_text())
+
+    with pytest.raises(ConfigError) as caught:
+        under_test.reconcile(
+            ctx, cfg, {"orchestrator"}, say=lambda _: None, dry_run=False, command_start=False
+        )
+
+    assert str(caught.value) == (
+        f"Claude model catalog missing under {_catalog_dir(ctx)}; "
+        "it is refreshed at the next command start"
+    )
+    assert _all_calls(log) == [["auth", "status"]]
+    assert (ctx.home / "config.yaml").read_bytes() == before

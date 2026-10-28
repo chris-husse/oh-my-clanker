@@ -195,6 +195,68 @@ def _set_leaf(pcfg: ProviderConfig, path: str, value: str) -> None:
         setattr(pcfg.tasks, path.removeprefix("tasks."), value)
 
 
+# Claude Code never fetches its served model catalog while the user's settings
+# env sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, so a plain no-model turn
+# can neither create nor refresh the file; a turn carrying the --settings
+# override (ClaudeProvider.headless_argv) can. The same setting freezes Claude's
+# feature-flag cache, so the first override turn may only thaw that cache
+# ("[servedCatalog] off (flag)" in ~/.claude/debug/latest) and the second writes
+# the file. Two turns cover the observed worst case; there is never a third
+# (design record 2026-10-27, Decision 3). The error text spells the bound out.
+CLAUDE_REFRESH_TURNS = 2
+
+
+def _read_claude_catalog(
+    ctx: ToolContext,
+) -> tuple[taskmodels.ClaudeCatalog | None, taskmodels.CatalogMissing | None]:
+    try:
+        return taskmodels.claude_catalog(ctx), None
+    except taskmodels.CatalogMissing as exc:
+        return None, exc
+
+
+def _claude_age(read: taskmodels.ClaudeCatalog) -> str:
+    if read.overdue_minutes is None:
+        return "claude catalog carries no refresh time"
+    return f"claude catalog is {read.overdue_minutes} min past its refresh time"
+
+
+def _claude_cli_catalog(
+    ctx: ToolContext, *, say: Callable[[str], object], dry_run: bool, command_start: bool
+) -> taskmodels.ClaudeCatalog | None:
+    """Claude's on-disk list, refreshed at a command's start when missing or past staleAt.
+
+    Returns None only on a dry run that found no catalog (reported, never
+    refreshed: a dry run runs no turn). Otherwise a catalog still missing
+    raises — after the bounded turns, or at once on a later watch tick.
+    """
+    read, missing = _read_claude_catalog(ctx)
+    if dry_run:
+        if read is None:
+            say(f"· {missing}; would refresh")
+        elif not read.fresh:
+            say(f"· {_claude_age(read)}; would refresh")
+        return read
+    turns = 0
+    while command_start and turns < CLAUDE_REFRESH_TURNS and (read is None or not read.fresh):
+        say("→ refreshing claude model list (nonessential traffic enabled)")
+        ok, detail = docsllm.cli_model_probe(ctx, "claude", "", served_catalog=True)
+        docsllm._step(say, ok, detail)
+        turns += 1
+        read, missing = _read_claude_catalog(ctx)
+    if read is None:
+        if turns:
+            raise ConfigError(
+                f"{missing} after two refresh turns; "
+                "check the [servedCatalog] lines in ~/.claude/debug/latest"
+            )
+        raise ConfigError(f"{missing}; it is refreshed at the next command start")
+    if turns and not read.fresh:
+        # A cached list is a list of real models: its age is narrated, not fatal.
+        say(f"· {_claude_age(read)}; continuing with the cached list")
+    return read
+
+
 def reconcile(
     ctx: ToolContext,
     cfg: Config,
@@ -203,21 +265,27 @@ def reconcile(
     say: Callable[[str], object],
     dry_run: bool,
     report_current: bool = True,
+    command_start: bool = True,
 ) -> Config:
     """Check only selected model leaves, then remap stale values as one transaction.
 
-    A stale Claude CLI catalog gets one no-model refresh turn. Codex's live
-    catalog read is already its refresh. API documentation
+    At a command's start (``command_start``) a Claude CLI catalog that is
+    missing or past its own ``staleAt`` is refreshed first — at most
+    ``CLAUDE_REFRESH_TURNS`` no-model turns with nonessential traffic enabled —
+    so the check runs against a current list; a later ``omc watch`` tick passes
+    ``command_start=False`` and judges the on-disk list as it is, spending no
+    turn. Codex's live catalog read is already its refresh. API documentation
     catalogs are already live, but their remap still uses the provider CLI's
-    default model. A successful dry run reports every stale leaf and signals
-    the command dispatcher to stop before it resolves any model.
+    default model. A successful dry run reports every stale leaf (and a Claude
+    catalog it would refresh) and signals the command dispatcher to stop before
+    it resolves any model.
     """
     selected = _selected_leaves(cfg, leaves)
     if not selected:
         return cfg
 
     buckets = {(leaf.provider, leaf.source) for leaf in selected}
-    catalogs: dict[tuple[str, str], list[CatalogModel] | None] = {}
+    catalogs: dict[tuple[str, str], list[CatalogModel]] = {}
     for provider, source in sorted(buckets):
         if source == "api":
             key = cfg.secrets.api_keys.get(provider, "")
@@ -227,17 +295,19 @@ def reconcile(
                     "run omc configure"
                 )
             catalogs[(provider, source)] = taskmodels.catalog(ctx, provider, docs_api_key=key)
+        elif provider == "claude":
+            # Before the compatibility check: a stale leaf is judged against the
+            # refreshed list, and the remap turn is never spent against no list.
+            read = _claude_cli_catalog(ctx, say=say, dry_run=dry_run, command_start=command_start)
+            if read is None:
+                raise DryRunStale()  # reported above; no list to judge the leaves against
+            catalogs[(provider, source)] = read.models
         else:
-            try:
-                catalogs[(provider, source)] = taskmodels.catalog(ctx, provider)
-            except taskmodels.CatalogMissing:
-                catalogs[(provider, source)] = None
+            catalogs[(provider, source)] = taskmodels.catalog(ctx, provider)
 
     def stale_leaves() -> list[StaleLeaf]:
         def stale(leaf: StaleLeaf) -> bool:
             models = catalogs[(leaf.provider, leaf.source)]
-            if models is None:
-                return True
             if leaf.path == "docs_model" and leaf.effort:
                 # Documentation passes the saved value as one --model arg;
                 # it has no separate effort setting to apply at launch.
@@ -258,18 +328,6 @@ def reconcile(
             say(f"· {leaf.path}: {leaf.value} is unavailable (would remap)")
         raise DryRunStale()
 
-    refresh = {
-        leaf.provider for leaf in stale if leaf.source == "cli" and leaf.provider == "claude"
-    }
-    for provider in sorted(refresh):
-        say(f"→ refreshing {provider} model list with the default model")
-        # Claude refreshes its per-org picker catalog during a no-model turn.
-        # Codex has already read its launched binary's live catalog above.
-        ok, detail = docsllm.cli_model_probe(ctx, provider, "")
-        docsllm._step(say, ok, detail)
-        catalogs[(provider, "cli")] = taskmodels.catalog(ctx, provider)
-
-    stale = stale_leaves()
     current_providers = {leaf.provider for leaf in selected} - {leaf.provider for leaf in stale}
 
     def say_current_models() -> None:
@@ -279,7 +337,7 @@ def reconcile(
             ids = {
                 model.id
                 for (name, _), models in catalogs.items()
-                if name == provider and models is not None
+                if name == provider
                 for model in models
             }
             say(f"✓ {provider} models current ({len(ids)} listed)")
@@ -291,7 +349,7 @@ def reconcile(
     answers: dict[tuple[str, str], str] = {}
     for provider in sorted({leaf.provider for leaf in stale}):
         provider_leaves = [leaf for leaf in stale if leaf.provider == provider]
-        offered = {leaf.path: catalogs[(provider, leaf.source)] or [] for leaf in provider_leaves}
+        offered = {leaf.path: catalogs[(provider, leaf.source)] for leaf in provider_leaves}
         prompt = build_remap_prompt(provider_leaves, offered)
         ok, detail = docsllm.cli_model_probe(ctx, provider, "", prompt=prompt, return_output=True)
         if not ok:
