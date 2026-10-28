@@ -1,6 +1,8 @@
+import json
 import os
 import stat
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -121,6 +123,12 @@ def _update_ctx(tmp_path, *, plugins=HEALTHY_PLUGINS, install_rc=0):
     _stub(bindir, "wt")  # require_tools probes git/wt/provider
     _stub(bindir, "git")  # deterministic --version for the probe
     home = tmp_path / "omc-home"
+    # Generic installer tests use an offline local receipt. Codex's detailed
+    # JSON state is exercised by test_codex_plugin, not this shell stub.
+    receipt = tmp_path / ".local/share/uv/tools/omc/uv-receipt.toml"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    source = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    receipt.write_text(f'[tool]\nrequirements = [{{name = "omc", directory = "{source}"}}]\n')
     ctx = ToolContext.from_env(
         {"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}"}
     )
@@ -136,7 +144,151 @@ def test_update_upgrades_then_updates_each_providers_plugin(tmp_path, capsys):
     assert "tool upgrade omc" in uv_calls.read_text()
     assert "plugin marketplace update oh-my-clanker" in claude_calls.read_text()
     assert "plugin update omc@oh-my-clanker" in claude_calls.read_text()
-    assert "plugin marketplace upgrade" in codex_calls.read_text()
+    assert "plugin marketplace list --json" in codex_calls.read_text()
+
+
+@pytest.mark.parametrize(
+    "receipt_kind",
+    ["directory", "editable", "github", "unknown", "pypi", "unsupported"],
+)
+def test_update_codex_uses_receipt_source_and_verified_status(
+    tmp_path, monkeypatch, capsys, receipt_kind
+):
+    from omc import installer
+
+    ctx, _, _, _ = _update_ctx(tmp_path)
+    checkout = tmp_path / "desired checkout; $(touch untouched)"
+    checkout.mkdir()
+    receipt = tmp_path / ".local/share/uv/tools/omc/uv-receipt.toml"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    if receipt_kind in ("directory", "editable"):
+        receipt.write_text(
+            f'[tool]\nrequirements = [{{name = "omc", {receipt_kind} = "{checkout}"}}]\n'
+        )
+        expected = str(checkout)
+    elif receipt_kind == "github":
+        receipt.write_text(
+            '[tool]\nrequirements = [{name = "omc", git = "https://github.com/example/omc.git"}]\n'
+        )
+        expected = "example/omc"
+    elif receipt_kind == "pypi":
+        receipt.write_text('[tool]\nrequirements = [{name = "omc"}]\n')
+        expected = "chris-husse/oh-my-clanker"
+    elif receipt_kind == "unsupported":
+        receipt.write_text(
+            '[tool]\nrequirements = [{name = "omc", git = "https://gitlab.com/example/omc.git"}]\n'
+        )
+        expected = "chris-husse/oh-my-clanker"
+    else:
+        receipt.unlink()
+        expected = "chris-husse/oh-my-clanker"
+    seen = []
+    monkeypatch.setattr(
+        installer, "update_codex_plugin", lambda ctx, source: seen.append(source) or "verified"
+    )
+    assert run_update(ctx) == 0
+    assert seen == [expected]
+    assert "✓ codex: omc plugin verified" in capsys.readouterr().err
+
+
+def test_codex_verification_failure_has_no_success_and_claude_continues(
+    tmp_path, monkeypatch, capsys
+):
+    from omc import installer
+
+    ctx, _, claude_calls, _ = _update_ctx(tmp_path)
+    cfg = store.load_global(ctx.home)
+    cfg.llm.providers = {"codex": ProviderConfig(), "claude": ProviderConfig()}
+    store.save_global(ctx.home, cfg)
+
+    def fail(_ctx, _source):
+        raise OmcError("installed skill is stale")
+
+    monkeypatch.setattr(installer, "update_codex_plugin", fail)
+    assert run_update(ctx) == 0
+    err = capsys.readouterr().err
+    assert "✗ codex: installed skill is stale" in err
+    assert "✓ codex: omc plugin" not in err
+    assert "✗ claude:" in err  # later provider was reached independently
+    assert "plugin update omc@oh-my-clanker" in claude_calls.read_text()
+
+
+def test_codex_scratch_permission_error_still_runs_later_provider(tmp_path, monkeypatch, capsys):
+    ctx, _, claude_calls, _ = _update_ctx(tmp_path)
+    cfg = store.load_global(ctx.home)
+    cfg.llm.providers = {"codex": ProviderConfig(), "claude": ProviderConfig()}
+    store.save_global(ctx.home, cfg)
+    receipt = tmp_path / ".local/share/uv/tools/omc/uv-receipt.toml"
+    receipt.write_text(
+        '[tool]\nrequirements = [{name = "omc", git = "https://github.com/example/omc.git"}]\n'
+    )
+    original_mkdir = Path.mkdir
+
+    def deny_scratch_codex_home(path, *args, **kwargs):
+        if path.name == "codex" and path.parent.name.startswith("omc-codex-marketplace-"):
+            raise PermissionError("scratch CODEX_HOME denied")
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", deny_scratch_codex_home)
+    assert run_update(ctx) == 0
+    err = capsys.readouterr().err
+    assert "✗ codex: Codex plugin update from example/omc:" in err
+    assert "scratch CODEX_HOME denied" in err
+    assert "✓ codex: omc plugin" not in err
+    assert "plugin marketplace add example/omc" in claude_calls.read_text()
+    assert "✗ claude:" in err
+
+
+def test_codex_plugin_source_symlink_loop_still_runs_later_provider(tmp_path, capsys):
+    ctx, _, claude_calls, _ = _update_ctx(tmp_path)
+    cfg = store.load_global(ctx.home)
+    cfg.llm.providers = {"codex": ProviderConfig(), "claude": ProviderConfig()}
+    store.save_global(ctx.home, cfg)
+    source = tmp_path / "desired"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / "loop").symlink_to("loop")
+    (source / ".claude-plugin/marketplace.json").write_text(
+        json.dumps(
+            {
+                "name": "oh-my-clanker",
+                "plugins": [{"name": "omc", "version": "1.0", "source": "./loop"}],
+            }
+        )
+    )
+    receipt = tmp_path / ".local/share/uv/tools/omc/uv-receipt.toml"
+    receipt.write_text(f'[tool]\nrequirements = [{{name = "omc", directory = "{source}"}}]\n')
+
+    assert run_update(ctx) == 0
+    err = capsys.readouterr().err
+    assert "✗ codex: Codex plugin update from" in err
+    assert "plugin root" in err and "loop" in err
+    assert "✓ codex: omc plugin" not in err
+    assert "plugin marketplace add" in claude_calls.read_text()
+
+
+def test_codex_plugin_null_source_still_runs_later_provider(tmp_path, capsys):
+    ctx, _, claude_calls, _ = _update_ctx(tmp_path)
+    cfg = store.load_global(ctx.home)
+    cfg.llm.providers = {"codex": ProviderConfig(), "claude": ProviderConfig()}
+    store.save_global(ctx.home, cfg)
+    source = tmp_path / "desired"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/marketplace.json").write_text(
+        json.dumps(
+            {
+                "name": "oh-my-clanker",
+                "plugins": [{"name": "omc", "version": "1.0", "source": "./bad\x00path"}],
+            }
+        )
+    )
+    receipt = tmp_path / ".local/share/uv/tools/omc/uv-receipt.toml"
+    receipt.write_text(f'[tool]\nrequirements = [{{name = "omc", directory = "{source}"}}]\n')
+
+    assert run_update(ctx) == 0
+    err = capsys.readouterr().err
+    assert f"✗ codex: Codex plugin update from {source}: cannot resolve Codex plugin root" in err
+    assert "✓ codex: omc plugin" not in err
+    assert "plugin marketplace add" in claude_calls.read_text()
 
 
 def test_update_isolates_provider_failures(tmp_path, capsys):
@@ -146,7 +298,7 @@ def test_update_isolates_provider_failures(tmp_path, capsys):
         tmp_path, plugins=[{"id": "superpowers@claude-plugins-official"}], install_rc=1
     )
     assert run_update(ctx) == 0  # a broken provider never fails the update
-    assert "plugin marketplace upgrade" in codex_calls.read_text()  # codex still ran
+    assert "plugin marketplace list --json" in codex_calls.read_text()  # codex still ran
     err = capsys.readouterr().err
     assert "claude" in err
     assert err.count("plugin install omc@oh-my-clanker") == 1  # one plugin failure
@@ -590,7 +742,8 @@ def test_update_reports_missing_fresh_cli_but_continues_plugins(tmp_path, monkey
     assert any(c[0] == "run" and c[1][:2] == ["uv", "tool"] for c in calls)
     err = capsys.readouterr().err
     assert "installed omc executable not found" in err
-    assert "✓ codex: plugin updated" in err
+    assert "✗ codex:" in err  # an empty stub has no verifiable plugin state
+    assert "✓ codex: omc plugin" not in err
 
 
 def _configured_uninstall_ctx(tmp_path):

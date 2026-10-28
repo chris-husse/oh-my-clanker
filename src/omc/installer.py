@@ -10,7 +10,7 @@ from pathlib import Path
 from .config import store
 from .errors import OmcError
 from .fish_integration import is_owned, managed_fish_path, remove_owned_hook
-from .plugin import ensure_plugin, marketplace_source
+from .plugin import ensure_plugin, marketplace_source, update_codex_plugin
 from .probe import require_tools
 from .providers.registry import get_provider, provider_names
 from .toolctx import ToolContext, tool_version
@@ -190,6 +190,14 @@ def run_update(ctx: ToolContext) -> int:
             sys.stderr.write(cp.stderr if cp.stderr.endswith("\n") else cp.stderr + "\n")
     source = marketplace_source(ctx.env)
     for name in cfg.llm.providers:
+        if name == "codex":
+            try:
+                status = update_codex_plugin(ctx, source)
+            except OmcError as exc:
+                print(f"✗ {name}: {exc} — continuing", file=sys.stderr)
+                continue
+            print(f"✓ {name}: omc plugin {status}", file=sys.stderr)
+            continue
         if name == "claude":
             # Install when missing, reinstall when Claude refuses to load it,
             # refresh when healthy — a plain `plugin update` fails on a plugin

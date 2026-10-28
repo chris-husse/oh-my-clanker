@@ -127,8 +127,9 @@ def test_plugin_update_argvs_are_pure_and_per_provider():
     claude = get_provider("claude").plugin_update_argvs()
     assert ["claude", "plugin", "marketplace", "update", "oh-my-clanker"] in claude
     assert ["claude", "plugin", "update", "omc@oh-my-clanker"] in claude
-    codex = get_provider("codex").plugin_update_argvs()
-    assert codex == [["codex", "plugin", "marketplace", "upgrade"]]
+    # Codex's stateful update has registration and payload postconditions;
+    # the generic argv loop must not claim an upgrade alone is sufficient.
+    assert get_provider("codex").plugin_update_argvs() == []
 
 
 def test_claude_plugin_update_prepends_marketplace_add():
@@ -147,12 +148,43 @@ def test_claude_plugin_update_without_source_omits_add():
     assert not any("add" in a for a in argvs)  # no source → no marketplace add
 
 
-def test_codex_ignores_marketplace_source():
+def test_codex_plugin_management_argvs():
     from omc.providers.codex import CodexProvider
 
-    assert CodexProvider().plugin_update_argvs("anything") == [
-        ["codex", "plugin", "marketplace", "upgrade"]
+    provider = CodexProvider()
+    assert provider.plugin_marketplace_list_argv() == [
+        "codex",
+        "plugin",
+        "marketplace",
+        "list",
+        "--json",
     ]
+    assert provider.plugin_marketplace_add_argv("/desired checkout; $(touch untouched)") == [
+        "codex",
+        "plugin",
+        "marketplace",
+        "add",
+        "/desired checkout; $(touch untouched)",
+        "--json",
+    ]
+    assert provider.plugin_marketplace_remove_argv() == [
+        "codex",
+        "plugin",
+        "marketplace",
+        "remove",
+        "oh-my-clanker",
+        "--json",
+    ]
+    assert provider.plugin_marketplace_upgrade_argv() == [
+        "codex",
+        "plugin",
+        "marketplace",
+        "upgrade",
+        "oh-my-clanker",
+        "--json",
+    ]
+    assert provider.plugin_list_argv() == ["codex", "plugin", "list", "--json"]
+    assert provider.plugin_add_argv() == ["codex", "plugin", "add", "omc@oh-my-clanker", "--json"]
 
 
 # Captured from a real `claude -p --output-format stream-json --verbose` run

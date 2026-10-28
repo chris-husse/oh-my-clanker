@@ -29,6 +29,7 @@ from tempfile import TemporaryDirectory
 
 from .errors import OmcError
 from .installsrc import install_source
+from .providers.codex import CodexProvider
 from .toolctx import ToolContext
 from .wtconfig import repo_root
 
@@ -37,6 +38,7 @@ MARKETPLACE_NAME = "oh-my-clanker"
 SUPERPOWERS_REF = "superpowers@claude-plugins-official"
 _OFFICIAL_MARKETPLACE = "anthropics/claude-plugins-official"
 _FALLBACK_SOURCE = "chris-husse/oh-my-clanker"
+_CODEX_SKILLS = "./skills/"
 
 
 def marketplace_source(env) -> str:
@@ -125,6 +127,278 @@ def _claude_json(ctx: ToolContext, argv: list[str]):
         return json.loads(output)
     except json.JSONDecodeError as exc:
         raise OmcError(f"could not parse `{shlex.join(argv)}` output as JSON") from exc
+
+
+def _codex_json(ctx: ToolContext, argv: list[str]) -> dict:
+    output = _checked(ctx, argv)
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise OmcError(f"could not parse `{shlex.join(argv)}` output as JSON") from exc
+    if not isinstance(data, dict):
+        raise OmcError(f"unexpected `{shlex.join(argv)}` output (expected a JSON object)")
+    return data
+
+
+def _codex_skill_files(plugin_root: Path) -> dict[Path, bytes]:
+    """Read every skill and support file; reject incomplete or ambiguous trees."""
+    skills_root = plugin_root / "skills"
+    files: dict[Path, bytes] = {}
+
+    def visit(directory: Path) -> None:
+        try:
+            children = sorted(directory.iterdir())
+            for child in children:
+                if child.is_symlink():
+                    raise OmcError(f"Codex skill tree at {skills_root} contains a symlink: {child}")
+                if child.is_dir():
+                    visit(child)
+                elif child.is_file():
+                    files[child.relative_to(plugin_root)] = child.read_bytes()
+                else:
+                    raise OmcError(
+                        f"Codex skill tree at {skills_root} contains a non-file: {child}"
+                    )
+        except OSError as exc:
+            raise OmcError(f"cannot read Codex skill tree at {directory}: {exc}") from exc
+
+    if skills_root.is_symlink():
+        raise OmcError(f"Codex skill tree at {skills_root} is a symlink")
+    visit(skills_root)
+    return files
+
+
+def _codex_resolve(path: Path, *, purpose: str, strict: bool = False) -> Path:
+    try:
+        return path.resolve(strict=strict)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise OmcError(f"cannot resolve Codex {purpose} at {path}: {exc}") from exc
+
+
+def _codex_offer(root: Path) -> tuple[str, dict[Path, bytes]]:
+    """Read the omc payload offered by a Codex marketplace root."""
+    marketplace_manifest = root / ".claude-plugin" / "marketplace.json"
+    try:
+        marketplace = json.loads(marketplace_manifest.read_text())
+    except (OSError, ValueError) as exc:
+        raise OmcError(
+            f"cannot read Codex marketplace manifest at {marketplace_manifest}: {exc}"
+        ) from exc
+    if not isinstance(marketplace, dict) or marketplace.get("name") != MARKETPLACE_NAME:
+        raise OmcError(f"Codex marketplace at {root} is not {MARKETPLACE_NAME}")
+    plugins = marketplace.get("plugins")
+    offered = (
+        next((p for p in plugins if isinstance(p, dict) and p.get("name") == "omc"), None)
+        if isinstance(plugins, list)
+        else None
+    )
+    if offered is None:
+        raise OmcError(f"Codex marketplace at {root} does not offer {PLUGIN_REF}")
+    relative = offered.get("source")
+    if not isinstance(relative, str) or not relative:
+        raise OmcError(f"Codex marketplace at {root} has no source for {PLUGIN_REF}")
+    plugin_root = _codex_resolve(root / relative, purpose="plugin root")
+    try:
+        plugin_root.relative_to(_codex_resolve(root, purpose="marketplace root"))
+    except ValueError as exc:
+        raise OmcError(f"Codex marketplace at {root} points outside its root") from exc
+    plugin_manifest = plugin_root / ".codex-plugin" / "plugin.json"
+    try:
+        manifest = json.loads(plugin_manifest.read_text())
+    except (OSError, ValueError) as exc:
+        raise OmcError(f"cannot read Codex plugin manifest at {plugin_manifest}: {exc}") from exc
+    version = manifest.get("version") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("name") != "omc"
+        or manifest.get("skills") != _CODEX_SKILLS
+        or not isinstance(version, str)
+        or not version
+        or Path(version).name != version
+        or offered.get("version") != version
+    ):
+        raise OmcError(f"Codex plugin manifest at {plugin_manifest} disagrees with the marketplace")
+    skills = _codex_skill_files(plugin_root)
+    if not any(path.name == "SKILL.md" for path in skills):
+        raise OmcError(f"Codex plugin at {plugin_root} offers no skills")
+    return version, skills
+
+
+def _codex_source_matches(entry: dict, source: str) -> bool:
+    record = entry.get("marketplaceSource")
+    if not isinstance(record, dict) or not isinstance(record.get("source"), str):
+        return False
+    observed = record["source"]
+    if Path(source).is_absolute():
+        return record.get("sourceType") == "local" and _codex_resolve(
+            Path(observed), purpose="marketplace source"
+        ) == _codex_resolve(Path(source), purpose="desired source")
+    if observed == source:
+        return True
+    if not source.startswith(("https://", "http://", "ssh://", "git@")):
+        return observed.removesuffix(".git") == f"https://github.com/{source}"
+    return False
+
+
+def _codex_registration(ctx: ToolContext, provider: CodexProvider, source: str) -> dict:
+    data = _codex_json(ctx, provider.plugin_marketplace_list_argv())
+    entries = data.get("marketplaces")
+    if not isinstance(entries, list) or not all(isinstance(item, dict) for item in entries):
+        raise OmcError("Codex marketplace listing has no valid marketplaces array")
+    matches = [entry for entry in entries if entry.get("name") == MARKETPLACE_NAME]
+    if len(matches) != 1 or not _codex_source_matches(matches[0], source):
+        raise OmcError(f"{MARKETPLACE_NAME} marketplace is not registered from {source}")
+    root = matches[0].get("root")
+    if not isinstance(root, str) or not root:
+        raise OmcError(f"{MARKETPLACE_NAME} marketplace has no root")
+    if Path(source).is_absolute() and (
+        not Path(root).is_absolute()
+        or _codex_resolve(Path(root), purpose="marketplace root")
+        != _codex_resolve(Path(source), purpose="desired source")
+    ):
+        raise OmcError(f"{MARKETPLACE_NAME} marketplace root {root} differs from {source}")
+    return matches[0]
+
+
+def _codex_preflight(ctx: ToolContext, provider: CodexProvider, source: str) -> None:
+    if Path(source).is_absolute():
+        _codex_offer(Path(source))
+        return
+    # A remote replacement is fetched into a disposable Codex home before
+    # removing the live registration, so an invalid desired source leaves the
+    # installed plugin in place. Codex owns this scratch registry as well.
+    try:
+        with TemporaryDirectory(prefix="omc-codex-marketplace-") as scratch:
+            codex_home = Path(scratch) / "codex"
+            # Codex 0.156.1 refuses CODEX_HOME when the directory does not exist.
+            codex_home.mkdir()
+            # Keep the caller's HOME so Git sees its credential helpers and
+            # URL rewrites; CODEX_HOME alone isolates Codex's scratch registry.
+            env = {
+                **ctx.child_env(),
+                "CODEX_HOME": str(codex_home),
+                "OMC_HOME": str(Path(scratch) / "omc"),
+                "UV_TOOL_DIR": str(Path(scratch) / "uv"),
+            }
+            probe = ToolContext.from_env(env)
+            added = _codex_json(probe, provider.plugin_marketplace_add_argv(source))
+            if added.get("marketplaceName") != MARKETPLACE_NAME:
+                raise OmcError(
+                    f"desired Codex source {source} is not the {MARKETPLACE_NAME} marketplace"
+                )
+            registration = _codex_registration(probe, provider, source)
+            _codex_offer(Path(registration["root"]))
+    except OSError as exc:
+        raise OmcError(f"Codex marketplace preflight scratch for {source} failed: {exc}") from exc
+
+
+def _codex_verify_install(
+    ctx: ToolContext,
+    provider: CodexProvider,
+    source: str,
+    added: dict,
+    version: str,
+    skills: dict[Path, bytes],
+) -> None:
+    listing = _codex_json(ctx, provider.plugin_list_argv())
+    entries = listing.get("installed")
+    if not isinstance(entries, list) or not all(isinstance(item, dict) for item in entries):
+        raise OmcError("Codex plugin listing has no valid installed array")
+    matches = [entry for entry in entries if entry.get("pluginId") == PLUGIN_REF]
+    if (
+        len(matches) != 1
+        or matches[0].get("installed") is not True
+        or matches[0].get("enabled") is not True
+    ):
+        raise OmcError(f"{PLUGIN_REF} is not installed and enabled exactly once")
+    entry = matches[0]
+    if (
+        entry.get("version") != version
+        or not _codex_source_matches(entry, source)
+        or added.get("pluginId") != PLUGIN_REF
+        or added.get("version") != version
+    ):
+        raise OmcError(f"{PLUGIN_REF} installation metadata is stale or mismatched")
+    codex_home = Path(
+        ctx.env.get("CODEX_HOME") or Path(ctx.env.get("HOME", "~")).expanduser() / ".codex"
+    )
+    expected = codex_home / "plugins" / "cache" / MARKETPLACE_NAME / "omc" / version
+    raw_path = added.get("installedPath")
+    if not isinstance(raw_path, str):
+        raise OmcError(f"{PLUGIN_REF} add result has no installedPath")
+    installed = _codex_resolve(Path(raw_path), purpose="installed artifact", strict=True)
+    canonical = _codex_resolve(expected, purpose="canonical installed path", strict=True)
+    cache = _codex_resolve(codex_home / "plugins" / "cache", purpose="installed cache", strict=True)
+    if installed != canonical or not installed.is_dir() or not installed.is_relative_to(cache):
+        raise OmcError(f"{PLUGIN_REF} installed artifact is outside its canonical Codex cache path")
+    manifest_path = installed / ".codex-plugin" / "plugin.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError) as exc:
+        raise OmcError(f"{PLUGIN_REF} installed manifest is unreadable: {exc}") from exc
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("name") != "omc"
+        or manifest.get("version") != version
+        or manifest.get("skills") != _CODEX_SKILLS
+    ):
+        raise OmcError(f"{PLUGIN_REF} installed manifest is stale or mismatched")
+    installed_files = _codex_skill_files(installed)
+    missing = sorted(skills.keys() - installed_files.keys())
+    extra = sorted(installed_files.keys() - skills.keys())
+    if missing or extra:
+        raise OmcError(
+            f"{PLUGIN_REF} installed skill file set is stale: missing={missing}, extra={extra}"
+        )
+    for relative, expected_bytes in skills.items():
+        if installed_files[relative] != expected_bytes:
+            raise OmcError(f"{PLUGIN_REF} installed skill {relative} is stale")
+
+
+def update_codex_plugin(ctx: ToolContext, source: str) -> str:
+    """Reconcile Codex's omc registration and verify installed skill content."""
+    provider = CodexProvider()
+    try:
+        _codex_preflight(ctx, provider, source)
+        try:
+            data = _codex_json(ctx, provider.plugin_marketplace_list_argv())
+        except OmcError as initial_error:
+            # Codex 0.158.0 cannot list a registered marketplace whose local
+            # manifest vanished, but remove by known name still works.
+            if MARKETPLACE_NAME not in str(initial_error):
+                raise
+            try:
+                _codex_json(ctx, provider.plugin_marketplace_remove_argv())
+            except OmcError as exc:
+                raise OmcError(
+                    f"initial Codex marketplace listing failed ({initial_error}); "
+                    f"repair failed: {exc}"
+                ) from exc
+            current = None
+        else:
+            entries = data.get("marketplaces")
+            if not isinstance(entries, list) or not all(isinstance(item, dict) for item in entries):
+                raise OmcError("Codex marketplace listing has no valid marketplaces array")
+            matches = [entry for entry in entries if entry.get("name") == MARKETPLACE_NAME]
+            if len(matches) > 1:
+                raise OmcError(f"Codex has multiple {MARKETPLACE_NAME} registrations")
+            current = matches[0] if matches else None
+            if current is not None and not _codex_source_matches(current, source):
+                _codex_json(ctx, provider.plugin_marketplace_remove_argv())
+                current = None
+        if current is None:
+            added = _codex_json(ctx, provider.plugin_marketplace_add_argv(source))
+            if added.get("marketplaceName") != MARKETPLACE_NAME:
+                raise OmcError(f"Codex registered the wrong marketplace from {source}")
+        if not Path(source).is_absolute():
+            _codex_json(ctx, provider.plugin_marketplace_upgrade_argv())
+        registered = _codex_registration(ctx, provider, source)
+        version, skills = _codex_offer(Path(registered["root"]))
+        installed = _codex_json(ctx, provider.plugin_add_argv())
+        _codex_verify_install(ctx, provider, source, installed, version, skills)
+    except OmcError as exc:
+        raise OmcError(f"Codex plugin update from {source}: {exc}") from exc
+    return "updated and verified"
 
 
 def _available(ctx: ToolContext) -> None:

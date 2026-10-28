@@ -1285,6 +1285,19 @@ def test_implement_skill_contract():
     assert "Invoke the `finish` skill" not in text
 
 
+def test_implement_keeps_task_commits_before_a_red_milestone_gate():
+    text = (ROOT / "skills" / "implement" / "SKILL.md").read_text()
+    build = text.split("## Phase 2 — build", 1)[1].split("## Phase 2b — milestone gate", 1)[0]
+    gate = text.split("## Phase 2b — milestone gate", 1)[1].split("## Phase 3 — hand off", 1)[0]
+
+    assert "commit each task's tested changes" in build, (
+        "task commits must happen during the subagent build, before the milestone gate"
+    )
+    assert "at least one task commit" in gate, "the milestone must check for task commits"
+    assert "keep those task commits" in gate, "a red verify must preserve completed task commits"
+    assert "plan uncommitted" in gate, "a red verify must not perform the handoff commit"
+
+
 def test_task_model_skill_routing_contract():
     design = (ROOT / "skills/design/SKILL.md").read_text()
     implement = (ROOT / "skills/implement/SKILL.md").read_text()
