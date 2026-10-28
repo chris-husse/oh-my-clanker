@@ -151,10 +151,12 @@ def run_update(ctx: ToolContext) -> int:
         require_tools(ctx, cfg)  # git/wt/provider — raises OmcError on a miss
     # Managed dependencies (GitNexus). Module-attribute import so tests can
     # monkeypatch omc.gitnexus.update_gitnexus; a failure here must fail the
-    # command (unlike the best-effort plugin loop below).
+    # command (unlike the best-effort plugin loop below). cfg (possibly None:
+    # unconfigured machine) lets the step decide about the embedding runtime;
+    # None means off.
     from . import gitnexus
 
-    dep_rc = gitnexus.update_gitnexus(ctx)
+    dep_rc = gitnexus.update_gitnexus(ctx, cfg=cfg)
     if cfg is None:
         print("· no config — skipping plugin updates (run `omc configure`)", file=sys.stderr)
         return _finish_update(post, dep_rc)

@@ -311,6 +311,8 @@ def test_child_env_forces_gitnexus_local_storage(tmp_path, inherited):
         "GITNEXUS_STORAGE_ROOT": "/custom/root",
         "UNRELATED": "retained",
         "UV_CACHE_DIR": "/old/cache",
+        "HF_HOME": "/users/own/hf",
+        "GITNEXUS_EMBEDDING_RUNTIME_DIR": "/users/own/rt",
     }
     if inherited is not None:
         env["GITNEXUS_SHARED_STORE"] = inherited
@@ -322,6 +324,22 @@ def test_child_env_forces_gitnexus_local_storage(tmp_path, inherited):
     assert child["GITNEXUS_STORAGE_ROOT"] == "/custom/root"
     assert child["UNRELATED"] == "retained"
     assert child["UV_CACHE_DIR"] == "/new/cache"
+    base = tmp_path / ".omc" / "dependencies" / "gitnexus-embeddings"
+    assert child["GITNEXUS_EMBEDDING_RUNTIME_DIR"] == str(base / "runtime")
+    assert child["HF_HOME"] == str(base / "hf")  # omc's cache wins over the inherited one
+
+
+def test_gitnexus_env_is_a_pure_function_of_the_omc_home(tmp_path):
+    from omc.toolctx import gitnexus_env
+
+    home = tmp_path / "custom-home"
+    assert gitnexus_env(home) == {
+        "GITNEXUS_SHARED_STORE": "off",
+        "GITNEXUS_EMBEDDING_RUNTIME_DIR": str(home / "dependencies/gitnexus-embeddings/runtime"),
+        "HF_HOME": str(home / "dependencies/gitnexus-embeddings/hf"),
+    }
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(home)})
+    assert {k: ctx.child_env()[k] for k in gitnexus_env(home)} == gitnexus_env(home)
 
 
 @pytest.mark.parametrize("runner", ["run", "run_bounded", "run_supervised", "stream"])

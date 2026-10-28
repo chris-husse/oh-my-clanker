@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from .errors import OmcError
 from .mirror import DOCS_MIRROR_REL, clear_docs_mirror, mirror_dir
-from .toolctx import ToolContext
+from .toolctx import ToolContext, gitnexus_env
 from .wikirun import (
     _WIKI_POLL_SECONDS,
     _WIKI_STALL_SECONDS,
@@ -29,8 +29,9 @@ from .wtconfig import current_branch
 
 if TYPE_CHECKING:  # annotation-only; ToolContext stays the subprocess boundary
     import subprocess
+    from collections.abc import Callable
 
-    from .config.schema import Config
+    from .config.schema import Config, GlobalConfig
 
 # The ONLY source ever updated — mirrors the gitnexus-ensure skill's rule.
 GITNEXUS_ORIGIN = "https://github.com/chris-husse/GitNexus.git"
@@ -45,13 +46,18 @@ def gitnexus_argv(ctx: ToolContext, *args: str) -> list[str]:
     return ["node", str(gitnexus_cli(ctx)), *args]
 
 
-def analyze_argv(ctx: ToolContext, base: str) -> list[str]:
+def analyze_argv(ctx: ToolContext, base: str, *, embeddings: bool = False) -> list[str]:
     # Verified fork contract: --branch refuses a mismatched checkout before
     # writing. Placement: no label -> flat; absent/unstamped flat -> adopt flat;
     # same owner -> flat; foreign owner -> branch sub-slot. omc cleans inversion
     # first and checks metadata absence, so it can only reach flat placement.
     # Keep index-only behavior: no AGENTS.md/CLAUDE.md or agent-skill writes.
-    return gitnexus_argv(ctx, "analyze", "--skip-agents-md", "--skip-skills", "--branch", base)
+    # --embeddings (spec 2026-10-27 §6): GitNexus's default 50 000-node cap is
+    # kept; an analyze WITHOUT the flag preserves vectors already present.
+    argv = gitnexus_argv(ctx, "analyze", "--skip-agents-md", "--skip-skills", "--branch", base)
+    if embeddings:
+        argv.append("--embeddings")
+    return argv
 
 
 class CheckoutMoved(Exception):
@@ -74,12 +80,283 @@ def _require_base(ctx: ToolContext, root: Path, base: str) -> None:
         raise CheckoutMoved(branch, base)
 
 
-def _run_analyze(ctx: ToolContext, root: Path, base: str) -> subprocess.CompletedProcess[str]:
+def _say(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+_EMBED_WRITE_ENV = {"GITNEXUS_LBUG_EXTENSION_INSTALL": "auto"}  # Decision 9: write paths only
+
+
+def _run_analyze(
+    ctx: ToolContext,
+    root: Path,
+    base: str,
+    *,
+    embed: bool = False,
+    say=_say,
+    on_fallback: Callable[[], None] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """The single analyze call site for the incremental step and the rebuild.
+    embed=True runs narrated (minutes of CPU, a model download) and falls back
+    ONCE to today's keyword-only analyze when it fails: a model download dying
+    on a plane must not cost the index (spec §6). The retry's result is what the
+    caller's "still stale → destroy and rebuild" escalation judges.
+    on_fallback is called when that retry happens, so refresh_knowledge can
+    skip the backfill sync in a run where embedding demonstrably failed.
+
+    The embedding phase prints nothing off a TTY (verified notes in the
+    Embeddings section below), so liveness is the store changing under the long
+    _EMBED_STALL_SECONDS budget, not bytes under the wiki one — bytes alone
+    would kill a healthy multi-minute pass."""
     _require_base(ctx, root, base)
+    if embed:
+        budget = _EMBED_STALL_SECONDS
+        cp, stalled = _run_narrated(
+            ctx,
+            analyze_argv(ctx, base, embeddings=True),
+            cwd=str(root),
+            say=say,
+            extra_env=_EMBED_WRITE_ENV,
+            heartbeat=_store_heartbeat(root),
+            stall_after=budget,
+        )
+        reason = _failure_reason(cp, stalled, budget)
+        if reason is None:
+            return cp
+        say(f"✗ analyze with embeddings {reason} — retrying keyword-only")
+        if on_fallback is not None:
+            on_fallback()
+        _require_base(ctx, root, base)
     cp = ctx.run(analyze_argv(ctx, base), cwd=str(root))
     if cp.returncode != 0:
         _require_base(ctx, root, base)
     return cp
+
+
+def _index_stat(root: Path, key: str) -> int:
+    """stats.<key> from the index metadata (gitnexus.json first, then
+    meta.json — read_index_meta's rule); absent, unreadable or non-int → 0."""
+    meta = read_index_meta(root) or {}
+    stats = meta.get("stats")
+    count = stats.get(key) if isinstance(stats, dict) else None
+    return count if isinstance(count, int) and not isinstance(count, bool) else 0
+
+
+def _embedding_count(root: Path) -> int:
+    return _index_stat(root, "embeddings")
+
+
+def _backfill_embeddings(ctx: ToolContext, root: Path, say) -> None:
+    """GitNexus's analyze short-circuits "Already up to date" whatever flags it
+    carries, so an index that turns the option on would gain vectors one commit
+    at a time, forever. `embeddings sync` adds the missing vectors to a healthy
+    index, checkpoints for resume, writes stats.embeddings and never touches
+    lastCommit (verified, see the Embeddings comment below) — it cannot move the
+    freshness verdict either way. It may print nothing for long stretches while
+    it embeds, so it is supervised on the store heartbeat under
+    _EMBED_STALL_SECONDS, not on bytes. Failure is narrated only."""
+    say("→ embedding the existing index (one-time)…")
+    budget = _EMBED_STALL_SECONDS
+    cp, stalled = _run_narrated(
+        ctx,
+        gitnexus_argv(ctx, "embeddings", "sync", str(root)),
+        cwd=str(root),
+        say=say,
+        extra_env=_EMBED_WRITE_ENV,
+        heartbeat=_store_heartbeat(root),
+        stall_after=budget,
+    )
+    reason = _failure_reason(cp, stalled, budget)
+    if reason is not None:
+        say(f"✗ embeddings sync {reason}")
+        return
+    count = _embedding_count(root)
+    if count > 0:
+        say(f"✓ index embedded ({count} vectors)")
+    else:
+        say("✗ embeddings sync exited 0 but stats.embeddings is still 0")
+
+
+# ─── Embeddings (spec 2026-10-27-enable-embeddings-for-gitnexus) ───────────
+# Verified against the managed fork CLI (gitnexus 1.6.12 @ 20c559d, 2026-10-27); the
+# E2E test_embeddings_opt_in_refresh_embeds_the_real_repo re-confirmed the flat-slot
+# stats.embeddings > 0, lastCommit == HEAD, runtime under ~/.omc and an exiting query
+# at the Dockerfile.e2e pin d8683be6 (2026-10-28):
+# - `embeddings install` honours GITNEXUS_EMBEDDING_RUNTIME_DIR and lands
+#   node_modules/@huggingface/transformers + node_modules/onnxruntime-node there;
+#   nothing is written to ~/.gitnexus/embedding-runtime. Its output is plain
+#   lines, each echoed again as a pino JSON line ({"level":30,…}).
+# - `embeddings sync [path]` takes no --branch and writes the FLAT slot
+#   (<path>/.gitnexus; no branches/ sub-slot appeared). It writes
+#   stats.embeddings into BOTH gitnexus.json and meta.json and leaves lastCommit
+#   alone, so it can never move the freshness verdict.
+# - `analyze … --embeddings` embeds new nodes incrementally; an analyze without
+#   the flag afterwards (up-to-date or incremental) preserves the vectors.
+# - Off a TTY, analyze prints only its banner, "\x1b[2K\r"-prefixed phase lines
+#   ("Scope: …", "Incremental: …") and the "Repository indexed successfully"
+#   summary; no embedding progress line and no pino JSON. Lines starting with
+#   "{" are pino JSON and are not narrated.
+# - With no runtime: analyze --embeddings auto-installs into the runtime dir
+#   ("Local embedding runtime is not installed. Downloading it now …") and
+#   exits 0 — omc owns the install so that download is narrated, not silent.
+
+# The embedding phase prints nothing off a TTY (verified above), so bytes alone
+# would kill a healthy multi-minute pass; the embedding analyze and
+# `embeddings sync` pass this with a store heartbeat.
+_EMBED_STALL_SECONDS = 1800.0
+
+# Line-start ANSI CSI escapes ("\x1b[2K" clear-line, colours) and carriage returns.
+_LINE_START_ESCAPES = re.compile(r"^(?:\x1b\[[0-?]*[ -/]*[@-~]|\r)+")
+
+
+def _dir_heartbeat(path: Path) -> Callable[[], object]:
+    """Heartbeat for run_supervised: fingerprint the tree under `path` as
+    (file count, newest mtime_ns, total size), None while the dir is absent.
+    Swallows OSError — a broken heartbeat counts as "no change" anyway."""
+
+    def beat() -> object:
+        if not path.is_dir():
+            return None
+        count = newest = size = 0
+        for dirpath, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    st = os.stat(os.path.join(dirpath, name))
+                except OSError:
+                    continue  # vanished mid-walk (atomic rename); next poll sees it
+                count += 1
+                newest = max(newest, st.st_mtime_ns)
+                size += st.st_size
+        return (count, newest, size)
+
+    return beat
+
+
+def _store_heartbeat(root: Path) -> Callable[[], object]:
+    """The index store <root>/.gitnexus as the liveness signal of the embedding
+    analyze and `embeddings sync`."""
+    return _dir_heartbeat(root / ".gitnexus")
+
+
+def _run_narrated(
+    ctx: ToolContext,
+    argv: list[str],
+    *,
+    cwd: str,
+    say: Callable[[str], None],
+    extra_env: dict[str, str] | None = None,
+    heartbeat: Callable[[], object] | None = None,
+    stall_after: float | None = None,
+) -> tuple[subprocess.CompletedProcess[str], bool]:
+    """Run a long GitNexus step supervised for liveness and narrate its lines.
+
+    Serves the embedding runtime install, the embedding analyze and
+    `embeddings sync`: minutes of CPU and downloads that a captured `ctx.run`
+    would hide (a silent minute is a bug). By default byte activity is the only
+    progress signal (constant heartbeat) and the stall window is
+    _WIKI_STALL_SECONDS; a silent phase passes a real heartbeat (the runtime
+    install) and, when it runs for minutes, a longer stall_after (the embedding
+    pass). No progress bar (GITNEXUS_PROGRESS is a wiki-only feature of
+    the fork). Off a TTY analyze prints "\\x1b[2K\\r"-prefixed phase lines; the
+    escapes are stripped first. Pino JSON lines start with "{" and are not news.
+    Returns (completed, stalled) like run_supervised; raises OSError like ctx.run."""
+    last = [""]
+
+    def on_line(line: str) -> None:
+        text = _LINE_START_ESCAPES.sub("", line).strip()
+        if not text or text.startswith("{") or text == last[0]:
+            return
+        last[0] = text
+        say(f"· {text[:200]}")
+
+    return ctx.run_supervised(
+        argv,
+        cwd=cwd,
+        heartbeat=heartbeat if heartbeat is not None else (lambda: None),
+        stall_after=_WIKI_STALL_SECONDS if stall_after is None else stall_after,
+        poll=_WIKI_POLL_SECONDS,
+        extra_env=extra_env,
+        on_line=on_line,
+    )
+
+
+def _failure_reason(
+    cp: subprocess.CompletedProcess[str], stalled: bool, budget: float
+) -> str | None:
+    """How a _run_narrated step failed, for its caller's `✗ <step> …` line:
+    stalled under `budget` — the stall_after the caller actually passed, so the
+    message cannot lie — or a non-zero exit with the output tail (where the
+    error is). None when it succeeded; "exited 0 but …" is the caller's call."""
+    if stalled:
+        return f"stalled — no progress for {int(budget)}s; killed"
+    if cp.returncode != 0:
+        excerpt = (cp.stderr or cp.stdout or "").strip()[-400:]
+        return f"failed (exit {cp.returncode}): {excerpt}"
+    return None
+
+
+def embedding_runtime_dir(ctx: ToolContext) -> Path:
+    """The one source of the runtime path is gitnexus_env (spec §4)."""
+    return Path(gitnexus_env(ctx.home)["GITNEXUS_EMBEDDING_RUNTIME_DIR"])
+
+
+def _embeddings_ready(ctx: ToolContext) -> bool:
+    """GitNexus's own two-package rule (resolveEmbeddingRuntime): probing
+    transformers alone would misread an interrupted install as ready."""
+    modules = embedding_runtime_dir(ctx) / "node_modules"
+    return all(
+        (modules / pkg / "package.json").is_file()
+        for pkg in ("@huggingface/transformers", "onnxruntime-node")
+    )
+
+
+def ensure_embeddings(
+    ctx: ToolContext,
+    cfg: Config | GlobalConfig | None,
+    *,
+    reinstall: bool = False,
+    say=_say,
+) -> bool:
+    """Is the local embedding runtime ready to be spent? The ONLY reader of
+    `gitnexus.embeddings` (spec §3/§5). Off (or no config) → False, silently:
+    the hot path for everyone who never opts in. On → install under the §4
+    runtime dir when the probe fails or `reinstall` asks (the clone's pins may
+    have moved). GitNexus's CPU install is `npm install --prefix <runtime>
+    --ignore-scripts` of its pinned stack; re-running it moves the packages to
+    the current pins, so `--force` is never passed. Never raises, never returns
+    an exit code: a failed install degrades to keyword-only (Decision 5)."""
+    if cfg is None or not cfg.gitnexus.embeddings:
+        return False
+    if _embeddings_ready(ctx) and not reinstall:
+        return True
+    say("→ installing GitNexus embedding runtime…")
+    tail = " — indexing keyword-only"
+    try:
+        # cwd=home: the install needs no repo, and home exists whenever the CLI does.
+        # npm may print nothing for minutes while it downloads, so liveness is the
+        # runtime dir filling up, not bytes; the budget stays the wiki one.
+        budget = _WIKI_STALL_SECONDS
+        cp, stalled = _run_narrated(
+            ctx,
+            gitnexus_argv(ctx, "embeddings", "install"),
+            cwd=str(ctx.home),
+            say=say,
+            heartbeat=_dir_heartbeat(embedding_runtime_dir(ctx)),
+            stall_after=budget,
+        )
+    except OSError as exc:  # node missing or not runnable: an expected failure
+        say(f"✗ embedding runtime install failed: {exc}{tail}")
+        return False
+    reason = _failure_reason(cp, stalled, budget)
+    if reason is not None:
+        say(f"✗ embedding runtime install {reason}{tail}")
+        return False
+    ready = _embeddings_ready(ctx)
+    if ready:
+        say("✓ GitNexus embedding runtime installed")
+    else:
+        say(f"✗ embedding runtime install exited 0 but the runtime is incomplete{tail}")
+    return ready
 
 
 def gitnexus_root(ctx: ToolContext) -> Path:
@@ -330,10 +607,6 @@ def snapshot_freshness(
 # ─── The one repair path (spec §2) ──────────────────────────────────────────
 
 
-def _say(msg: str) -> None:
-    print(msg, file=sys.stderr, flush=True)
-
-
 def _clear_mirror(root: Path, say) -> bool:
     try:
         cleared = clear_docs_mirror(root)
@@ -356,7 +629,15 @@ def _destroy(ctx: ToolContext, root: Path, say) -> bool:
     return True
 
 
-def _destroy_and_rebuild(ctx: ToolContext, root: Path, base: str, say) -> tuple[bool, bool]:
+def _destroy_and_rebuild(
+    ctx: ToolContext,
+    root: Path,
+    base: str,
+    say,
+    *,
+    embed: bool = False,
+    on_fallback: Callable[[], None] | None = None,
+) -> tuple[bool, bool]:
     """Destroy the store and index from scratch. Returns (healed, mirror_cleared);
     the second flag is what a "docs mirror cleared" hint may claim.
 
@@ -367,7 +648,7 @@ def _destroy_and_rebuild(ctx: ToolContext, root: Path, base: str, say) -> tuple[
     mirror_cleared = _clear_mirror(root, say)
     if not _destroy(ctx, root, say):
         return False, mirror_cleared
-    cp = _run_analyze(ctx, root, base)
+    cp = _run_analyze(ctx, root, base, embed=embed, say=say, on_fallback=on_fallback)
     if cp.returncode != 0:
         say(f"✗ full analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
     if flat_store_branch(root) != base:
@@ -480,6 +761,18 @@ def refresh_knowledge(
         if not _destroy(ctx, rootp, say):
             return finish(verdict())
 
+    # Decided once per run; true only when the option is on AND the runtime is
+    # ready after any install attempt. Off emits nothing and changes no argv.
+    embed = ensure_embeddings(ctx, cfg, say=say)
+    # Set when an embedding analyze fell back keyword-only this run; read at
+    # each later call site so a rebuild does not retry --embeddings (another
+    # stall budget under the busy lock) and the backfill is skipped.
+    embed_failed = False
+
+    def fell_back() -> None:
+        nonlocal embed_failed
+        embed_failed = True
+
     v = verdict()
     if v.index_codes():
         had_shared_pointer = (rootp / ".gitnexus" / "store.json").exists()
@@ -493,14 +786,16 @@ def refresh_knowledge(
         if "store-inverted" in v.index_codes():
             owner = flat_store_branch(rootp)
             say(f"✗ GitNexus index is owned by {owner!r}, not {base!r} — destroying and rebuilding")
-            healed, cleared = _destroy_and_rebuild(ctx, rootp, base, say)
+            healed, cleared = _destroy_and_rebuild(
+                ctx, rootp, base, say, embed=embed and not embed_failed, on_fallback=fell_back
+            )
             mirror_cleared = mirror_cleared or cleared
             if not healed:
                 return finish(verdict())
             rebuilt = True
         else:
             say("→ refreshing GitNexus index (incremental)")
-            cp = _run_analyze(ctx, rootp, base)
+            cp = _run_analyze(ctx, rootp, base, embed=embed, say=say, on_fallback=fell_back)
             if cp.returncode != 0:
                 # Narrate only — the verdict below decides whether to escalate.
                 say(f"✗ analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
@@ -510,7 +805,9 @@ def refresh_knowledge(
             if v.index_codes():
                 codes = ",".join(v.index_codes())
                 say(f"✗ index still stale after analyze ({codes}) — destroying and rebuilding")
-                healed, cleared = _destroy_and_rebuild(ctx, rootp, base, say)
+                healed, cleared = _destroy_and_rebuild(
+                    ctx, rootp, base, say, embed=embed and not embed_failed, on_fallback=fell_back
+                )
                 mirror_cleared = mirror_cleared or cleared
                 if not healed:
                     return finish(verdict())
@@ -531,6 +828,23 @@ def refresh_knowledge(
                 say(f"✗ clean --gc failed (exit {cp.returncode}): {excerpt}")
             elif excerpt:
                 say(f"· {excerpt}")
+
+    if embed and _embedding_count(rootp) == 0 and _index_stat(rootp, "nodes") > 0:
+        # Clean index verdict (every stale path above returned), option on, no
+        # vectors yet: the one-time backfill (spec §6). Once stats.embeddings is
+        # positive this is a single JSON read. An index with no nodes has
+        # nothing to embed: sync would exit 0 with 0 vectors on every refresh.
+        # Not after a fallback this run: embedding is unavailable (offline,
+        # broken model download) and a stalled sync would hold the busy lock for
+        # the whole budget for nothing.
+        if embed_failed:
+            say(
+                "· skipping the one-time embedding backfill — embedding failed this run; "
+                "the next refresh retries"
+            )
+        else:
+            did_anything = True
+            _backfill_embeddings(ctx, rootp, say)
 
     if not documentation:
         return finish(v)
@@ -667,9 +981,18 @@ def ensure_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN)
     return 0
 
 
-def update_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN) -> int:
+def update_gitnexus(
+    ctx: ToolContext,
+    *,
+    approved_origin: str = GITNEXUS_ORIGIN,
+    cfg: Config | GlobalConfig | None = None,
+) -> int:
     """Deterministic install-or-update of the managed GitNexus clone
-    (`omc update`). Installs when missing, else forces main and rebuilds."""
+    (`omc update`). Installs when missing, else forces main and rebuilds.
+
+    With the embeddings option on, a rebuilt clone re-pins the embedding runtime
+    (its package.json gitnexusEmbeddingStack may have moved); an up-to-date clone
+    only probes. Neither outcome touches the rc (Decision 5)."""
     root = gitnexus_root(ctx)
     # A fresh install must always build: an origin that carries a prebuilt
     # tree would otherwise land at origin/main with a working CLI and falsely
@@ -694,6 +1017,7 @@ def update_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN)
         and not freshly_cloned
     ):
         print(f"✓ GitNexus up to date{f' ({old})' if old else ''}", file=sys.stderr)
+        ensure_embeddings(ctx, cfg)
         return 0
     verb = "installing" if freshly_cloned else "updating"
     print(f"→ {verb} GitNexus…", file=sys.stderr)
@@ -722,4 +1046,5 @@ def update_gitnexus(ctx: ToolContext, *, approved_origin: str = GITNEXUS_ORIGIN)
             f"✓ GitNexus updated{f': {old} → {new}' if old and old != new else f' ({new})'}",
             file=sys.stderr,
         )
+    ensure_embeddings(ctx, cfg, reinstall=True)
     return 0

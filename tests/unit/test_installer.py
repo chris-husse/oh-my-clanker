@@ -21,7 +21,7 @@ def _no_real_gitnexus(monkeypatch):
     # Installer tests exercise require_tools + the plugin loop, not the real
     # clone/build. Keep update_gitnexus a no-op success here. A per-test
     # monkeypatch.setattr overrides this autouse default.
-    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: 0)
+    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx, **kw: 0)
     # Legacy cases model uv/dependency behaviour only; the fish cases below opt
     # back into the macOS provisioning path explicitly.
     monkeypatch.setattr("omc.installer._is_macos", lambda: False)
@@ -70,7 +70,9 @@ def test_run_update_combines_uv_and_dependency_refresh(monkeypatch, tmp_path):
     ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "home")})
     seen = []
     monkeypatch.setattr(installer, "_uv", lambda ctx, *a: seen.append(("uv", a)) or 0)
-    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: seen.append(("dep",)) or 0)
+    monkeypatch.setattr(
+        "omc.gitnexus.update_gitnexus", lambda ctx, **kw: seen.append(("dep",)) or 0
+    )
     assert installer.run_update(ctx) == 0
     assert ("uv", ("tool", "upgrade", "omc")) in seen and ("dep",) in seen
 
@@ -81,7 +83,7 @@ def test_run_update_fails_if_dependency_refresh_fails(monkeypatch, tmp_path):
 
     ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "home")})
     monkeypatch.setattr(installer, "_uv", lambda ctx, *a: 0)
-    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: 1)
+    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx, **kw: 1)
     assert installer.run_update(ctx) == 1
 
 
@@ -316,7 +318,7 @@ def test_update_aborts_when_required_tool_missing(tmp_path, monkeypatch):
     # GitNexus install, so update_gitnexus must never run on the abort path.
     monkeypatch.setattr(
         "omc.gitnexus.update_gitnexus",
-        lambda ctx: pytest.fail(
+        lambda ctx, **kw: pytest.fail(
             "update_gitnexus ran despite the missing-tool abort — "
             "require_tools must gate BEFORE the GitNexus install"
         ),
@@ -459,7 +461,9 @@ def _fresh_ctx(
     monkeypatch.setattr(ctx, "run_bounded", run_bounded)
     monkeypatch.setattr(installer, "_uv", lambda ctx, *a: calls.append(("uv", a)) or 0)
     monkeypatch.setattr(installer, "_is_macos", lambda: True)
-    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: calls.append(("dep",)) or 0)
+    monkeypatch.setattr(
+        "omc.gitnexus.update_gitnexus", lambda ctx, **kw: calls.append(("dep",)) or 0
+    )
     expected_exe = bin_dir / "omc" if bin_link else tool_dir / "omc" / "bin" / "omc"
     return ctx, calls, expected_exe
 
@@ -551,7 +555,7 @@ def test_dependency_failure_outranks_fish_outcome(tmp_path, monkeypatch):
     from omc import installer
 
     ctx, calls, _ = _fresh_ctx(tmp_path, monkeypatch, reconcile_rc=1)
-    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx: 3)
+    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx, **kw: 3)
     assert installer.run_update(ctx) == 3
 
 
@@ -827,3 +831,26 @@ def test_uninstall_cleans_sections_without_valid_config(tmp_path, monkeypatch, c
     assert run_uninstall(ctx) == 0
     assert not claude.exists() and not codex.exists()
     assert calls == [("tool", "uninstall", "omc")]
+
+
+def test_run_update_passes_the_global_config_to_the_gitnexus_step(monkeypatch, tmp_path):
+    from omc import installer
+    from omc.config import store
+    from omc.config.schema import GlobalConfig
+    from omc.toolctx import ToolContext
+
+    home = tmp_path / "home"
+    gcfg = GlobalConfig()
+    gcfg.gitnexus.embeddings = True
+    store.save_global(home, gcfg)
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": ""})
+    seen = []
+    monkeypatch.setattr(installer, "_uv", lambda ctx, *a: 0)
+    monkeypatch.setattr(installer, "require_tools", lambda ctx, cfg: None)
+    monkeypatch.setattr(installer, "_fresh_cli", lambda ctx: None)
+    monkeypatch.setattr(installer, "ensure_plugin", lambda ctx, name, **kw: "ok")
+    monkeypatch.setattr(
+        "omc.gitnexus.update_gitnexus", lambda ctx, **kw: seen.append(kw.get("cfg")) or 0
+    )
+    assert installer.run_update(ctx) == 0
+    assert len(seen) == 1 and seen[0].gitnexus.embeddings is True

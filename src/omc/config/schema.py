@@ -125,6 +125,20 @@ class SecretsConfig:
 
 
 @dataclass
+class GitNexusConfig:
+    """Knowledge-graph options (spec 2026-10-27). Personal and global: a
+    teammate's laptop must not be committed into embedding CPU time."""
+
+    embeddings: bool = field(
+        default=False,
+        metadata={
+            "label": "Embeddings",
+            "help": "Generate local vector embeddings for semantic /omc:explain queries.",
+        },
+    )
+
+
+@dataclass
 class Config:
     """Runtime composite of GlobalConfig + ProjectConfig; also the hydration
     shape of the legacy combined ~/.omc/config.json. Never persisted as one
@@ -138,6 +152,10 @@ class Config:
     worktree: WorktreeConfig = field(
         default_factory=WorktreeConfig,
         metadata={"label": "Worktree", "help": "Branch naming and base branch."},
+    )
+    gitnexus: GitNexusConfig = field(
+        default_factory=GitNexusConfig,
+        metadata={"label": "GitNexus", "help": "Local embedding runtime for the knowledge graph."},
     )
     # Composed from <home>/secrets.yaml by resolve.load_effective; never persisted
     # as part of this composite. repr=False: see SecretsConfig.
@@ -156,6 +174,10 @@ class GlobalConfig:
     llm: LLMConfig = field(
         default_factory=LLMConfig,
         metadata={"label": "LLM", "help": "Session and documentation models."},
+    )
+    gitnexus: GitNexusConfig = field(
+        default_factory=GitNexusConfig,
+        metadata={"label": "GitNexus", "help": "Local embedding runtime for the knowledge graph."},
     )
 
 

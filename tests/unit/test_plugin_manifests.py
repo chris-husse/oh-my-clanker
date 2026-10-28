@@ -1129,6 +1129,15 @@ def test_gitnexus_explain_contract():
     assert "OMC_KNOWLEDGE" in text and "stderr" in text
     assert "--repo" not in text and "--branch" not in text
     assert "node <CLI> query" not in text
+    for needle in (
+        "keyword-only",
+        "gitnexus.embeddings",
+        "semantic when the index carries vectors",
+        "relay that as a hint",
+        "never try to enable it",
+    ):
+        assert needle in text, f"gitnexus-explain missing {needle!r}"
+    assert "analyze --embeddings" not in text  # the skill never runs the fix itself
 
 
 def test_explain_user_facing_contract():

@@ -20,7 +20,7 @@ CLI authority: a worktree's copied `.venv` may render help from the primary.
 | Install, Update, Configure | `src/omc/cli/__init__.py`, `src/omc/config/schema.py`, `src/omc/installer.py`, `src/omc/reconcile.py`; frozen help for configure/install/update/uninstall |
 | Keep knowledge fresh with `omc watch` | The watch parser, module docstring and tick/hook behavior in `src/omc/watch.py`, `.config/wt.toml`; frozen watch help |
 | Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/finish/SKILL.md`, `skills/review/SKILL.md` for authority and stage semantics |
-| How omc is put together | `src/omc/distribution/AGENTS.md`, `src/omc/toolctx.py`, `src/omc/providers/base.py`, `src/omc/internal.py`; `skills/gitnexus-explain/SKILL.md` for query routing; verdict contracts in the relevant skills |
+| How omc is put together | `src/omc/distribution/AGENTS.md`, `src/omc/toolctx.py`, `src/omc/gitnexus.py` (embeddings: ensure_embeddings, the sync backfill), `src/omc/providers/base.py`, `src/omc/internal.py`; `skills/gitnexus-explain/SKILL.md` for query routing; verdict contracts in the relevant skills |
 | Development | `.omc/config.yaml`, `.config/wt.toml`, `.omc/config/AGENTS.md`, every `.omc/skills/*/SKILL.md`, `.gitignore` |
 | Prerequisites, Other commands, Notifications, Security note, License | Existing README; parser/help; `src/omc/notify.py`, `src/omc/slug.py`, `src/omc/providers/claude.py`, `src/omc/providers/codex.py`, `LICENSE` |
 | Links and retained details | `docs/shell-integration.md`, relevant marketplace/E2E sections of `docker/PLUGIN-NOTES.md`; config validation/store/UI and plugin code when checking their behavior |
@@ -105,6 +105,10 @@ such as `sol:high`, blank follows the provider default; take the per-provider
 defaults table from `default_task_model` in `src/omc/providers/*.py`; plan
 tasks carry a `Complexity:` label, missing means medium); Documentation
 provider, backend and model; Native notifications; Branch prefix; Base branch.
+GitNexus → Embeddings (`gitnexus.embeddings`, off by default; also `--set gitnexus.embeddings=true`):
+omc installs GitNexus's local embedding runtime under `~/.omc`, embeds on every
+refresh, backfills an existing index once, and falls back to keyword-only indexing
+when the runtime or a download fails — never failing update, watch or refresh.
 Stale-model reconciliation (`src/omc/reconcile.py`): design/implement/review
 check the session models, dependency watch the docs model, against the
 provider's listing; a current listing costs no remap turn. Codex reads `codex
@@ -215,6 +219,11 @@ Exactly three Mermaid diagrams, each with a short explanatory paragraph:
    it a worktree snapshot. Mention
    GitNexus approved-source install under `~/.omc/dependencies/gitnexus`; the
    checkout tracks upstream `main` (no version pin), so never cite a GitNexus version.
+   When `gitnexus.embeddings` is on, the embedding runtime and model cache live beside
+   the clone under `~/.omc/dependencies/gitnexus-embeddings/{runtime,hf}`
+   (`GITNEXUS_EMBEDDING_RUNTIME_DIR`, `HF_HOME` from `gitnexus_env`), so an update of
+   the clone never touches them; `/omc:explain` queries become semantic and the
+   keyword-only warning disappears.
 3. Sequence for a real internal contract (e.g. design-record): skill → internal
    command → single prefixed JSON verdict → caller continues. List exactly
    OMC_KNOWLEDGE, OMC_DESIGN_RECORD, OMC_STAGE, OMC_REBASE_MAIN, OMC_SQUASH,

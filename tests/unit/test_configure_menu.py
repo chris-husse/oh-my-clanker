@@ -44,9 +44,28 @@ def _tags(section):
             yield value
 
 
+def test_gitnexus_embeddings_toggle_saves_only_the_global_file(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session, (ctx, gcfg, _, _) = _menu(tmp_path, root=repo)
+    tag = session.root["GitNexus"]["Embeddings"]
+    assert tag.val is False
+    assert tag.update(True)
+    assert gcfg.gitnexus.embeddings is True  # in-memory copy-back, not only disk
+    assert store.load_global(ctx.home).gitnexus.embeddings is True
+    assert not store.project_config_path(repo).exists()
+    assert session.flags == (True, False, False)
+    assert tag.update(False)
+    assert gcfg.gitnexus.embeddings is False
+    assert store.load_global(ctx.home).gitnexus.embeddings is False
+
+
 def test_menu_groups_schema_fields_and_registry_providers(tmp_path):
     session, _ = _menu(tmp_path)
-    assert list(session.root) == ["LLM", "Documentation"]
+    assert list(session.root) == ["LLM", "Documentation", "GitNexus"]
+    assert session.root["GitNexus"]["Embeddings"].description == (
+        "Generate local vector embeddings for semantic /omc:explain queries."
+    )
     llm = session.root["LLM"]
     assert llm["Default provider"].description == "Provider for new sessions."
     assert set(llm) == {"Default provider", "claude", "codex"}

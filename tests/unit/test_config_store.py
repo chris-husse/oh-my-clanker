@@ -6,6 +6,7 @@ import pytest
 from omc.config import store
 from omc.config.schema import (
     DocsConfig,
+    GitNexusConfig,
     GlobalConfig,
     LLMConfig,
     ProjectConfig,
@@ -100,6 +101,7 @@ def test_schema_menu_metadata_does_not_change_persisted_defaults():
                 }
             },
         },
+        "gitnexus": {"embeddings": False},
     }
     assert asdict(ProjectConfig()) == {
         "schema_version": 1,
@@ -114,6 +116,7 @@ def test_schema_menu_metadata_does_not_change_persisted_defaults():
         type(ProviderConfig().tasks),
         WorktreeConfig,
         SecretsConfig,
+        GitNexusConfig,
     ):
         for item in fields(cls):
             if item.name == "schema_version":
@@ -705,3 +708,67 @@ def test_save_secrets_rejects_bad_key_before_writing(tmp_path):
     with pytest.raises(ConfigError):
         store.save_secrets(tmp_path, SecretsConfig(api_keys={"claude": "op://x/y/z"}))
     assert not (tmp_path / "secrets.yaml").exists()
+
+
+# --- gitnexus.embeddings (spec 2026-10-27 §3) ---
+
+
+def test_gitnexus_embeddings_defaults_off_everywhere(tmp_path):
+    from omc.config.schema import Config
+
+    assert GlobalConfig().gitnexus.embeddings is False
+    assert Config().gitnexus.embeddings is False
+    # a config.yaml written before the option existed hydrates to off
+    (tmp_path / "config.yaml").write_text("schema_version: 1\nllm:\n  default: claude\n")
+    assert store.load_global(tmp_path).gitnexus.embeddings is False
+
+
+def test_gitnexus_embeddings_round_trips_and_is_typed(tmp_path):
+    cfg = GlobalConfig()
+    cfg.gitnexus.embeddings = True
+    store.save_global(tmp_path, cfg)
+    text = (tmp_path / "config.yaml").read_text()
+    assert "gitnexus:\n  embeddings: true" in text
+    assert store.load_global(tmp_path).gitnexus.embeddings is True
+
+
+@pytest.mark.parametrize("value", ['"yes"', "1", "null", "[true]"])
+def test_gitnexus_embeddings_wrong_type_is_a_config_error(tmp_path, value):
+    (tmp_path / "config.yaml").write_text(f"gitnexus:\n  embeddings: {value}\n")
+    with pytest.raises(ConfigError, match="gitnexus.embeddings"):
+        store.load_global(tmp_path)
+
+
+def test_set_gitnexus_embeddings_accepts_exactly_true_false():
+    cfg = GlobalConfig()
+    store.set_key(cfg, "gitnexus.embeddings", "true")
+    assert cfg.gitnexus.embeddings is True
+    store.set_key(cfg, "gitnexus.embeddings", "false")
+    assert cfg.gitnexus.embeddings is False
+    for value in ("1", "on", "True", "yes"):
+        with pytest.raises(ConfigError, match="gitnexus.embeddings expects true or false"):
+            store.set_key(cfg, "gitnexus.embeddings", value)
+    assert cfg.gitnexus.embeddings is False
+    with pytest.raises(ConfigError, match="gitnexus is a section, not a settable key"):
+        store.set_key(cfg, "gitnexus", "true")
+    with pytest.raises(ConfigError, match="unknown config key"):
+        store.set_key(cfg, "gitnexus.nope", "true")
+    with pytest.raises(ConfigError, match="unknown config key"):
+        store.set_key(cfg, "gitnexus.embeddings.extra", "true")
+
+
+def test_project_config_has_no_gitnexus_section():
+    with pytest.raises(ConfigError, match="unknown config key"):
+        store.set_key(ProjectConfig(), "gitnexus.embeddings", "true")
+
+
+def test_load_effective_carries_gitnexus_from_the_global_file(tmp_path):
+    from omc.config import resolve
+    from omc.toolctx import ToolContext
+
+    (tmp_path / "config.yaml").write_text(
+        "llm:\n  default: claude\ngitnexus:\n  embeddings: true\n"
+    )
+    ctx = ToolContext(home=tmp_path, env={"HOME": str(tmp_path), "PATH": ""})
+    cfg = resolve.load_effective(ctx)
+    assert cfg is not None and cfg.gitnexus.embeddings is True

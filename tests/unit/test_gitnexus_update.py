@@ -2,8 +2,18 @@ import os
 import stat
 import subprocess
 
-from omc.gitnexus import ensure_gitnexus, update_gitnexus
+import pytest
+
+from omc.config.schema import Config, GitNexusConfig, GlobalConfig
+from omc.gitnexus import embedding_runtime_dir, ensure_embeddings, ensure_gitnexus, update_gitnexus
 from omc.toolctx import ToolContext
+
+
+@pytest.fixture(autouse=True)
+def _fast_wiki_poll(monkeypatch):
+    import omc.gitnexus as gitnexus_mod
+
+    monkeypatch.setattr(gitnexus_mod, "_WIKI_POLL_SECONDS", 0.05)
 
 
 def _git(*args, cwd):
@@ -354,3 +364,261 @@ def test_build_keeps_callers_cxxflags(tmp_path):
     npm = [ln for ln in calls.read_text().splitlines() if ln.startswith("npm ci")]
     flags = npm[0].split("[CXXFLAGS=", 1)[1].rstrip("]")
     assert flags == "-O2 -fno-omit-frame-pointer -std=c++20"
+
+
+def _embedding_stub(tmp_path, calls, *, install_rc=0):
+    """Replace the node stub: `embeddings install` populates the runtime prefix
+    like npm would (or fails), everything else answers --version. Records env."""
+    node = tmp_path / "bin" / "node"
+    populate = (
+        '/bin/mkdir -p "$GITNEXUS_EMBEDDING_RUNTIME_DIR/node_modules/@huggingface/transformers" '
+        '"$GITNEXUS_EMBEDDING_RUNTIME_DIR/node_modules/onnxruntime-node"; '
+        ': > "$GITNEXUS_EMBEDDING_RUNTIME_DIR/node_modules/@huggingface/transformers'
+        '/package.json"; '
+        ': > "$GITNEXUS_EMBEDDING_RUNTIME_DIR/node_modules/onnxruntime-node/package.json"; '
+        if install_rc == 0
+        else ""
+    )
+    # Both npm lines on stdout: run_supervised's two reader threads make
+    # cross-stream order best-effort, and the test pins the narration order.
+    record = (
+        'echo "node RT=$GITNEXUS_EMBEDDING_RUNTIME_DIR HF=$HF_HOME '
+        f'LBUG=${{GITNEXUS_LBUG_EXTENSION_INSTALL:-unset}} $@" >> "{calls}"\n'
+    )
+    node.write_text(
+        "#!/bin/sh\n"
+        f"{record}"
+        'case "$*" in\n'
+        f'  *" embeddings install") {populate}echo "added 2 packages"; '
+        f'echo "npm warn deprecated"; exit {install_rc} ;;\n'
+        "esac\n"
+        "echo 9.9.9\nexit 0\n"
+    )
+
+
+def _on():
+    return Config(gitnexus=GitNexusConfig(embeddings=True))
+
+
+def _install_calls(calls):
+    text = calls.read_text() if calls.exists() else ""
+    return [ln for ln in text.splitlines() if ln.endswith(" embeddings install")]
+
+
+def test_ensure_embeddings_off_runs_nothing_and_says_nothing(tmp_path):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    _embedding_stub(tmp_path, calls)
+    said = []
+    for cfg in (Config(), GlobalConfig(), None):
+        assert ensure_embeddings(ctx, cfg, say=said.append) is False
+    assert said == [] and not calls.exists()
+
+
+def test_ensure_embeddings_on_and_ready_probes_only(tmp_path):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    _embedding_stub(tmp_path, calls)
+    rt = embedding_runtime_dir(ctx)
+    assert rt == home / "dependencies" / "gitnexus-embeddings" / "runtime"
+    for pkg in ("@huggingface/transformers", "onnxruntime-node"):
+        (rt / "node_modules" / pkg).mkdir(parents=True)
+        (rt / "node_modules" / pkg / "package.json").write_text("{}")
+    said = []
+    assert ensure_embeddings(ctx, _on(), say=said.append) is True
+    assert said == [] and not calls.exists()
+
+
+def test_ensure_embeddings_installs_once_into_the_omc_runtime_dir(tmp_path):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    _embedding_stub(tmp_path, calls)
+    rt = embedding_runtime_dir(ctx)
+    # transformers alone is an interrupted install, not a ready runtime
+    (rt / "node_modules" / "@huggingface" / "transformers").mkdir(parents=True)
+    (rt / "node_modules" / "@huggingface" / "transformers" / "package.json").write_text("{}")
+    said = []
+    assert ensure_embeddings(ctx, _on(), say=said.append) is True
+    cli = home / "dependencies" / "gitnexus" / "gitnexus" / "dist" / "cli" / "index.js"
+    assert _install_calls(calls) == [
+        f"node RT={rt} HF={home / 'dependencies/gitnexus-embeddings/hf'} LBUG=unset "
+        f"{cli} embeddings install"
+    ]
+    assert said == [
+        "→ installing GitNexus embedding runtime…",
+        "· added 2 packages",
+        "· npm warn deprecated",
+        "✓ GitNexus embedding runtime installed",
+    ]
+    assert (rt / "node_modules" / "onnxruntime-node" / "package.json").is_file()
+    # second call: the probe answers, no node call
+    assert ensure_embeddings(ctx, _on(), say=said.append) is True
+    assert len(_install_calls(calls)) == 1
+
+
+def test_ensure_embeddings_failed_install_narrates_and_returns_false(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()  # the CLI lives under home, so home exists whenever an install is reachable
+    ctx, calls = _make_ctx(tmp_path, home)
+    _embedding_stub(tmp_path, calls, install_rc=1)
+    said = []
+    assert ensure_embeddings(ctx, _on(), say=said.append) is False
+    assert len(_install_calls(calls)) == 1
+    failed = [s for s in said if s.startswith("✗ embedding runtime install failed (exit 1): ")]
+    assert len(failed) == 1 and failed[0].endswith(" — indexing keyword-only")
+    assert "npm warn deprecated" in failed[0]
+    assert not any(s.startswith("✓") for s in said)
+
+
+def test_ensure_embeddings_reinstall_runs_even_when_ready(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()  # see above: install runs with cwd=home
+    ctx, calls = _make_ctx(tmp_path, home)
+    _embedding_stub(tmp_path, calls)
+    assert ensure_embeddings(ctx, _on(), say=lambda s: None) is True  # installs
+    assert ensure_embeddings(ctx, _on(), reinstall=True, say=lambda s: None) is True
+    assert len(_install_calls(calls)) == 2
+
+
+def test_ensure_embeddings_missing_node_is_a_narrated_miss(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    ctx, _ = _make_ctx(tmp_path, home)
+    real = ToolContext.run_supervised
+
+    def no_node(self, argv, **kw):
+        if argv and argv[0] == "node":
+            raise FileNotFoundError("node")
+        return real(self, argv, **kw)
+
+    monkeypatch.setattr(ToolContext, "run_supervised", no_node)
+    said = []
+    assert ensure_embeddings(ctx, _on(), say=said.append) is False
+    assert any(
+        s.startswith("✗ embedding runtime install failed: ")
+        and s.endswith(" — indexing keyword-only")
+        for s in said
+    )
+
+
+def _global_on():
+    return GlobalConfig(gitnexus=GitNexusConfig(embeddings=True))
+
+
+def test_update_rebuild_with_option_on_reinstalls_runtime_even_when_ready(tmp_path, capsys):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    origin, seed, _ = _seed_clone(tmp_path, home)
+    _advance_origin(seed)
+    _embedding_stub(tmp_path, calls)
+    assert ensure_embeddings(ctx, _on(), say=lambda s: None) is True  # ready beforehand
+    assert update_gitnexus(ctx, approved_origin=str(origin), cfg=_global_on()) == 0
+    assert len(_install_calls(calls)) == 2  # the rebuild re-pins the runtime
+    err = capsys.readouterr().err
+    assert "✓ GitNexus embedding runtime installed" in err
+    # the build (npm via _run_tool) happened before the runtime install
+    recorded = calls.read_text()
+    assert recorded.index("npm run build") < recorded.rindex("embeddings install")
+
+
+def test_update_up_to_date_with_option_on_probes_only(tmp_path, capsys):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    origin, _, _ = _seed_clone(tmp_path, home)
+    _embedding_stub(tmp_path, calls)
+    assert ensure_embeddings(ctx, _on(), say=lambda s: None) is True
+    assert update_gitnexus(ctx, approved_origin=str(origin), cfg=_global_on()) == 0
+    assert len(_install_calls(calls)) == 1  # no second install on the short-circuit
+    assert "up to date" in capsys.readouterr().err
+
+
+def test_update_up_to_date_with_missing_runtime_installs_it(tmp_path, capsys):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    origin, _, _ = _seed_clone(tmp_path, home)
+    _embedding_stub(tmp_path, calls)
+    assert update_gitnexus(ctx, approved_origin=str(origin), cfg=_global_on()) == 0
+    assert len(_install_calls(calls)) == 1
+
+
+def test_update_failed_runtime_install_does_not_fail_update(tmp_path, capsys):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    origin, seed, _ = _seed_clone(tmp_path, home)
+    _advance_origin(seed)
+    _embedding_stub(tmp_path, calls, install_rc=1)
+    assert update_gitnexus(ctx, approved_origin=str(origin), cfg=_global_on()) == 0
+    err = capsys.readouterr().err
+    assert "✗ embedding runtime install failed (exit 1)" in err and "updated" in err
+
+
+@pytest.mark.parametrize("cfg", [None, GlobalConfig()])
+def test_update_with_option_off_or_unconfigured_never_touches_embeddings(tmp_path, cfg):
+    home = tmp_path / "home"
+    ctx, calls = _make_ctx(tmp_path, home)
+    origin, seed, _ = _seed_clone(tmp_path, home)
+    _advance_origin(seed)
+    _embedding_stub(tmp_path, calls)
+    assert update_gitnexus(ctx, approved_origin=str(origin), cfg=cfg) == 0
+    assert _install_calls(calls) == []
+    # the argv word, not the always-pinned gitnexus-embeddings env paths the stub records
+    assert " embeddings " not in calls.read_text()
+
+
+def _silent_install_stub(tmp_path, calls, *, shell):
+    """A node stub whose `embeddings install` prints NOTHING and runs `shell`
+    (npm downloading: minutes without a byte) before populating the runtime like
+    npm would. Everything else answers --version."""
+    node = tmp_path / "bin" / "node"
+    populate = (
+        '/bin/mkdir -p "$RT/node_modules/@huggingface/transformers" '
+        '"$RT/node_modules/onnxruntime-node"; '
+        ': > "$RT/node_modules/@huggingface/transformers/package.json"; '
+        ': > "$RT/node_modules/onnxruntime-node/package.json"; '
+    )
+    node.write_text(
+        "#!/bin/sh\n"
+        f'echo "node $@" >> "{calls}"\n'
+        'RT="$GITNEXUS_EMBEDDING_RUNTIME_DIR"\n'
+        'case "$*" in\n'
+        f'  *" embeddings install") {shell}{populate}exit 0 ;;\n'
+        "esac\n"
+        "echo 9.9.9\nexit 0\n"
+    )
+
+
+@pytest.mark.parametrize("writes_runtime", [True, False])
+def test_silent_install_lives_on_runtime_writes_and_dies_on_the_wiki_budget(
+    tmp_path, monkeypatch, writes_runtime
+):
+    """npm may print nothing for minutes while it downloads, so bytes alone would
+    kill a healthy install: liveness is the runtime dir changing under the
+    _WIKI_STALL_SECONDS budget. A silent install that keeps writing there
+    survives and ends ready; one that writes nothing is reported stalled."""
+    import omc.gitnexus as gn
+
+    monkeypatch.setattr(gn, "_WIKI_STALL_SECONDS", 0.5)
+    home = tmp_path / "home"
+    home.mkdir()
+    ctx, calls = _make_ctx(tmp_path, home)
+    if writes_runtime:
+        # 1.2 s of silence — past the 0.5 s budget — with a new runtime file every 0.2 s.
+        beats = "; ".join(f'/bin/sleep 0.2; : > "$RT/beat{i}"' for i in range(6))
+        _silent_install_stub(tmp_path, calls, shell=f'/bin/mkdir -p "$RT"; {beats}; ')
+    else:
+        _silent_install_stub(tmp_path, calls, shell="/bin/sleep 5; ")
+    said = []
+    ready = ensure_embeddings(ctx, _on(), say=said.append)
+    assert len(_install_calls(calls)) == 1
+    if writes_runtime:
+        assert ready is True
+        assert said == [
+            "→ installing GitNexus embedding runtime…",
+            "✓ GitNexus embedding runtime installed",
+        ]
+    else:
+        assert ready is False
+        assert said == [
+            "→ installing GitNexus embedding runtime…",
+            "✗ embedding runtime install stalled — no progress for 0s; killed"
+            " — indexing keyword-only",
+        ]
