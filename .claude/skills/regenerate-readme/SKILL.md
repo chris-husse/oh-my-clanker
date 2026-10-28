@@ -110,7 +110,7 @@ check the session models, dependency watch the docs model, against the
 provider's listing; a current listing costs no remap turn. Codex reads `codex
 debug models` on the binary it launches and remaps a still-stale value
 immediately. Claude's refresh turns happen only when its list is missing, past
-its own refresh time, or carrying none, checked at a command's start (and
+its own refresh time, or without one, checked at a command's start (and
 `omc watch`'s first tick only): one or two quick no-model turns with
 nonessential traffic enabled, so a user setting that disables it cannot freeze
 the list; then a still-stale value is remapped, and a list still missing after
