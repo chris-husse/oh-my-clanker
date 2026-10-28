@@ -68,6 +68,7 @@ The worktree section appears only when configure runs inside a git repository. T
 - **Task models**: Design, Plan, Review, Simple Complexity Task, Medium Complexity Task and High Complexity Task. Each accepts `family[:effort]`, such as `sol:high`; blank follows the provider default. Claude task models other than the orchestrator take a family only, because a Claude subagent carries no effort level.
 - **Documentation provider**, **Documentation backend** (`cli` or `api`) and **Documentation model**.
 - **Native notifications**, **Branch prefix** (default `feature/`) and **Base branch** (default `main`).
+- **GitNexus → Embeddings** (`gitnexus.embeddings`, off by default; also `omc configure --set gitnexus.embeddings=true`). When on, omc installs GitNexus's local embedding runtime under `~/.omc`, embeds on every index refresh, backfills an existing index once, and falls back to keyword-only indexing when the runtime or a download fails. It never fails `omc update`, `omc watch` or a refresh.
 
 Provider defaults are:
 
@@ -263,6 +264,8 @@ flowchart LR
 ```
 
 [GitNexus](https://github.com/chris-husse/GitNexus) installs from its approved source under `~/.omc/dependencies/gitnexus`; the checkout tracks that repository's `main` and `omc update` rebuilds it. Its graph provides symbols and execution flows; generated docs explain architecture, and a project's explain-context skill establishes where its truth lives.
+
+When `gitnexus.embeddings` is on, the embedding runtime and model cache live beside the clone under `~/.omc/dependencies/gitnexus-embeddings/{runtime,hf}` (`GITNEXUS_EMBEDDING_RUNTIME_DIR` and `HF_HOME`, set by `gitnexus_env` for every omc child alongside `GITNEXUS_SHARED_STORE=off`), so an update of the clone never touches them. `/omc:explain` queries then become semantic and the keyword-only warning disappears.
 
 Internal commands expose deterministic operations to skills: `rebase-main`, `wt-template`, `design-record`, `models`, `global-instructions`, `gitnexus` (ensure/status/refresh and the query verbs), `dependency`, `skills list` and `build-progress`. For example, the record gate returns a single prefixed JSON line, and the skill uses it to continue or refuse:
 

@@ -127,6 +127,18 @@ def test_configure_defaults(tmp_path, monkeypatch, capsys):
     assert "codex plugin marketplace add" in out  # codex hint
 
 
+def test_configure_set_gitnexus_embeddings_writes_only_the_global_file(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    repo = _repo(tmp_path, monkeypatch)
+    assert main(["configure", "--set", "gitnexus.embeddings=true"]) == 0
+    assert store.load_global(home).gitnexus.embeddings is True
+    assert not store.project_config_path(repo).exists()  # personal, never project
+    assert main(["configure", "--set", "gitnexus.embeddings=false"]) == 0
+    assert store.load_global(home).gitnexus.embeddings is False
+    assert main(["configure", "--set", "gitnexus.embeddings=on"]) == 1
+    assert store.load_global(home).gitnexus.embeddings is False
+
+
 def test_configure_set_global(tmp_path, monkeypatch):
     home = _home(tmp_path, monkeypatch)
     rc = main(

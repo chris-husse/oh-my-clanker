@@ -458,6 +458,7 @@ def test_session_and_headless_launch_use_orchestrator_and_provider_env(tmp_path)
     from types import SimpleNamespace
 
     from omc.session import run_headless, session_plan
+    from omc.toolctx import gitnexus_env
 
     _codex_stub(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1)])
     cfg = Config()
@@ -477,7 +478,11 @@ def test_session_and_headless_launch_use_orchestrator_and_provider_env(tmp_path)
         "model_reasoning_effort=high",
         "/omc:start",
     ]
-    assert plan.env == {"OMC_SLUG": "s", "OMC_PROVIDER": "codex", "GITNEXUS_SHARED_STORE": "off"}
+    assert plan.env == {
+        "OMC_SLUG": "s",
+        "OMC_PROVIDER": "codex",
+        **gitnexus_env(_ctx(tmp_path).home),
+    }
 
     class CaptureCtx:
         env = _ctx(tmp_path).env

@@ -362,3 +362,112 @@ def test_document_api_backend_generates_wiki_docs(container):
     assert rc == 0, _redacted(cfg_text)
     _assert_no_key(cfg_text, "config.yaml")
     assert "backend: api" in cfg_text
+
+
+_INDEX_META = (
+    "import json; from pathlib import Path; root=Path('/repo/.gitnexus'); "
+    "meta=root/'gitnexus.json'; meta=meta if meta.exists() else root/'meta.json'; "
+    "print(meta.read_text())"
+)
+
+
+def _knowledge_reason_codes(out: str) -> set[str]:
+    """Reason codes from every OMC_KNOWLEDGE verdict line in combined output."""
+    codes: set[str] = set()
+    for line in out.splitlines():
+        if line.startswith("OMC_KNOWLEDGE "):
+            verdict = json.loads(line[len("OMC_KNOWLEDGE ") :])
+            codes.update(reason["code"] for reason in verdict["reasons"])
+    return codes
+
+
+def test_embeddings_opt_in_refresh_embeds_the_real_repo(container):
+    """Real GitNexus, real local embedding runtime, no LLM (spec 2026-10-27 §9).
+    The runtime, model and VECTOR extension are pre-baked into the image
+    (Dockerfile.e2e), so this needs no network for them. Artifacts, not
+    transcripts: stats.embeddings on the FLAT slot, and a query whose stderr
+    no longer carries GitNexus's keyword-only warning.
+
+    Runs under the mechanical 300 s pytest-timeout ceiling (measured 111.5 s):
+    every run_in carries an explicit budget and they sum to 295 s — 2 x 10
+    (configure) + 7 x 5 (cat/git/python3/test) + 150 (first refresh) + 65
+    (query) + 25 (second refresh) — so no hung step can outlive the ceiling
+    deep inside docker-py's socket read."""
+    # Deliberately NOT configure_omc: its E2E model pin is a live `claude` probe
+    # and this test spends no LLM call. `llm.default` alone probes nothing and is
+    # the configured state `omc internal gitnexus refresh` gates on.
+    rc, out = run_in(container, ["omc", "configure", "--set", "llm.default=claude"], timeout=10)
+    assert rc == 0, out
+    rc, out = run_in(
+        container, ["omc", "configure", "--set", "gitnexus.embeddings=true"], timeout=10
+    )
+    assert rc == 0, out
+    rc, cfg_text = run_in(container, ["cat", "/root/.omc/config.yaml"], timeout=5)
+    assert rc == 0 and "gitnexus:\n  embeddings: true" in cfg_text, cfg_text
+    rc, head = run_in(container, ["git", "-C", "/repo", "rev-parse", "HEAD"], timeout=5)
+    assert rc == 0, head
+
+    # First index of /repo with the option on: embeds every node once (about a
+    # minute of CPU on the pre-baked model; 150 s is the budget, see docstring).
+    rc, out = run_in(
+        container, ["omc", "internal", "gitnexus", "refresh"], cwd="/repo", timeout=150
+    )
+    assert rc == 0, out
+    assert "retrying keyword-only" not in out, out  # the embedding analyze itself succeeded
+    assert "indexing keyword-only" not in out, out  # the pre-baked runtime was found
+    rc, meta_text = run_in(container, ["python3", "-c", _INDEX_META], timeout=5)
+    assert rc == 0, meta_text
+    meta = json.loads(meta_text)
+    assert meta["lastCommit"] == head.strip(), meta
+    assert isinstance(meta.get("stats", {}).get("embeddings"), int), meta
+    assert meta["stats"]["embeddings"] > 0, meta
+    rc, _ = run_in(container, ["test", "!", "-e", "/repo/.gitnexus/branches"], timeout=5)
+    assert rc == 0, "embedding analyze created a branch sub-slot; the flat slot must be the index"
+
+    # The runtime and model live under ~/.omc, never ~/.gitnexus (Decision 4).
+    for rel in (
+        "runtime/node_modules/@huggingface/transformers/package.json",
+        "runtime/node_modules/onnxruntime-node/package.json",
+    ):
+        rc, _ = run_in(
+            container,
+            ["test", "-f", f"/root/.omc/dependencies/gitnexus-embeddings/{rel}"],
+            timeout=5,
+        )
+        assert rc == 0, rel
+    rc, _ = run_in(container, ["test", "!", "-e", "/root/.gitnexus/embedding-runtime"], timeout=5)
+    assert rc == 0, "a runtime landed in ~/.gitnexus behind omc's back"
+
+    # A semantic query: exit 0 and no keyword-only warning on stderr. SIGKILL
+    # after 60 s because GNU timeout signals its whole process group: a
+    # GitNexus child that never exits (its embedding sidecar is a forked IPC
+    # child) then fails here with rc 137 instead of as pytest's 300 s ceiling
+    # deep inside docker-py's socket read. run_in's own 65 s wrapper sits just
+    # outside so the KILL, not its TERM, is what ends a hung query.
+    rc, out = run_in(
+        container,
+        [
+            "timeout",
+            "-s",
+            "KILL",
+            "60",
+            "omc",
+            "internal",
+            "gitnexus",
+            "query",
+            "how is the knowledge snapshot repaired",
+        ],
+        cwd="/repo",
+        timeout=65,
+    )
+    assert rc == 0, f"rc {rc} (137 = the GitNexus query never exited):\n{out[-2000:]}"
+    assert "keyword-only" not in out, out
+    # The refresh left the index fresh; docs are deliberately never generated
+    # here, so the query's verdict may carry wiki-missing and nothing else.
+    assert _knowledge_reason_codes(out) <= {"wiki-missing"}, out
+
+    # Second refresh: nothing to do, no second embedding pass.
+    rc, out = run_in(container, ["omc", "internal", "gitnexus", "refresh"], cwd="/repo", timeout=25)
+    assert rc == 0, out
+    assert "✓ knowledge is current" in out, out
+    assert "embedding the existing index" not in out, out

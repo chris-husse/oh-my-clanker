@@ -23,7 +23,11 @@
 # Checksums below are pinned to v0.68.0 — bump WORKTRUNK_VERSION and both
 # sha256 values together when upgrading.
 
-FROM node:22-bookworm-slim
+# Pinned minor (spec 2026-10-27 Decision 7): GitNexus `engines` is
+# ^22.18.0 || >=24.11.0 and its embedding-runtime loader needs
+# module.registerHooks (Node >= 22.15); the floating node:22 tag could drift
+# below either. Bump deliberately, together with the pre-bake below.
+FROM node:22.23.4-bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 # make/g++: tree-sitter grammar packages compile via node-gyp during the
 # GitNexus prebake when no prebuilt binary exists for this platform.
@@ -53,7 +57,13 @@ ARG TARGETARCH
 # `git ls-files` only, no untracked files or submodule trees). See
 # docs/superpowers/specs/2026-10-06-fix-watch-docs-grouping-huge-projects-design.md and
 # docs/superpowers/specs/2026-10-07-scope-wiki-generation-to-tracked-files-design.md.
-ARG GITNEXUS_REF=20c559d2ddd4bc99b15183d4c372806c2f3ee776
+# The fork's 2026-10-28 rebase onto upstream main adds upstream #3693 (`query`
+# reaps its embedding sidecar), without which `query` never exits once an index
+# has vectors (see docs/superpowers/specs/2026-10-27-enable-embeddings-for-gitnexus-design.md).
+# d8683be6 on top of it serializes npm install scripts (gitnexus/.npmrc
+# foreground-scripts=true): on linux-arm64 the tree-sitter-typescript build and
+# its nested tree-sitter-javascript build otherwise race on node-addon-api.
+ARG GITNEXUS_REF=d8683be63a1f061ef88d993d4446a63144405e57
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) WT_TARGET=x86_64-unknown-linux-musl; \
@@ -85,6 +95,34 @@ RUN set -eux; \
     cd /root/.omc/dependencies/gitnexus/gitnexus-shared && npm install --no-audit --no-fund; \
     cd /root/.omc/dependencies/gitnexus/gitnexus && npm ci --no-audit --no-fund && npm run build; \
     node /root/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js --version
+
+# Pre-bake the local embedding runtime, the embedding model and LadybugDB's
+# VECTOR extension (spec 2026-10-27 §9). The two paths MUST equal what
+# src/omc/toolctx.py:gitnexus_env derives from OMC_HOME=/root/.omc, so the
+# tests' refresh finds them. One `analyze --embeddings` on a throwaway fixture
+# downloads the model into HF_HOME and the extension into cached layers; the
+# fixture is then `clean --force`d (unregisters it) and removed. Before
+# `COPY . /repo` so the layer caches across repo changes.
+RUN set -eux; \
+    export GITNEXUS_SHARED_STORE=off GITNEXUS_LBUG_EXTENSION_INSTALL=auto; \
+    export GITNEXUS_EMBEDDING_RUNTIME_DIR=/root/.omc/dependencies/gitnexus-embeddings/runtime; \
+    export HF_HOME=/root/.omc/dependencies/gitnexus-embeddings/hf; \
+    CLI=/root/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js; \
+    node "$CLI" embeddings install; \
+    test -f "$GITNEXUS_EMBEDDING_RUNTIME_DIR/node_modules/@huggingface/transformers/package.json"; \
+    test -f "$GITNEXUS_EMBEDDING_RUNTIME_DIR/node_modules/onnxruntime-node/package.json"; \
+    mkdir -p /tmp/embed-fixture && cd /tmp/embed-fixture && git init -q -b main; \
+    printf 'def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return a - b\n' > calc.py; \
+    printf 'from calc import add\n\n\ndef total(xs):\n    t = 0\n    for x in xs:\n        t = add(t, x)\n    return t\n' > report.py; \
+    printf '# fixture\n' > README.md; \
+    git -c user.email=e2e@omc.invalid -c user.name="omc e2e" add -A; \
+    git -c user.email=e2e@omc.invalid -c user.name="omc e2e" commit -qm fixture; \
+    node "$CLI" analyze --skip-agents-md --skip-skills --branch main --embeddings; \
+    python3 -c 'import json, pathlib; r = pathlib.Path(".gitnexus"); p = r / "gitnexus.json" if (r / "gitnexus.json").exists() else r / "meta.json"; m = json.loads(p.read_text()); assert m["stats"]["embeddings"] > 0, m'; \
+    test -d "$HF_HOME"; \
+    node "$CLI" clean --force; \
+    cd / && rm -rf /tmp/embed-fixture; \
+    test ! -e /root/.gitnexus/embedding-runtime
 
 # the repo under test + omc installed from it
 COPY . /repo

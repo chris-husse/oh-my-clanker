@@ -304,6 +304,17 @@ def test_readme_documents_human_review():
         assert "fix" in important and "waiver" in important
 
 
+def test_readme_documents_gitnexus_embeddings():
+    root = Path(__file__).resolve().parents[2]
+    recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
+    readme = (root / "README.md").read_text()
+    for text, name in ((recipe, "recipe"), (readme, "README")):
+        assert "gitnexus.embeddings" in text, f"{name} does not mention gitnexus.embeddings"
+        assert "gitnexus-embeddings" in text, f"{name} does not name the runtime layout"
+    assert "--set gitnexus.embeddings=true" in readme
+    assert "off by default" in readme.lower() or "default off" in readme.lower()
+
+
 def test_readme_documents_gitnexus_storage_contract():
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
     architecture = readme.split("## How omc is put together", 1)[1].split("## Prerequisites", 1)[0]

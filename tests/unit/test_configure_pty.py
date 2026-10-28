@@ -176,7 +176,7 @@ def test_plain_menu_saves_nested_project_field_and_escape_leaves(terminal):
     term = terminal()
     prompt = b"Choose (Enter = ok): "
     term.expect(prompt)
-    term.send(b"3\n")
+    term.send(b"4\n")
     term.expect(b"Worktree (project)")
     term.expect(prompt)
     term.send(b"2\n")
@@ -196,7 +196,7 @@ def test_plain_menu_saves_nested_project_field_and_escape_leaves(terminal):
 def test_default_renderer_can_navigate_nested_project_field(terminal):
     term = terminal(plain=False)
     term.expect(b"Worktree (project)")
-    term.send(b"3")
+    term.send(b"4")
     term.expect(b"Base branch")
     term.send(b"2")
     term.expect(b"Base branch main:")
@@ -264,7 +264,7 @@ def test_ctrl_c_abandons_current_edit_without_losing_earlier_save(terminal):
     term = terminal()
     prompt = b"Choose (Enter = ok): "
     term.expect(prompt)
-    term.send(b"3\n")
+    term.send(b"4\n")
     term.expect(prompt)
     term.send(b"2\n")
     term.expect(b"Base branch main:")
@@ -286,7 +286,7 @@ def test_unbuffered_reader_preserves_utf8_input(terminal):
     term = terminal()
     prompt = b"Choose (Enter = ok): "
     term.expect(prompt)
-    term.send(b"3\n")
+    term.send(b"4\n")
     term.expect(prompt)
     term.send(b"2\n")
     term.expect(b"Base branch main:")

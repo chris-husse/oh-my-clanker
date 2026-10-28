@@ -112,7 +112,13 @@ def test_session_plan_wires_notifications_for_the_provider_that_takes_argv():
     assert plan.session_argv[0] == "codex"
     joined = " ".join(plan.session_argv)
     assert "tui.notifications=true" in joined and "notify=" not in joined
-    assert plan.env == {"OMC_SLUG": "s", "OMC_PROVIDER": "codex", "GITNEXUS_SHARED_STORE": "off"}
+    assert plan.env == {
+        "OMC_SLUG": "s",
+        "OMC_PROVIDER": "codex",
+        "GITNEXUS_SHARED_STORE": "off",
+        "GITNEXUS_EMBEDDING_RUNTIME_DIR": "/nowhere/.omc/dependencies/gitnexus-embeddings/runtime",
+        "HF_HOME": "/nowhere/.omc/dependencies/gitnexus-embeddings/hf",
+    }
 
 
 def test_session_plan_resolves_codex_family_from_cli_catalog(tmp_path):

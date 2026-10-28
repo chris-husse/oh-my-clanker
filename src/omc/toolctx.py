@@ -13,9 +13,25 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# omc snapshots require local GitNexus storage, overriding inherited sharing.
-# GITNEXUS_STORAGE_PATH / GITNEXUS_STORAGE_ROOT are unsupported; leave them untouched.
-GITNEXUS_ENV = {"GITNEXUS_SHARED_STORE": "off"}
+
+def gitnexus_env(home: Path) -> dict[str, str]:
+    """Where every omc child finds GitNexus's storage and embedding runtime.
+
+    Unconditional: these say WHERE GitNexus would look, never WHETHER to embed
+    (that is `gitnexus.embeddings`, read only by gitnexus.ensure_embeddings).
+    Local storage overrides inherited sharing; GITNEXUS_STORAGE_PATH / _ROOT
+    are unsupported and left untouched. The runtime dir and the Hugging Face
+    cache live beside, not inside, the GitNexus clone so `omc update`'s
+    `checkout -f` never touches them. HF_HOME is a Hugging Face convention;
+    among omc's children only GitNexus's @huggingface/transformers reads it.
+    """
+    base = home / "dependencies" / "gitnexus-embeddings"
+    return {
+        "GITNEXUS_SHARED_STORE": "off",
+        "GITNEXUS_EMBEDDING_RUNTIME_DIR": str(base / "runtime"),
+        "HF_HOME": str(base / "hf"),
+    }
+
 
 _UV_KEYS = ("UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_CACHE_DIR")
 
@@ -55,7 +71,7 @@ class ToolContext:
         return [self.uv_bin, *args]
 
     def child_env(self) -> dict[str, str]:
-        return {**self.env, **self.uv_env, **GITNEXUS_ENV}
+        return {**self.env, **self.uv_env, **gitnexus_env(self.home)}
 
     def read_text(self, path: Path) -> str:
         """Read provider-owned state through the same runtime I/O boundary."""

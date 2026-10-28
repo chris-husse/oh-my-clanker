@@ -472,6 +472,7 @@ def _compose_menu(
                 message += " — set the provider API key first"
             return message
         gcfg.llm = candidate_g.llm
+        gcfg.gitnexus = candidate_g.gitnexus
         pcfg.worktree = candidate_p.worktree
         scfg.api_keys = candidate_s.api_keys
         session.flags = tuple(a or b for a, b in zip(session.flags, flags, strict=True))
@@ -622,6 +623,11 @@ def _compose_menu(
             session.root[config_field.metadata["label"]] = llm
             docs_field = next(f for f in fields(gcfg.llm) if f.name == "docs")
             session.root[docs_field.metadata["label"]] = docs
+        elif config_field.name == "gitnexus":
+            session.root[config_field.metadata["label"]] = {
+                f.metadata["label"]: leaf(gcfg.gitnexus, f.name, f"gitnexus.{f.name}")
+                for f in fields(gcfg.gitnexus)
+            }
     if root is not None:
         worktree_field = next(f for f in fields(pcfg) if f.name == "worktree")
         session.root[f"{worktree_field.metadata['label']} (project)"] = {
