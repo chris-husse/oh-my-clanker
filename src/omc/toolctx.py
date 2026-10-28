@@ -65,6 +65,13 @@ class ToolContext:
         """List provider-owned directory entries through the runtime I/O boundary."""
         return list(path.iterdir())
 
+    def now_ms(self) -> int:
+        """Wall clock in epoch milliseconds — the unit Claude Code stamps its
+        catalog files with (``fetchedAt``/``staleAt``). The time sibling of
+        ``read_text``/``list_dir``: tests fake the clock at the same seam as
+        every other provider-state read, and nothing outside this class reads it."""
+        return int(time.time() * 1000)
+
     def run(
         self,
         argv: Sequence[str],

@@ -352,3 +352,12 @@ def test_runners_apply_local_storage_and_per_call_overrides(tmp_path, runner, ov
         assert result.returncode == 0
         lines = result.stdout.splitlines()
     assert lines == [override or "off", "arrived"]
+
+
+def test_now_ms_is_the_wall_clock_in_epoch_milliseconds(tmp_path):
+    ctx = _ctx(tmp_path)
+    before = int(time.time() * 1000)
+    stamp = ctx.now_ms()
+    after = int(time.time() * 1000)
+    assert isinstance(stamp, int) and not isinstance(stamp, bool)
+    assert before <= stamp <= after
