@@ -332,6 +332,15 @@ launch with a stale leaf, fresh catalog or not — goes away.
   --dry-run`/`omc design` on the user's machine with the setting on,
   catalog deleted, confirming the file appears within two turns and the
   `[servedCatalog]` debug line reads `ON` on the writing turn.
+  Observed during implementation (2026-10-28 UTC, Claude Code 2.1.312):
+  with the setting on in both `~/.claude/settings.json` and the process
+  env and the org's catalog file moved aside, `_claude_cli_catalog`
+  (`command_start=True`) narrated one refresh turn, rewrote the file on
+  that first turn, and returned a fresh list of 10 models. One turn sufficed
+  because the flag cache had been thawed by the brainstorm's probes; the
+  two-turn cold-flag-cache path stays covered by the unit tests only.
+  Headless turns write no debug log without `--debug`, so the new file's
+  mtime, not a `[servedCatalog]` line, is the evidence.
 
 ## 7. Testing
 
