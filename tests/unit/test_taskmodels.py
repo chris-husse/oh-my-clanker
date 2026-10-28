@@ -855,11 +855,96 @@ def test_compatible_ignores_effort_only_when_catalog_efforts_are_unknown():
     assert taskmodels.compatible("claude-opus-5-5", "", none_listed)
 
 
-def test_claude_catalog_missing_has_open_once_hint(tmp_path):
+FETCHED_AT = 1792022400000
+STALE_AT = FETCHED_AT + 3_304_030  # what the _claude_catalog fixture writes
+ABSENT = object()
+
+
+def test_claude_catalog_missing_names_the_directory_without_the_open_once_hint(tmp_path):
     ctx, directory, _ = _claude_catalog_ctx(tmp_path)
-    with pytest.raises(taskmodels.CatalogMissing, match="open claude once") as exc:
-        taskmodels.catalog(ctx, "claude")
-    assert str(directory) in str(exc.value)
+    with pytest.raises(taskmodels.CatalogMissing) as no_file:
+        taskmodels.catalog(ctx, "claude")  # directory exists, no file for this org
+    assert str(no_file.value) == f"Claude model catalog missing under {directory}"
+    directory.rmdir()
+    with pytest.raises(taskmodels.CatalogMissing) as no_dir:
+        taskmodels.claude_catalog(ctx)  # directory absent
+    assert str(no_dir.value) == f"Claude model catalog missing under {directory}"
+    assert "open claude once" not in str(no_file.value) + str(no_dir.value)
+
+
+@pytest.mark.parametrize(
+    ("now_ms", "stale_at", "fresh", "overdue"),
+    [
+        (STALE_AT - 1, STALE_AT, True, None),  # one ms before staleAt: fresh
+        (STALE_AT, STALE_AT, False, 0),  # at staleAt: stale, zero whole minutes
+        (STALE_AT + 5 * 60_000 + 59_999, STALE_AT, False, 5),  # whole minutes, floored
+        (FETCHED_AT, ABSENT, False, None),  # no stamp: cannot vouch → stale
+        (FETCHED_AT, "2026-10-15T00:55:04Z", False, None),  # ISO string: malformed
+        (FETCHED_AT, True, False, None),  # bool is not an int here
+        (FETCHED_AT, None, False, None),
+        (FETCHED_AT, 1.5, False, None),
+    ],
+)
+def test_claude_catalog_freshness_from_stale_at_under_a_faked_clock(
+    tmp_path, now_ms, stale_at, fresh, overdue
+):
+    ctx, directory, calls = _claude_catalog_ctx(tmp_path)
+    ctx.now_ms = lambda: now_ms
+    data = _claude_catalog([_claude_model("claude-opus-5-5", "Opus", "main")], FETCHED_AT)
+    if stale_at is ABSENT:
+        del data["staleAt"]
+    else:
+        data["staleAt"] = stale_at
+    (directory / "org-current-hash-cc.json").write_text(json.dumps(data))
+
+    read = taskmodels.claude_catalog(ctx)
+
+    assert (read.fresh, read.overdue_minutes) == (fresh, overdue)
+    assert read.models == [taskmodels.CatalogModel("claude-opus-5-5", "opus", ("medium", "high"))]
+    assert taskmodels.catalog(ctx, "claude") == read.models
+    assert calls.read_text().strip() == "auth status"
+
+
+def test_claude_catalog_judges_the_newest_files_stale_at(tmp_path):
+    ctx, directory, _ = _claude_catalog_ctx(tmp_path)
+    old = _claude_catalog([_claude_model("claude-opus-old", "Opus", "main")], 1790812800000)
+    old["staleAt"] = 2_000_000_000_000  # an older file with a far-future stamp must not vouch
+    new = _claude_catalog([_claude_model("claude-opus-5-5", "Opus", "main")], FETCHED_AT)
+    (directory / "org-current-old-cc.json").write_text(json.dumps(old))
+    (directory / "org-current-new-cc.json").write_text(json.dumps(new))
+    ctx.now_ms = lambda: STALE_AT + 60_000
+
+    read = taskmodels.claude_catalog(ctx)
+
+    assert [model.id for model in read.models] == ["claude-opus-5-5"]
+    assert (read.fresh, read.overdue_minutes) == (False, 1)
+
+
+def test_claude_api_key_listing_is_fresh_and_never_reads_the_clock(tmp_path):
+    bindir = tmp_path / "bin"
+    make_stub(
+        bindir,
+        "claude",
+        stdout=json.dumps(
+            {
+                "loggedIn": True,
+                "authMethod": "api_key",
+                "apiKeySource": "ANTHROPIC_API_KEY",
+                "configDirectory": str(tmp_path / "claude-config"),
+            }
+        ),
+    )
+    ctx = ToolContext.from_env(stub_env(bindir, ANTHROPIC_API_KEY="private-key"))
+    ctx.http_get = lambda url, *, headers=None, timeout=30.0: (
+        200,
+        json.dumps({"data": [{"id": "claude-opus-5-5", "created_at": "2026-05-01T00:00:00Z"}]}),
+    )
+    ctx.now_ms = lambda: pytest.fail("API-key listing has no file and no age to judge")
+
+    read = taskmodels.claude_catalog(ctx)
+
+    assert [model.id for model in read.models] == ["claude-opus-5-5"]
+    assert (read.fresh, read.overdue_minutes) == (True, None)
 
 
 @pytest.mark.parametrize("fetched_at", ["2026-10-15T00:00:00Z", "1792022400000", True, None])

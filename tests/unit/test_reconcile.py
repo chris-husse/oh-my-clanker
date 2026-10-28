@@ -526,8 +526,9 @@ def test_missing_claude_catalog_after_refresh_has_path_and_open_hint(tmp_path):
     log = _cli_stub(ctx, "claude")
     before = (ctx.home / "config.yaml").read_bytes()
 
-    with pytest.raises(ConfigError, match=r"cache/model-catalog.*open claude once"):
+    with pytest.raises(ConfigError, match=r"cache/model-catalog") as exc:
         under_test.reconcile(ctx, cfg, {"orchestrator"}, say=lambda _: None, dry_run=False)
+    assert "open claude once" not in str(exc.value)
 
     assert _headless(_calls(log)) == [["-p", "Reply with exactly OK.", "--output-format", "text"]]
     assert (ctx.home / "config.yaml").read_bytes() == before
