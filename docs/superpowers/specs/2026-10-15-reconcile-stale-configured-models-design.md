@@ -230,6 +230,16 @@ for (Decision 0). Recorded under Deliberate complexity.
 
 ## 6. Failure handling
 
+> **Amendment 2026-10-27** (see
+> `2026-10-27-fix-claude-model-list-detection-design.md`): catalog creation
+> under account auth has now been observed — Claude Code never writes the
+> file while the user's settings set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+> so the "open claude once" hint below cannot succeed and is retired. The
+> Claude refresh turn now runs at a command's start when the catalog is
+> missing or past its own `staleAt` (at most two turns, carrying a
+> `--settings` override that enables nonessential traffic), not when a leaf
+> is stale. The text below is kept as written.
+
 - Catalog missing after the refresh turn → `ConfigError` "Claude model
   catalog missing under …/cache/model-catalog; open claude once to fetch it"
   (Codex: today's "open codex once to fetch its model list"), rc 1. Decided
@@ -277,6 +287,16 @@ for (Decision 0). Recorded under Deliberate complexity.
   comments at the code site, per the project convention.
 
 ## 8. Edge cases and live-verify items
+
+> **Amendment 2026-10-27** (see
+> `2026-10-27-fix-claude-model-list-detection-design.md`): catalog creation
+> under account auth has now been observed — Claude Code never writes the
+> file while the user's settings set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+> so the "open claude once" hint below cannot succeed and is retired. The
+> Claude refresh turn now runs at a command's start when the catalog is
+> missing or past its own `staleAt` (at most two turns, carrying a
+> `--settings` override that enables nonessential traffic), not when a leaf
+> is stale. The text below is kept as written.
 
 - **`claude -p` refreshes a stale model catalog — verified.** Live on
   Claude Code 2.1.300, 2026-10-15: the catalog was 70.7 min old (5.3 min past

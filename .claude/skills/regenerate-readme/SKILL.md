@@ -108,10 +108,14 @@ provider, backend and model; Native notifications; Branch prefix; Base branch.
 Stale-model reconciliation (`src/omc/reconcile.py`): design/implement/review
 check the session models, dependency watch the docs model, against the
 provider's listing with no model turn when current. Codex reads `codex debug
-models` on the binary it launches and remaps a still-stale value immediately;
-Claude keeps one no-model list refresh before remap. The provider's default
-model picks a listed full id, which is saved and narrated; a failed remap
-saves nothing.
+models` on the binary it launches and remaps a still-stale value immediately.
+At a command's start (and `omc watch`'s first tick only), a Claude model list
+that is missing or past its own refresh time is refreshed first — one or two
+quick no-model turns with nonessential traffic enabled, so a user setting
+that disables it cannot freeze the list — then a still-stale value is
+remapped; a list still missing after two turns stops the command. The
+provider's default model picks a listed full id, which is saved and narrated;
+a failed remap saves nothing.
 Show `--defaults` and repeatable `--set` with two keys in one example.
 Keep docs defaults separate from the Orchestrator model: standard coding tier, Claude
 CLI `sonnet`/API latest matching full id; explicit aliases resolved on save.
