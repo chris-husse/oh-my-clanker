@@ -520,7 +520,8 @@ def test_provider_command_reconciles_before_worker(
 
     monkeypatch.setattr(cli, "_with_provider", with_provider)
 
-    def fake_reconcile(ctx, cfg, leaves, *, say, dry_run):
+    def fake_reconcile(ctx, cfg, leaves, *, say, dry_run, command_start=True):
+        assert command_start is True
         events.append("reconcile")
         assert leaves == groups
         assert dry_run is ("--dry-run" in argv)

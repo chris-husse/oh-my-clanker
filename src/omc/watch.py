@@ -466,6 +466,8 @@ def run_watch(
                             say=_say,
                             dry_run=False,
                             report_current=first_tick or last_reconcile_failed,
+                            # The refresh turn belongs to the entry tick only.
+                            command_start=first_tick,
                         )
                         last_reconcile_failed = False
                     except OmcError as exc:

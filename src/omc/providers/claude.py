@@ -16,6 +16,11 @@ API_BASE_URL = "https://api.anthropic.com/v1/"
 # from the live /v1/models list at configure time (docsllm.resolve_model).
 _API_FAMILIES = {"fable": "claude-fable-", "opus": "claude-opus-", "sonnet": "claude-sonnet-"}
 
+# The inline settings object that re-enables Claude Code's served model-catalog
+# fetch for ONE headless turn. One argv element, never shell-quoted; the quirk
+# it works around is documented at headless_argv.
+SERVED_CATALOG_SETTINGS = '{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}'
+
 
 class ClaudeProvider(Provider):
     name = "claude"
@@ -65,7 +70,16 @@ class ClaudeProvider(Provider):
         # apiProvider (verified live on 2.1.286, 2026-10-01).
         return ["claude", "auth", "status"]
 
-    def headless_argv(self, prompt, *, model, effort="", allowed_tools=None, session_name=""):
+    def headless_argv(
+        self,
+        prompt,
+        *,
+        model,
+        effort="",
+        allowed_tools=None,
+        session_name="",
+        served_catalog=False,
+    ):
         # Prompt must come RIGHT AFTER -p: --allowed-tools is variadic and would
         # swallow a trailing positional as a tool name. Keep --allowed-tools LAST
         # and omit it entirely when empty (an empty value parses as a bogus tool).
@@ -76,6 +90,18 @@ class ClaudeProvider(Provider):
             argv += ["--model", model]
         if effort:
             argv += ["--effort", effort]
+        if served_catalog:
+            # Claude Code applies the settings-file `env` block OVER the process
+            # env, so CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC set in
+            # ~/.claude/settings.json cannot be beaten from the environment
+            # (=0, =false and empty all still log "[servedCatalog] off"). It
+            # counts as set whenever NON-EMPTY, so only "" disables it, and
+            # only an inline --settings object reaches that layer. This keeps
+            # every other user setting (plugins, permissions, proxy env,
+            # apiKeyHelper); `--setting-sources project,local` also works but
+            # drops the whole user settings file. Verified on 2.1.312,
+            # 2026-10-28 (design record 2026-10-27 §1 table, variant G).
+            argv += ["--settings", SERVED_CATALOG_SETTINGS]
         if allowed_tools:
             argv += ["--allowed-tools", *allowed_tools]
         return argv

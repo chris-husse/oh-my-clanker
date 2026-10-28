@@ -37,8 +37,23 @@ class CatalogModel:
     efforts: tuple[str, ...] | None
 
 
+@dataclass(frozen=True)
+class ClaudeCatalog:
+    """One read of Claude's model list and what its on-disk file says about its age."""
+
+    models: list[CatalogModel]
+    # False when the file's staleAt is in the past, missing or malformed — a
+    # refresh turn may change the list. True when Claude would still serve the
+    # file from cache, and for the live API-key listing (no file, no age).
+    fresh: bool
+    # Whole minutes past staleAt when the stamp is usable and in the past;
+    # None otherwise (fresh, unusable stamp, or the live listing).
+    overdue_minutes: int | None
+
+
 class CatalogMissing(ConfigError):
-    """Claude has not written its model catalog yet; one refresh may help."""
+    """Claude has not written its model catalog. A refresh turn with nonessential
+    traffic enabled can create it (reconcile.py); the message names the directory."""
 
 
 @dataclass(frozen=True)
@@ -156,7 +171,7 @@ def _codex_catalog(ctx: ToolContext) -> list[CatalogModel]:
     return result
 
 
-def _claude_catalog(ctx: ToolContext) -> list[CatalogModel]:
+def claude_catalog(ctx: ToolContext) -> ClaudeCatalog:
     status = docsllm.auth_status(ctx, "claude")
     org_id = status.get("orgId")
     config_directory = status.get("configDirectory")
@@ -170,7 +185,7 @@ def _claude_catalog(ctx: ToolContext) -> list[CatalogModel]:
                 "claude API-key auth has no local model catalog; "
                 "set ANTHROPIC_API_KEY for model reconciliation"
             )
-        return _api_catalog(ctx, "claude", key)
+        return ClaudeCatalog(_api_catalog(ctx, "claude", key), fresh=True, overdue_minutes=None)
     # Claude Code 2.1.300 account auth reports the current org and resolved
     # configDirectory. Its catalog files are <orgId>-*-cc.json under
     # cache/model-catalog; other organizations' files can coexist there.
@@ -185,9 +200,7 @@ def _claude_catalog(ctx: ToolContext) -> list[CatalogModel]:
     try:
         entries = ctx.list_dir(directory)
     except FileNotFoundError as exc:
-        raise CatalogMissing(
-            f"Claude model catalog missing under {directory}; open claude once to fetch it"
-        ) from exc
+        raise CatalogMissing(f"Claude model catalog missing under {directory}") from exc
     except OSError as exc:
         raise ConfigError(f"cannot list Claude model catalog {directory}: {exc}") from exc
     prefix = f"{org_id}-"
@@ -199,9 +212,7 @@ def _claude_catalog(ctx: ToolContext) -> list[CatalogModel]:
         and len(path.name) > len(prefix) + len("-cc.json")
     ]
     if not paths:
-        raise CatalogMissing(
-            f"Claude model catalog missing under {directory}; open claude once to fetch it"
-        )
+        raise CatalogMissing(f"Claude model catalog missing under {directory}")
     dated: list[tuple[int, Path, dict[str, object]]] = []
     for path in paths:
         try:
@@ -214,6 +225,20 @@ def _claude_catalog(ctx: ToolContext) -> list[CatalogModel]:
             raise ConfigError(f"invalid Claude model catalog {path}: expected fetchedAt")
         dated.append((fetched_at, path, data))
     _, path, data = max(dated, key=lambda entry: entry[0])
+    # Claude Code writes staleAt beside fetchedAt, also epoch milliseconds (live
+    # 2.1.312: staleAt − fetchedAt ≈ 62 min), and refetches past it when
+    # nonessential traffic is allowed. A missing or malformed stamp cannot vouch
+    # for the list's age, so it counts as stale: one extra refresh turn is the
+    # cheap side of that doubt, never an error. The list below is still read.
+    stale_at = data.get("staleAt")
+    if not isinstance(stale_at, int) or isinstance(stale_at, bool):
+        fresh, overdue = False, None
+    else:
+        now = ctx.now_ms()
+        if now < stale_at:
+            fresh, overdue = True, None
+        else:
+            fresh, overdue = False, (now - stale_at) // 60_000
     try:
         models = data["catalog"]["config"]["models"]
         if not isinstance(models, list):
@@ -255,7 +280,7 @@ def _claude_catalog(ctx: ToolContext) -> list[CatalogModel]:
             result.append(
                 CatalogModel(model_id, family if family in families else "", tuple(efforts))
             )
-        return result
+        return ClaudeCatalog(result, fresh=fresh, overdue_minutes=overdue)
     except (KeyError, TypeError, ValueError) as exc:
         raise ConfigError(f"invalid Claude model catalog {path}: {exc}") from exc
 
@@ -286,7 +311,7 @@ def catalog(ctx: ToolContext, provider: str, *, docs_api_key: str = "") -> list[
     if provider == "codex":
         return _codex_catalog(ctx)
     if provider == "claude":
-        return _claude_catalog(ctx)
+        return claude_catalog(ctx).models
     raise ConfigError(f"unknown model catalog provider: {provider}")
 
 

@@ -34,7 +34,7 @@ def _current_models(monkeypatch):
     monkeypatch.setattr(
         watch_mod,
         "reconcile",
-        lambda ctx, cfg, groups, *, say, dry_run, report_current: cfg,
+        lambda ctx, cfg, groups, *, say, dry_run, report_current, command_start: cfg,
         raising=False,
     )
 
@@ -91,10 +91,11 @@ def test_watch_reconciles_selected_models_at_each_locked_tick(
 
     monkeypatch.setattr(watch_mod, "acquire_busy_narrated", busy_lock)
 
-    def fake_reconcile(ctx, cfg, leaves, *, say, dry_run, report_current):
+    def fake_reconcile(ctx, cfg, leaves, *, say, dry_run, report_current, command_start):
         assert locked and not dry_run
         assert leaves == groups
         assert report_current is (not calls)
+        assert command_start is (not calls)
         assert cfg is (initial if not calls else remapped[0])
         assert cfg.llm.default == "claude"  # auto-build's orchestrator provider
         assert cfg.llm.docs.provider == "codex"  # docs provider differs
@@ -181,8 +182,9 @@ def test_watch_first_tick_reconcile_failure_fails_loud(tmp_path, monkeypatch):
 
     instance = _fake_watch_boot(monkeypatch, tmp_path)
 
-    def failing_reconcile(ctx, cfg, groups, *, say, dry_run, report_current):
+    def failing_reconcile(ctx, cfg, groups, *, say, dry_run, report_current, command_start):
         assert report_current
+        assert command_start
         raise ConfigError("catalog unreachable")
 
     monkeypatch.setattr(watch_mod, "reconcile", failing_reconcile)
@@ -207,7 +209,8 @@ def test_watch_later_tick_reconcile_failure_warns_and_keeps_previous_cfg(
     third = Config()
     outcomes = [first, docsllm.ProbeFailed("GET /v1/models returned 503"), third]
 
-    def flaky_reconcile(ctx, cfg, groups, *, say, dry_run, report_current):
+    def flaky_reconcile(ctx, cfg, groups, *, say, dry_run, report_current, command_start):
+        assert command_start is (len(outcomes) == 3)
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -241,11 +244,13 @@ def test_watch_reports_current_on_entry_and_recovery_only(tmp_path, monkeypatch,
     initial, first, third, fourth = Config(), Config(), Config(), Config()
     outcomes = [first, docsllm.ProbeFailed("GET /v1/models returned 503"), third, fourth]
     requested = []
+    starts = []
     inputs = []
 
-    def recording_reconcile(ctx, cfg, groups, *, say, dry_run, report_current):
+    def recording_reconcile(ctx, cfg, groups, *, say, dry_run, report_current, command_start):
         assert groups == {"docs"} and not dry_run
         requested.append(report_current)
+        starts.append(command_start)
         inputs.append(cfg)
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -265,6 +270,7 @@ def test_watch_reports_current_on_entry_and_recovery_only(tmp_path, monkeypatch,
     monkeypatch.setattr(watch_mod.time, "sleep", stop_after_four_ticks)
     assert watch_mod.run_watch(object(), initial, interval=1, enable_documentation=True) == 0
     assert requested == [True, False, True, False]
+    assert starts == [True, False, False, False]  # recovery re-reports; it never re-refreshes
     assert all(
         actual is expected
         for actual, expected in zip(inputs, [initial, first, first, third], strict=True)
@@ -288,8 +294,9 @@ def test_watch_once_requests_current_report(tmp_path, monkeypatch):
     cfg = Config()
     requested = []
 
-    def recording_reconcile(ctx, current, groups, *, say, dry_run, report_current):
+    def recording_reconcile(ctx, current, groups, *, say, dry_run, report_current, command_start):
         assert current is cfg and groups == {"docs"} and not dry_run
+        assert command_start
         requested.append(report_current)
         return current
 
