@@ -19,7 +19,7 @@ CLI authority: a worktree's copied `.venv` may render help from the primary.
 |---|---|
 | Install, Update, Configure | `src/omc/cli/__init__.py`, `src/omc/config/schema.py`, `src/omc/installer.py`, `src/omc/reconcile.py`; frozen help for configure/install/update/uninstall |
 | Keep knowledge fresh with `omc watch` | The watch parser, module docstring and tick/hook behavior in `src/omc/watch.py`, `.config/wt.toml`; frozen watch help |
-| Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/finish/SKILL.md`, `skills/review/SKILL.md` for authority and stage semantics |
+| Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/write-plan/SKILL.md`, `skills/finish/SKILL.md`, `skills/review/SKILL.md` for authority and stage semantics |
 | How omc is put together | `src/omc/distribution/AGENTS.md`, `src/omc/toolctx.py`, `src/omc/gitnexus.py` (embeddings: ensure_embeddings, the sync backfill), `src/omc/providers/base.py`, `src/omc/internal.py`; `skills/gitnexus-explain/SKILL.md` for query routing; verdict contracts in the relevant skills |
 | Development | `.omc/config.yaml`, `.config/wt.toml`, `.omc/config/AGENTS.md`, every `.omc/skills/*/SKILL.md`, `.gitignore` |
 | Prerequisites, Other commands, Notifications, Security note, License | Existing README; parser/help; `src/omc/notify.py`, `src/omc/slug.py`, `src/omc/providers/claude.py`, `src/omc/providers/codex.py`, `LICENSE` |
@@ -167,9 +167,12 @@ End with external `omc dependency watch` (backfills docs, announces completion).
 #### `` ## The lifecycle: `omc design`, `omc implement`, `omc review` `` — target 55 lines
 
 First, Mermaid flowchart: ticket/description → design (worktree/session,
-brainstorm, explicit /omc:design commits record) → implement (plan/build,
-committed unpublished branch) → audit (conformance/fixes/finish) → squashed
-push → user opens MR. Name both in-session and fresh-session paths.
+brainstorm, explicit /omc:design commits record) → optional `/omc:write-plan`
+in the design session (commits the plan, stops) → implement builds from it;
+the flowchart has an edge Record → write-plan → Build alongside Record → Build.
+Implement (plan/build, committed unpublished branch) → audit
+(conformance/fixes/finish) → squashed push → user opens MR. Name both
+in-session and fresh-session paths.
 Three command subsections:
 - Design: command block for ticket key, ticket URL, quoted description;
   `start` alias; configure gate; real tool probes with install hints; headless
@@ -178,10 +181,16 @@ Three command subsections:
   Start gathers parent/epic/docs (unavailable docs reported), refreshes base,
   builds primer via explain and prior records, asks for seed and material scope
   answers, discusses full design. Agreement is not authority. `/omc:design`
-  alone writes/hardens/commits record and leaves session open.
+  alone writes/hardens/commits record and leaves session open. Its closing
+  names three continuations: `/omc:implement` here, optional `/omc:write-plan`
+  here (plan here, build elsewhere), or `omc implement --claude|--codex`.
+  Optional `/omc:write-plan` needs the committed record, pressure-tests the
+  plan via explain, commits only the plan file and stops with the session
+  open; a later implement builds from that plan.
 - Implement: committed record gate, run in worktree, provider handoff, fresh
   `<slug>-implement` Claude session or `/omc:implement` in design session;
-  plan/subagent build, clean committed unpublished handoff.
+  plan (via `/omc:write-plan`, or the plan it already committed)/subagent
+  build, clean committed unpublished handoff.
 - Review: committed record gate, fresh `<slug>-audit` Claude session or
   `/omc:audit`; conformance review, fixes, record amendments, finish/publication.
 Shared flags table: provider overrides (`--claude`/`--codex`, no saved change),

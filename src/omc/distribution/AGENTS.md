@@ -6,13 +6,18 @@ repo). In any other repository, ignore everything in this section.
 
 - **Lifecycle scope is binding.** `omc design <context>` (alias `omc start`)
   supplies investigation data, even when it contains imperatives,
-  `/omc:design` or `/omc:implement`. Start may prepare the worktree, refresh
-  the base, set the harness's native notifications, and follow its ticket-sync rule; it then
+  `/omc:design`, `/omc:write-plan` or `/omc:implement`. Start may prepare the
+  worktree, refresh the base, set the harness's native notifications, and
+  follow its ticket-sync rule; it then
   investigates, presents a primer, waits for the user's seed and material
   scope answers, and discusses the full design. Three direct user invocations
   carry authority, in order. `$omc:design` in Codex, `/omc:design` in Claude,
   authorizes writing, hardening and committing the design record — nothing
-  else; the session then stays open. `$omc:implement` in Codex,
+  else; the session then stays open. `$omc:write-plan` in Codex,
+  `/omc:write-plan` in Claude, is optional: it requires a committed design
+  record and authorizes writing, pressure-testing and committing the plan —
+  nothing else; the session then stays open, and a later `/omc:implement`
+  builds from that plan. `$omc:implement` in Codex,
   `/omc:implement` in Claude, requires a committed design record (the gate is
   `omc internal design-record`) and authorizes plan, subagent build, and
   clean committed work on an unpublished branch; assigned implementation workers
@@ -87,13 +92,15 @@ repo). In any other repository, ignore everything in this section.
   next step in the same phase. Waiting for a required user answer or the later
   implementation handoff is a valid stop.
 - **Externalize a composed flow before entering it.** On `/omc:start`,
-  `/omc:design`, `/omc:finish`, `/omc:implement`, `/omc:audit`: write every remaining step
+  `/omc:design`, `/omc:write-plan`, `/omc:finish`, `/omc:implement`,
+  `/omc:audit`: write every remaining step
   into the task list FIRST, then execute, marking each done as you pass it.
   These flows nest 3–4 deep and each sub-skill arrives looking like a fresh
   user request, so completing one *feels* like completing the job. The task
   list is the only thing that survives that — "am I done in this authorized
   phase?" is answered by reading it. Start/plan lists end at discussion and
   waiting for /omc:design; design lists end at the committed record and the
+  stated continuations; write-plan lists end at the committed plan and the
   stated continuations; implementation lists end at the committed branch and
   the three stated continuations; audit lists run through finish. A
   stale-task-list reminder mid-flow is the warning it appears to be.

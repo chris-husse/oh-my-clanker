@@ -148,6 +148,7 @@ USER_FACING_SKILLS = (
     "start",
     "plan",
     "design",
+    "write-plan",
     "implement",
     "audit",
     "finish",
@@ -1259,11 +1260,10 @@ def test_implement_skill_contract():
         "omc internal design-record",
         "OMC_DESIGN_RECORD",
         "/omc:design",
-        "writing-plans",
+        "/omc:write-plan implement",
         "subagent-driven-development",
         "/omc:audit",
         "omc review",
-        "/omc:explain",
         "omc internal models",
         "`Complexity:`",
         "missing `Complexity:`",
@@ -1278,9 +1278,11 @@ def test_implement_skill_contract():
     ):
         assert needle in text, f"implement skill missing {needle!r}"
     assert "Invoke the internal `spec` skill" not in text
+    assert "superpowers:writing-plans" not in text  # planning logic has one home
     order = [
         text.index("omc internal design-record"),
-        text.index("writing-plans"),
+        text.index("/omc:write-plan"),
+        text.index("omc internal models"),
         text.index("subagent-driven-development"),
         text.index("## Phase 2b — milestone gate"),
         text.index("/omc:build", text.index("## Phase 2b — milestone gate")),
@@ -1288,10 +1290,69 @@ def test_implement_skill_contract():
         text.index("## Phase 3 — hand off"),
     ]
     assert order == sorted(order), (
-        "implement must order record gate -> plan -> build -> milestone gate -> handoff"
+        "implement must order record gate -> write-plan -> models -> build -> "
+        "milestone gate -> handoff"
     )
     assert "finish runs it" not in text
     assert "Invoke the `finish` skill" not in text
+
+
+def test_write_plan_skill_contract():
+    text = (ROOT / "skills" / "write-plan" / "SKILL.md").read_text()
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert "Internal" not in m.group(1) and "not meant for direct invocation" not in m.group(1)
+    for needle in (
+        "omc internal design-record",
+        "OMC_DESIGN_RECORD",
+        "/omc:design",
+        "omc internal models",
+        "OMC_MODELS",
+        "tasks.plan.model",
+        "superpowers:writing-plans",
+        "`Complexity:`",
+        "simple | medium | high",
+        "The plan stores complexity, never model ids.",
+        "/omc:explain",
+        "docs/superpowers/plans/*-$OMC_SLUG-plan.md",
+        "tracked",
+        "untracked",
+        "write nothing",
+        "plan file only",
+        "`git commit -m <message> -- <plan path>`",
+        "stay staged and uncommitted",
+        "already has ticked tasks",
+        "committed as is",
+        "never discard the ticks",
+        "$ARGUMENTS",
+        "/omc:write-plan implement",
+        "return the plan path",
+        "not the end of your turn",
+        "execution approach",
+        "/omc:implement",
+        "$omc:implement",
+        "$omc:write-plan",
+        "omc implement --claude",
+        "CRITICAL",
+        "main session",
+        "Completion contract",
+    ):
+        assert needle in text, f"write-plan skill missing {needle!r}"
+    assert "subagent-driven-development" not in text  # it never builds
+    assert "missing `Complexity:`" not in text  # the default belongs to the build
+    assert (
+        "> The plan is committed. To build on this provider, type `/omc:implement`\n"
+        "> here (`$omc:implement` on Codex). To build on another provider, exit this\n"
+        "> session and run `omc implement --claude` or `omc implement --codex` in\n"
+        "> this worktree." in text
+    )
+    # gate before planning, planning before the commit
+    order = [
+        text.index("omc internal design-record"),
+        text.index("omc internal models"),
+        text.index("superpowers:writing-plans"),
+        text.index("plan file only"),
+    ]
+    assert order == sorted(order)
 
 
 def test_implement_keeps_task_commits_before_a_red_milestone_gate():
@@ -1304,12 +1365,42 @@ def test_implement_keeps_task_commits_before_a_red_milestone_gate():
     )
     assert "at least one task commit" in gate, "the milestone must check for task commits"
     assert "keep those task commits" in gate, "a red verify must preserve completed task commits"
-    assert "plan uncommitted" in gate, "a red verify must not perform the handoff commit"
+    assert "the plan was already committed by `/omc:write-plan`" in gate
+    assert "plan uncommitted" not in gate
+    # write-plan commits the plan after the record, so a plan commit alone must
+    # never satisfy the task-commit guards
+    handoff = text.split("## Phase 3 — hand off", 1)[1]
+    for section in (gate, handoff):
+        assert "touches a path outside `docs/superpowers/`" in " ".join(section.split())
+
+
+def test_implement_always_routes_the_plan_through_write_plan():
+    text = (ROOT / "skills" / "implement" / "SKILL.md").read_text()
+    after_gate = text.split("## Phase 0 — the record gate", 1)[1]
+    phase0 = " ".join(after_gate.split("## Phase 1 — plan", 1)[0].split())
+    phase1 = " ".join(
+        text.split("## Phase 1 — plan", 1)[1].split("## Phase 2 — build", 1)[0].split()
+    )
+    # One home for existing-plan classification: write-plan Step 2.
+    assert "git ls-files" not in text and "untracked" not in text
+    assert "skip Phase 1" not in text and "plan already exists" not in phase0
+    assert "Always invoke `/omc:write-plan implement`" in phase1
+    assert "Continue the build from the next unfinished task" in phase1
+    assert "task 1 when none are ticked" in phase1
+    write_plan = (ROOT / "skills" / "write-plan" / "SKILL.md").read_text()
+    step2 = " ".join(
+        write_plan.split("## Step 2 — existing plan", 1)[1].split("## Step 3", 1)[0].split()
+    )
+    assert "git ls-files" in step2
+    assert "**tracked**" in step2 and "write nothing" in step2
+    assert "**untracked**" in step2 and "committed as is" in step2
+    assert "none → Step 3" in step2
 
 
 def test_task_model_skill_routing_contract():
     design = (ROOT / "skills/design/SKILL.md").read_text()
     implement = (ROOT / "skills/implement/SKILL.md").read_text()
+    write_plan = (ROOT / "skills/write-plan/SKILL.md").read_text()
     audit = (ROOT / "skills/audit/SKILL.md").read_text()
     review = (ROOT / "skills/review/SKILL.md").read_text()
     plan = (ROOT / "skills/plan/SKILL.md").read_text()
@@ -1318,8 +1409,9 @@ def test_task_model_skill_routing_contract():
     assert "omc internal models" in design and "Design" in design
     assert "fresh" in design and "converged" in design
     assert "CRITICAL" in design and "main session" in design
-    assert "omc internal models" in implement and "Plan" in implement
-    assert "simple | medium | high" in implement
+    assert "omc internal models" in write_plan and "Plan" in write_plan
+    assert "simple | medium | high" in write_plan
+    assert "omc internal models" in implement
     assert "missing `Complexity:`" in implement and "medium" in implement
     assert "Review" in implement and "reasoning_effort" in implement
     assert "Complexity:" in audit and "Review" in audit
@@ -1327,7 +1419,7 @@ def test_task_model_skill_routing_contract():
     assert "`Complexity:`" in plan and "model-tier" not in plan
     assert "Orchestrator" in behavior and "omc internal models" in behavior
     assert "orchestrator model" in behavior and "test actors and test judges" in behavior.lower()
-    for skill in (design, implement, audit, review):
+    for skill in (design, implement, write_plan, audit, review):
         assert "model-tier policy" not in skill
     assert "Do not request a model override on a full-history" in design
 
@@ -1592,7 +1684,9 @@ def test_design_is_user_facing_and_owns_the_record():
     m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
     assert "name: design" in m.group(1)
     assert "Internal" not in m.group(1) and "not meant for direct invocation" not in m.group(1)
-    assert "/omc:implement" in text and "omc implement" in text  # the two continuations
+    assert "/omc:implement" in text and "omc implement" in text
+    assert "/omc:write-plan" in text and "$omc:write-plan" in text
+    assert "three continuations" in text and "two continuations" not in text
     assert not (ROOT / "skills" / "spec").exists()
 
 
@@ -1689,7 +1783,7 @@ def test_readme_lists_mr_review():
 # steps silently unrun.
 # Prose disclaimers alone did not hold; these tests pin the structural rules.
 
-CONDUCTORS = ("start", "design", "finish", "implement", "audit")
+CONDUCTORS = ("start", "design", "write-plan", "finish", "implement", "audit")
 
 
 def test_conductors_externalize_their_steps_first():
@@ -1756,6 +1850,17 @@ def test_behavior_layer_names_three_authority_words():
     # the conductor list in the "Externalize a composed flow" bullet names design too
     assert "/omc:design" in text.split("Externalize a composed flow")[1]
     assert "/omc:audit" in text.split("Externalize a composed flow")[1]
+    assert "`/omc:write-plan`" in text and "`$omc:write-plan`" in text
+    flat = " ".join(text.split())
+    assert (
+        "even when it contains imperatives, `/omc:design`, `/omc:write-plan` or `/omc:implement`"
+        in flat
+    )
+    assert "is optional: it requires a committed design record" in flat
+    assert "a later `/omc:implement` builds from that plan" in flat
+    externalize = text.split("Externalize a composed flow")[1].split("\n- ")[0]
+    assert "/omc:write-plan" in externalize
+    assert "write-plan lists end at the committed plan" in " ".join(externalize.split())
 
 
 def test_mr_review_stops_when_grug_skips_its_lens():

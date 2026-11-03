@@ -71,13 +71,23 @@ def test_failing_verify_blocks_implementation_handoff(stage_session):
     assert rc == 0 and "verify" in markers.splitlines(), (
         f"verify never ran; implementation answer: {turn['text']}"
     )
+    # write-plan commits the plan before the build, so only commits touching
+    # paths outside docs/superpowers/plans/ prove a task commit landed.
     rc, commits = run_in(
         container,
-        ["git", "rev-list", "--count", f"{recorded['head']}..HEAD"],
+        [
+            "git",
+            "rev-list",
+            "--count",
+            f"{recorded['head']}..HEAD",
+            "--",
+            ".",
+            ":(exclude)docs/superpowers/plans",
+        ],
         cwd=m["worktree"],
     )
     assert rc == 0 and int(commits.strip()) >= 1, (
-        f"no new task commits after record: {commits!r} (git rc={rc})\n"
+        f"no new task commits (outside the plan) after record: {commits!r} (git rc={rc})\n"
         f"recorded head: {recorded['head']}\n"
         f"current head: {after['head']}\n"
         f"stage markers: {markers!r}\n"
@@ -91,7 +101,7 @@ def test_failing_verify_blocks_implementation_handoff(stage_session):
     assert plans, "implementation wrote no plan"
     for plan in plans:
         rc, _ = run_in(container, ["git", "cat-file", "-e", f"HEAD:{plan}"], cwd=m["worktree"])
-        assert rc != 0, f"implementation committed plan before passing verify: {plan}"
+        assert rc == 0, f"planning did not commit the plan through write-plan: {plan}"
     assert after["remote_refs"] == recorded["remote_refs"], "failing verify published branch"
     # Artifacts above enforce the boundary; whether the answer hands the decision
     # back to the user is a transcript quality, so a same-provider judge decides
@@ -111,3 +121,50 @@ def test_failing_verify_blocks_implementation_handoff(stage_session):
         artifacts=turn["text"],
     )
     assert verdict["passed"], verdict["reasons"]
+
+
+# Expected cost is the planning half of implement's measured 145 s run; it
+# stays in the default tier with the neighbour's 240 s wait until a measured
+# run demands `expensive`.
+@pytest.mark.variation("recorded")
+def test_write_plan_commits_plan_only(stage_session):
+    container, session, m = stage_session
+    recorded, _ = _baseline(session, m)
+    rc, stages_before = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
+    session.send("/omc:write-plan")
+    turn = session.wait_turn(240)  # planning half of implement's measured 145 s run
+    after = session.snapshot(m["worktree"])
+    answer = f"write-plan answer: {turn['text']}"
+
+    plans = [
+        path
+        for path in after["spec_plan"]
+        if "/plans/" in path and path not in recorded["spec_plan"]
+    ]
+    assert len(plans) == 1, f"expected exactly one new plan, got {plans}\n{answer}"
+    rc_plan, _ = run_in(container, ["git", "cat-file", "-e", f"HEAD:{plans[0]}"], cwd=m["worktree"])
+    assert rc_plan == 0, f"write-plan did not commit the plan: {plans[0]}\n{answer}"
+    rc_diff, changed = run_in(
+        container,
+        ["git", "diff", "--name-only", f"{recorded['head']}..HEAD"],
+        cwd=m["worktree"],
+    )
+    paths = [line for line in changed.splitlines() if line.strip()]
+    assert rc_diff == 0 and paths, f"write-plan committed nothing: {changed!r}\n{answer}"
+    assert all(path.startswith("docs/superpowers/plans/") for path in paths), (
+        f"write-plan committed more than the plan: {paths}\n{answer}"
+    )
+    rc_status, status = run_in(container, ["git", "status", "--porcelain"], cwd=m["worktree"])
+    assert rc_status == 0 and not status.strip(), (
+        f"write-plan left the worktree dirty: {status!r}\n{answer}"
+    )
+    assert after["remote_refs"] == recorded["remote_refs"], f"write-plan published\n{answer}"
+
+    def specs(snapshot):
+        return {k: v for k, v in snapshot["spec_plan"].items() if "/specs/" in k}
+
+    assert specs(after) == specs(recorded), f"write-plan changed the design record\n{answer}"
+    rc_after, stages_after = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
+    assert (rc_after, stages_after) == (rc, stages_before), (
+        f"write-plan ran a project stage: {stages_before!r} -> {stages_after!r}\n{answer}"
+    )

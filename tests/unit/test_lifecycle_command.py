@@ -62,3 +62,7 @@ def test_default_golden_collects_through_implemented_without_audited():
 
 def test_default_e2e_collects_measured_failing_verify_variation():
     assert "test_failing_verify_blocks_implementation_handoff" in _collected("e2e-tests")
+
+
+def test_default_e2e_collects_write_plan_variation():
+    assert "test_write_plan_commits_plan_only" in _collected("e2e-tests")

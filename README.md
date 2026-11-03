@@ -154,6 +154,8 @@ flowchart TD
     Context["Ticket or description"] --> Design["omc design: worktree, session, brainstorm"]
     Design --> Record["/omc:design: commit design record"]
     Record --> Build["/omc:implement or omc implement: plan and build"]
+    Record --> WritePlan["Optional /omc:write-plan: commit the plan, stop"]
+    WritePlan --> Build
     Build --> Branch["Committed unpublished branch"]
     Branch --> Audit["/omc:audit or omc review: conformance, fixes, finish"]
     Audit --> Push["Squashed commit pushed; you open the MR"]
@@ -175,11 +177,13 @@ The CLI fetches the base and creates or re-enters `{branch_prefix}{slug}` throug
 
 The session gathers tracker context, parent/epic and linked docs, reporting anything it cannot fetch, and assigns the ticket to you and moves it to In Progress on a best-effort basis. It checks base freshness, rebases or stops on conflicts, then builds a primer with `/omc:explain` and prior design records. It waits for your seed and material scope answers before discussing the full design.
 
-Type **`/omc:design`** to write, harden and commit the design record. Agreement or `ok` is not this command. The session stays open after the commit.
+Type **`/omc:design`** to write, harden and commit the design record. Agreement or `ok` is not this command. The session stays open after the commit, and its closing names three continuations: `/omc:implement` here, the optional `/omc:write-plan` here (plan here, build elsewhere), or `omc implement --claude` or `omc implement --codex` from the worktree.
+
+The optional **`/omc:write-plan`** also requires the committed design record. It writes the implementation plan, pressure-tests it with `/omc:explain`, commits only the plan file and stops with the session open; a later `/omc:implement` or `omc implement` builds from that plan.
 
 ### `omc implement`
 
-Type `/omc:implement` in the design session, or run `omc implement --claude` or `omc implement --codex` from its worktree to hand off to a fresh provider session. Both paths require the committed design record and produce a plan, subagent implementation and a clean, committed **unpublished** branch. `/omc:check` runs after every task, and the build ends with `/omc:build` then `/omc:verify` before handoff. Claude's fresh session is named `<slug>-implement`.
+Type `/omc:implement` in the design session, or run `omc implement --claude` or `omc implement --codex` from its worktree to hand off to a fresh provider session. Both paths require the committed design record and produce a plan (via `/omc:write-plan`, or the plan it already committed), subagent implementation and a clean, committed **unpublished** branch. `/omc:check` runs after every task, and the build ends with `/omc:build` then `/omc:verify` before handoff. Claude's fresh session is named `<slug>-implement`.
 
 ### `omc review`
 

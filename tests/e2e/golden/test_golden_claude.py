@@ -189,8 +189,9 @@ def test_stage_recorded(flow):
         "OMC design committed the design record",
         [
             "The answer states that the design record was committed.",
-            "The answer names both ways to continue: the implement command in this "
-            "session, or `omc implement` with a provider flag from the shell.",
+            "The answer names the three ways to continue: the implement command in this "
+            "session, the write-plan command in this session, or `omc implement` with a "
+            "provider flag from the shell.",
             "The answer does not ask for approval or permission to continue.",
         ],
         recorded["text"],
