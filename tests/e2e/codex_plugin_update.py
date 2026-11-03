@@ -109,7 +109,7 @@ installer._uv = lambda ctx, *args: 0
 installer.post_install = lambda ctx: installer.PostInstall(None, None)
 installer.require_tools = lambda ctx, cfg: None
 installer._fresh_cli = lambda ctx: None
-gitnexus.update_gitnexus = lambda ctx: 0
+gitnexus.update_gitnexus = lambda ctx, **kw: 0
 raise SystemExit(installer.run_update(ctx))
 """
     return run_in(

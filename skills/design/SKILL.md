@@ -147,14 +147,16 @@ session.
 Then post a short summary of what hardening found and changed, and end with
 this statement — a statement, not a question; no approval is requested:
 
-> The design record is committed. To continue on this provider, type
-> `/omc:implement` here (`$omc:implement` on Codex). To continue on another
-> provider, exit this session and run `omc implement --claude` or
-> `omc implement --codex` in this worktree.
+> The design record is committed. To plan and build on this provider, type
+> `/omc:implement` here (`$omc:implement` on Codex). To write the plan here
+> and build on another provider, type `/omc:write-plan` here
+> (`$omc:write-plan` on Codex). To plan and build on another provider, exit
+> this session and run `omc implement --claude` or `omc implement --codex` in
+> this worktree.
 
 ## Completion contract
 
-`design` is complete when the record is committed and the two continuations
+`design` is complete when the record is committed and the three continuations
 have been stated. Waiting for the user's later direct implementation handoff
 is a valid stop (behavior layer: "Waiting for a required user answer or the
 later implementation handoff is a valid stop"). Agreement, `ok`, or praise is

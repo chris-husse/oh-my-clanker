@@ -315,6 +315,27 @@ def test_readme_documents_gitnexus_embeddings():
     assert "off by default" in readme.lower() or "default off" in readme.lower()
 
 
+def test_readme_documents_optional_write_plan():
+    root = Path(__file__).resolve().parents[2]
+    recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
+    readme = (root / "README.md").read_text()
+    for text, name in ((recipe, "recipe"), (readme, "README")):
+        assert "/omc:write-plan" in text, f"{name} does not name /omc:write-plan"
+    lifecycle = readme.split("## The lifecycle", 1)[1].split("\n## ", 1)[0]
+    assert "/omc:write-plan" in lifecycle and "optional" in lifecycle.lower()
+    # the recipe dictates the README's write-plan paragraph
+    design = " ".join(recipe.split("\n- Design:", 1)[1].split("\n- Implement:", 1)[0].split())
+    for needle in (
+        "`/omc:write-plan` needs the committed record",
+        "pressure-tests the plan via explain",
+        "commits only the plan file",
+        "stops with the session open",
+    ):
+        assert needle in design, f"recipe Design bullet missing {needle!r}"
+    flat = " ".join(lifecycle.split())
+    assert "commits only the plan file and stops with the session open" in flat
+
+
 def test_readme_documents_gitnexus_storage_contract():
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
     architecture = readme.split("## How omc is put together", 1)[1].split("## Prerequisites", 1)[0]

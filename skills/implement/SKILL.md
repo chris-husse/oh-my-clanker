@@ -42,37 +42,27 @@ the user at it); an unclean record means the design session died before its
 commit step; an ambiguous one is a human decision. Never write a design
 record from here.
 
-If a plan already exists for this slug
-(`docs/superpowers/plans/*-$OMC_SLUG-plan.md`), an earlier implement run was
-interrupted: inspect it and continue from the next unfinished task instead of
-writing a second plan.
-
 ## Phase 1 — plan
 
-Run `omc internal models` once and read its single `OMC_MODELS` verdict.
-An `"ok": false` verdict is a blocker; report its `message`. Dispatch a
-Plan worker with `tasks.plan.model` and, where supported,
-`tasks.plan.effort`. Give a fresh worker the committed record, current task
-context and project conventions; a Codex model override requires a fresh or
-partial-history fork, not a full-history fork. The worker invokes
-`superpowers:writing-plans` on the committed record. Then, for each MAJOR
-section of the plan, the worker invokes `/omc:explain` once to pressure-test the
-implementation choices — emphasis here is implementation-level design, not
-architecture: should this be an enum? add a parameter here, or reuse an
-existing mechanism? does this fit what the codebase already has? Refine the
-section with the answers. It returns the plan path and any CRITICAL questions
-or real alternatives to the main session. The main session asks the user;
-answers go back to the Plan worker. If the harness cannot pin a worker model,
-use the orchestrator model and say so in one line. Apply effort only where
-the worker harness accepts it.
+Always invoke `/omc:write-plan implement` as a black box (the `implement`
+argument tells it implement is the caller) and take the plan path it
+returns. That path is an argument to Phase 2, not the end of your turn.
+write-plan owns the existing-plan check: when a plan already exists for this
+slug it returns that plan's path (finishing and committing it first if an
+interrupted run left it uncommitted) and never re-plans it; otherwise it
+runs the Plan worker, the writing-plans directive, the per-section
+`/omc:explain` pressure test and the plan commit. CRITICAL
+questions it returns are asked by this main session; the answers go back to
+write-plan to finish the plan.
 
-Pass this directive to writing-plans verbatim: "Every implementation task in
-the plan carries a `Complexity: simple | medium | high` line, choosing one
-value. Label multi-file, architecturally tricky or ambiguous coding work
-`high`; choose `simple` for narrow routine work and `medium` otherwise.
-The plan stores complexity, never model ids."
+Continue the build from the next unfinished task of the returned plan (task
+1 when none are ticked).
 
 ## Phase 2 — build
+
+Run `omc internal models` once and read its single `OMC_MODELS` verdict
+before the first task dispatch. An `"ok": false` verdict is a blocker; report
+its `message`.
 
 Execute the plan via `superpowers:subagent-driven-development` — a fresh
 subagent per task; its own checkpoints and reviews apply.
@@ -102,9 +92,9 @@ nothing on projects without one. Full E2E (`/omc:verify`) is not part of
 the per-task loop; it runs once at the milestone gate below, and `finish`
 runs all four stages again on the squashed commit.
 
-Phase 1 → 2 is NOT a gate: once the plan is written and pressure-tested,
-start the subagent build immediately. Do not ask which execution approach
-to use (writing-plans offers a choice; this conductor has already made it)
+Phase 1 → 2 is NOT a gate: once the plan path is in hand, start the
+subagent build immediately. Do not ask which execution approach to use
+(this conductor has already made that choice)
 and do not ask permission to begin — the user typed /omc:implement, that
 IS the instruction to build. The only stops are CRITICAL questions a plan
 cannot answer and genuine blockers.
@@ -112,8 +102,10 @@ cannot answer and genuine blockers.
 ## Phase 2b — milestone gate
 
 Before `/omc:build`, confirm at least one task commit exists after the
-design-record commit. If none exists, Phase 2 is unfinished: finish and commit
-the implementation task before entering this gate.
+design-record commit. A task commit is one that touches a path outside
+`docs/superpowers/`; the plan commit alone never counts. If none exists,
+Phase 2 is unfinished: finish and commit the implementation task before
+entering this gate.
 
 After the last task's subagent and reviews pass, its green `/omc:check`
 supplies this milestone's check. Invoke `/omc:build`, then `/omc:verify` as
@@ -124,19 +116,21 @@ an unconfigured stage with `"configured": false`. A missing verdict is a
 failure, even if the invocation otherwise appears successful.
 
 For any red stage, follow the behavior layer's stage-gate rule: bounded fix-forward, then a CRITICAL stop. Do not enter Phase 3 or make a handoff
-commit while the gate is red. On a red gate, keep those task commits and the
-plan uncommitted; the gate blocks only the handoff commit. After a required
-answer, resume this gate and the remaining phases under the same
-`/omc:implement` authorization.
+commit while the gate is red. On a red gate, keep those task commits;
+the plan was already committed by `/omc:write-plan`; the gate blocks only
+the handoff commit. After a required answer, resume this gate and the
+remaining phases under the same `/omc:implement` authorization.
 
 ## Phase 3 — hand off
 
-Commit the plan file and any tracked product or documentation changes left by
-the implementation workers. Restore only known tool drift, such as a lockfile
-changed by `uv run` or the milestone verify run; never discard unknown work.
+Commit the plan's ticked checkboxes and any tracked product or documentation
+changes left by the implementation workers. Restore only known tool drift,
+such as a lockfile changed by `uv run` or the milestone verify run; never
+discard unknown work.
 Verify the working tree is
-clean and at least one task commit exists over the base. If either condition
-fails, resolve it before handoff.
+clean and at least one task commit exists over the base — a commit that
+touches a path outside `docs/superpowers/`, so the record and plan commits
+never count. If either condition fails, resolve it before handoff.
 
 Post a short implementation summary and state this continuation verbatim as a
 statement, not a question:
