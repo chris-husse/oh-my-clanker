@@ -639,7 +639,7 @@ def test_slug_uses_codex_orchestrator_model_and_effort(tmp_path):
 
 def test_internal_models_verdict_and_refusals(tmp_path, capsys, monkeypatch):
     from omc.config.schema import GlobalConfig
-    from omc.config.store import save_global
+    from omc.config.store import save_global, set_key
     from omc.internal import run_internal
 
     monkeypatch.setenv("OMC_HOME", str(tmp_path / "omc"))
@@ -650,6 +650,7 @@ def test_internal_models_verdict_and_refusals(tmp_path, capsys, monkeypatch):
     line = capsys.readouterr().out.strip()
     assert line.startswith("OMC_MODELS ")
     assert json.loads(line.split(" ", 1)[1])["ok"] is False
+    assert "provider_selection_per_step" not in json.loads(line.split(" ", 1)[1])
 
     save_global(tmp_path / "omc", GlobalConfig())
     assert run_internal(["models"]) == 0
@@ -665,10 +666,18 @@ def test_internal_models_verdict_and_refusals(tmp_path, capsys, monkeypatch):
         "medium": {"model": "opus", "effort": ""},
         "high": {"model": "fable", "effort": ""},
     }
+    assert payload["provider_selection_per_step"] is False
+    flagged = GlobalConfig()
+    set_key(flagged, "llm.provider_selection_per_step", "true")
+    save_global(tmp_path / "omc", flagged)
+    assert run_internal(["models"]) == 0
+    flagged_payload = json.loads(capsys.readouterr().out.strip().split(" ", 1)[1])
+    assert flagged_payload["provider_selection_per_step"] is True
     monkeypatch.setenv("OMC_PROVIDER", "codex")
     assert run_internal(["models"]) == 2
     payload = json.loads(capsys.readouterr().out.strip().split(" ", 1)[1])
     assert payload["ok"] is False and "codex debug models" in payload["message"]
+    assert "provider_selection_per_step" not in payload
     _codex_stub(
         tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1), _model("gpt-6-astra", "GPT-6-Astra", 1)]
     )

@@ -100,6 +100,7 @@ def test_schema_menu_metadata_does_not_change_persisted_defaults():
                     },
                 }
             },
+            "provider_selection_per_step": False,
         },
         "gitnexus": {"embeddings": False},
     }
@@ -772,3 +773,56 @@ def test_load_effective_carries_gitnexus_from_the_global_file(tmp_path):
     ctx = ToolContext(home=tmp_path, env={"HOME": str(tmp_path), "PATH": ""})
     cfg = resolve.load_effective(ctx)
     assert cfg is not None and cfg.gitnexus.embeddings is True
+
+
+# --- llm.provider_selection_per_step (spec 2026-11-12 §4.2) ---
+
+
+def test_provider_selection_per_step_defaults_off_everywhere(tmp_path):
+    from omc.config.schema import Config
+
+    assert LLMConfig().provider_selection_per_step is False
+    assert GlobalConfig().llm.provider_selection_per_step is False
+    assert Config().llm.provider_selection_per_step is False
+    # D7: a config.yaml written before the option existed hydrates to off
+    (tmp_path / "config.yaml").write_text("schema_version: 1\nllm:\n  default: claude\n")
+    assert store.load_global(tmp_path).llm.provider_selection_per_step is False
+
+
+def test_provider_selection_per_step_round_trips_and_is_typed(tmp_path):
+    cfg = GlobalConfig()
+    cfg.llm.provider_selection_per_step = True
+    store.save_global(tmp_path, cfg)
+    assert "provider_selection_per_step: true" in (tmp_path / "config.yaml").read_text()
+    assert store.load_global(tmp_path).llm.provider_selection_per_step is True
+
+
+@pytest.mark.parametrize("value", ['"false"', "1", "null", "[true]"])
+def test_provider_selection_per_step_wrong_type_is_a_config_error(tmp_path, value):
+    (tmp_path / "config.yaml").write_text(f"llm:\n  provider_selection_per_step: {value}\n")
+    with pytest.raises(ConfigError, match="llm.provider_selection_per_step"):
+        store.load_global(tmp_path)
+
+
+def test_set_provider_selection_per_step_accepts_exactly_true_false():
+    cfg = GlobalConfig()
+    store.set_key(cfg, "llm.provider_selection_per_step", "true")
+    assert cfg.llm.provider_selection_per_step is True
+    store.set_key(cfg, "llm.provider_selection_per_step", "false")
+    assert cfg.llm.provider_selection_per_step is False
+    for value in ("yes", "1", "", "True", "on"):
+        with pytest.raises(
+            ConfigError, match="llm.provider_selection_per_step expects true or false"
+        ):
+            store.set_key(cfg, "llm.provider_selection_per_step", value)
+    assert cfg.llm.provider_selection_per_step is False
+    with pytest.raises(ConfigError, match="unknown config key"):
+        store.set_key(cfg, "llm.provider_selection_per_step.extra", "true")
+
+
+def test_legacy_config_carries_provider_selection_per_step(tmp_path):
+    (tmp_path / "config.json").write_text(
+        '{"schema_version": 1, "llm": {"default": "claude", "provider_selection_per_step": true}}'
+    )
+    gcfg, _ = store.load_legacy(tmp_path)
+    assert gcfg.llm.provider_selection_per_step is True

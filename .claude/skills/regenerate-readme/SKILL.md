@@ -99,7 +99,7 @@ Enter edits, Esc goes up/exits, Ctrl-C abandons an edit; accepted changes save
 immediately. Reopen after changing providers to rebuild dependent choices.
 Three-row file table: global `~/.omc/config.yaml` for LLM settings, committed
 `<repo>/.omc/config.yaml` for worktree naming, `~/.omc/secrets.yaml` for keys (0600).
-Use schema labels: Default provider; Orchestrator model; Task models (Design,
+Use schema labels: Default provider; Orchestrator model; Provider Selection Per Step; Task models (Design,
 Plan, Review, Simple/Medium/High Complexity Task — each a `family[:effort]`
 such as `sol:high`, blank follows the provider default; take the per-provider
 defaults table from `default_task_model` in `src/omc/providers/*.py`; plan
@@ -109,6 +109,13 @@ GitNexus → Embeddings (`gitnexus.embeddings`, off by default; also `--set gitn
 omc installs GitNexus's local embedding runtime under `~/.omc`, embeds on every
 refresh, backfills an existing index once, and falls back to keyword-only indexing
 when the runtime or a download fails — never failing update, watch or refresh.
+LLM → Provider Selection Per Step (`llm.provider_selection_per_step`, off by default;
+also `--set llm.provider_selection_per_step=true`): off means `/omc:design` runs
+through implement, audit, finish and the push in one session, with one notice line
+at each automatic step; on restores the per-stage stops that offer another provider
+(`omc implement`/`omc review --claude|--codex`). Off also means the implementing
+session audits itself; turn it on, or run `omc review` after a typed stop, for a
+second provider's audit. Existing installs get the off default on upgrade (no migration).
 Stale-model reconciliation (`src/omc/reconcile.py`): design/implement/review
 check the session models, dependency watch the docs model, against the
 provider's listing; a current listing costs no remap turn. Codex reads `codex
@@ -168,8 +175,12 @@ End with external `omc dependency watch` (backfills docs, announces completion).
 
 First, Mermaid flowchart: ticket/description → design (worktree/session,
 brainstorm, explicit /omc:design commits record) → optional `/omc:write-plan`
-in the design session (commits the plan, stops) → implement builds from it;
-the flowchart has an edge Record → write-plan → Build alongside Record → Build.
+in the design session (commits the plan; stops only with Provider Selection Per Step on)
+→ implement builds from it; the write-plan node itself names no stop (e.g. "Optional
+/omc:write-plan: commit the plan");
+the flowchart has an edge Record → write-plan → Build alongside Record → Build,
+and edges labelled Provider Selection Per Step off from Record straight on to Build
+and from Branch straight on to Audit (no typed word), beside the typed edges.
 Implement (plan/build, committed unpublished branch) → audit
 (conformance/fixes/finish) → squashed push → user opens MR. Name both
 in-session and fresh-session paths.
@@ -181,18 +192,27 @@ Three command subsections:
   Start gathers parent/epic/docs (unavailable docs reported), refreshes base,
   builds primer via explain and prior records, asks for seed and material scope
   answers, discusses full design. Agreement is not authority. `/omc:design`
-  alone writes/hardens/commits record and leaves session open. Its closing
+  alone writes/hardens/commits record; with Provider Selection Per Step on, leaves
+  the session open ("With Provider Selection Per Step on, the session stays open
+  after the commit"; never an unconditional "stays open"). Its closing
   names three continuations: `/omc:implement` here, optional `/omc:write-plan`
-  here (plan here, build elsewhere), or `omc implement --claude|--codex`.
+  here (plan here, build elsewhere), or `omc implement --claude|--codex` with
+  Provider Selection Per Step on; with it off, `/omc:design` continues into
+  implement without a typed command (one notice line).
   Optional `/omc:write-plan` needs the committed record, pressure-tests the
   plan via explain, commits only the plan file and stops with the session
-  open; a later implement builds from that plan.
+  open when Provider Selection Per Step is on (off, the default, continues
+  into implement); a later implement builds from that plan.
 - Implement: committed record gate, run in worktree, provider handoff, fresh
   `<slug>-implement` Claude session or `/omc:implement` in design session;
   plan (via `/omc:write-plan`, or the plan it already committed)/subagent
-  build, clean committed unpublished handoff.
+  build, clean committed unpublished handoff; with Provider Selection Per Step
+  off it continues into audit without a typed command; on, it states the
+  continuations and waits. With it off, `omc implement` (also with `--headless`)
+  continues through audit and the push too.
 - Review: committed record gate, fresh `<slug>-audit` Claude session or
   `/omc:audit`; conformance review, fixes, record amendments, finish/publication.
+  With Provider Selection Per Step off, implement invokes `/omc:audit` itself.
 Shared flags table: provider overrides (`--claude`/`--codex`, no saved change),
 `--dry-run` (no session/worktree; design still probes/calls slug/ensures guidance;
 a stale configured model is reported as a would-be remap and the run stops),
@@ -236,7 +256,7 @@ Exactly three Mermaid diagrams, each with a short explanatory paragraph:
 3. Sequence for a real internal contract (e.g. design-record): skill → internal
    command → single prefixed JSON verdict → caller continues. List exactly
    OMC_KNOWLEDGE, OMC_DESIGN_RECORD, OMC_STAGE, OMC_REBASE_MAIN,
-   OMC_SLUG, OMC_MODELS (`omc internal models`, resolved task choices); include OMC_TICKET from behavior layer. Distinguish CLI verdicts
+   OMC_SLUG, OMC_MODELS (`omc internal models`, resolved task choices and the provider-selection-per-step flag); include OMC_TICKET from behavior layer. Distinguish CLI verdicts
    from skill-emitted contracts. The finish squash count travels in the CLI's
    rebase-main verdict (`squashed`); no skill emits a squash verdict.
    Exit codes 0 ok / 1 error / 2 refusal or usage /

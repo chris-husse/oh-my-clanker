@@ -45,11 +45,11 @@ e2e-rest *args:
 codex-gate *args:
     CODEX_AUTH_VOLUME=${CODEX_AUTH_VOLUME:-omc-e2e-codex-auth} bash scripts/e2e.sh rest -m "e2e and codex_gate and not expensive" -n 1 {{args}}
 
-# The monolithic lifecycle cases and both cross-provider handoffs (expensive tier):
+# The monolithic lifecycle cases, the auto-advance chain from `agreed` and both cross-provider handoffs (expensive tier):
 # evidence runs, never a gate. Serial through the E2E runner (prebuilt image, Ryuk
 # off); needs the Codex account volume (`just codex-login`).
 lifecycle-full *args:
-    CODEX_AUTH_VOLUME=${CODEX_AUTH_VOLUME:-omc-e2e-codex-auth} bash scripts/e2e.sh rest -m "e2e and expensive" -n 1 tests/e2e/test_e2e_lifecycle_full.py tests/e2e/variations/test_codex_handoff.py {{args}}
+    CODEX_AUTH_VOLUME=${CODEX_AUTH_VOLUME:-omc-e2e-codex-auth} bash scripts/e2e.sh rest -m "e2e and expensive" -n 1 tests/e2e/test_e2e_lifecycle_full.py tests/e2e/variations/test_codex_handoff.py tests/e2e/variations/test_from_agreed.py {{args}}
 
 # Interactive device login into the dedicated Codex E2E Docker volume.
 codex-login:

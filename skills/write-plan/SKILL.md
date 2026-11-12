@@ -1,6 +1,6 @@
 ---
 name: write-plan
-description: Write, pressure-test (via /omc:explain) and commit the implementation plan for this slug from the committed design record, then stop with the session open. Optional step between /omc:design and /omc:implement; /omc:implement also invokes it when no plan exists.
+description: Write, pressure-test (via /omc:explain) and commit the implementation plan for this slug from the committed design record; with provider selection per step on it then stops with the session open, off (the default) continues into the next stage (/omc:implement). Optional step between /omc:design and /omc:implement; /omc:implement also invokes it when no plan exists.
 ---
 
 # omc write-plan (conductor)
@@ -9,9 +9,11 @@ Invoked directly once `/omc:design` has committed the design record
 (`$omc:write-plan` in Codex, `/omc:write-plan` in Claude), or by the
 `/omc:implement` conductor when no plan exists yet. /omc:write-plan authorizes
 writing, pressure-testing and committing the implementation plan for this
-slug — nothing else. It never builds, never touches product code, never
-pushes. When it ends, the session stays open and the user chooses how to
-continue. It owns the plan the way `design` owns the record.
+slug — by itself, nothing else. By itself it never builds, never touches
+product code, never pushes. In direct use with provider selection per step on,
+the session stays open when it ends and the user chooses how to continue; with
+it off (the default), its close continues into `/omc:implement` (Step 5). It
+owns the plan the way `design` owns the record.
 
 ## User Input
 
@@ -32,10 +34,12 @@ The whole input selects the mode:
 
 **Write the remaining steps into the task list now**: record gate →
 existing-plan check → Plan worker writes → per-section pressure test →
-commit the plan → close (direct use: summary and continuations; caller mode:
-return the plan path). Mark each completed as you pass it. A committed plan
-is an argument — to the user's next command in direct use, to the caller in
-caller mode — not a destination. Reading the list is how you answer "am I
+commit the plan → close (direct use: summary, then continue into
+`/omc:implement` when provider selection per step is off, otherwise the
+continuations; caller mode: return the plan path). Mark each completed as you
+pass it. A committed plan is an argument — to the user's next command in
+direct use (or to `/omc:implement` with provider selection per step off), to
+the caller in caller mode — not a destination. Reading the list is how you answer "am I
 done in this authorized phase?".
 
 ## Step 1 — record gate
@@ -48,7 +52,10 @@ means `/omc:design` has not run (point the user at it); an unclean record
 means the design session died before its commit step; an ambiguous one is a
 human decision. Never write a design record from here.
 
-`$OMC_SLUG` below is the `slug` field of this verdict.
+`$OMC_SLUG` below is the `slug` field of this verdict. Then run
+`omc internal models` once and read its single `OMC_MODELS` verdict, in both
+modes. An `"ok": false` verdict is a blocker; report its `message`. Step 3's
+Plan worker and Step 5's close use this verdict.
 
 ## Step 2 — existing plan
 
@@ -57,8 +64,9 @@ Whether git tracks it (`git ls-files -- <path>` prints it) decides what
 happens, since every finished write-plan commits its plan:
 
 - **tracked** (committed by an earlier write-plan, with or without the ticked
-  boxes of a build in progress) → say that a plan exists at `path`, state the
-  Step 5 continuations (caller mode: return the plan path), and write nothing.
+  boxes of a build in progress) → say that a plan exists at `path`, close as
+  Step 5 does (direct use: continue or state the continuations by the flag;
+  caller mode: return the plan path), and write nothing.
   Never write a second dated plan; to re-plan, the user deletes the file
   first and runs `/omc:write-plan` again.
 - **untracked** (an interrupted write-plan died before its commit, or an
@@ -71,10 +79,8 @@ happens, since every finished write-plan commits its plan:
 
 ## Step 3 — plan
 
-Run `omc internal models` once and read its single `OMC_MODELS` verdict.
-An `"ok": false` verdict is a blocker; report its `message`. Dispatch a
-Plan worker with `tasks.plan.model` and, where supported,
-`tasks.plan.effort`. On Claude, start a fresh worker and give it the
+Using the Step 1 `OMC_MODELS` verdict, dispatch a Plan worker with
+`tasks.plan.model` and, where supported, `tasks.plan.effort`. On Claude, start a fresh worker and give it the
 committed record, current task context and project conventions; a Codex
 model override requires a fresh or partial-history fork, not a full-history
 fork, with that same materialized context in a fresh fork. If the harness
@@ -120,8 +126,21 @@ never committed or discarded.
 ## Step 5 — close
 
 **Direct use.** Post a short summary of the plan (task count, the
-pressure-test findings that changed it), then end with this statement — a
-statement, not a question; no approval is requested:
+pressure-test findings that changed it), then close by the Step 1 verdict.
+If that verdict is no longer in context, read it again the same way before closing.
+Only an `OMC_MODELS` verdict with `"ok": true` and `"provider_selection_per_step": false` continues; a missing field or any other value stops as below.
+
+- **Provider selection per step off** — print this one notice line, then
+  invoke `/omc:implement` as a black box in this same turn. State no
+  continuations.
+
+> Provider selection per step is off — continuing to `/omc:implement`
+> (turn on: `omc configure` → LLM → Provider Selection Per Step).
+
+On Codex the command is spelled `$omc:implement`.
+
+- **Otherwise** — end with this statement — a statement, not a question; no
+  approval is requested:
 
 > The plan is committed. To build on this provider, type `/omc:implement`
 > here (`$omc:implement` on Codex). To build on another provider, exit this
@@ -131,11 +150,13 @@ statement, not a question; no approval is requested:
 **Caller mode** (`$ARGUMENTS` is `implement`). Skip the summary and the
 statement; return the plan path to `/omc:implement`. That path is an
 argument to the caller, not the end of your turn: the caller continues to
-its build in the same turn.
+its build in the same turn. Caller mode never invokes `/omc:implement`,
+whatever the flag: the caller is implement.
 
 ## Completion contract
 
-`write-plan` is complete when the plan is committed and, in direct use, the
-two continuations have been stated. Waiting for the user's next command is a
-valid stop. Agreement, `ok`, or praise is not `/omc:implement`. Do not build
-or push from here.
+`write-plan` is complete when the plan is committed and, in direct use,
+either the two continuations have been stated (provider selection per step on)
+or `/omc:implement` has been invoked (off). With the setting on, waiting for
+the user's next command is a valid stop. Agreement, `ok`, or praise is not
+`/omc:implement`. Do not build or push from this skill itself.

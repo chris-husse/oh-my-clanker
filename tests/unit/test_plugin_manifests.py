@@ -1313,6 +1313,41 @@ def test_implement_skill_contract():
     )
     assert "finish runs it" not in text
     assert "Invoke the `finish` skill" not in text
+    # provider selection per step (spec 2026-11-12 §4.4, D9)
+    for needle in (
+        "provider_selection_per_step",
+        'Only an `OMC_MODELS` verdict with `"ok": true` and '
+        '`"provider_selection_per_step": false` continues; a missing field or any '
+        "other value stops as below.",
+        "> Provider selection per step is off — continuing to `/omc:audit`\n"
+        "> (turn on: `omc configure` → LLM → Provider Selection Per Step).",
+    ):
+        assert needle in text, f"implement skill missing {needle!r}"
+    assert text.count("omc internal models") == 1  # Phase 2's read is the flag read
+    handoff = text.split("## Phase 3 — hand off", 1)[1].split("## Completion contract", 1)[0]
+    assert "invoke `/omc:audit`" in handoff
+    # a verdict lost to compaction or a re-entry is re-read, never a silent stop
+    assert (
+        "If that verdict is no longer in context, read it again the same way before closing."
+        in " ".join(handoff.split())
+    ), "implement Phase 3 must re-read a lost OMC_MODELS verdict"
+    gate = text.split("## Phase 2b — milestone gate", 1)[1].split("## Phase 3 — hand off", 1)[0]
+    assert "a red gate never reaches `/omc:audit`" in " ".join(gate.split())
+    assert (
+        "the user typed /omc:implement (or the chain invoked it), that IS the instruction to build"
+        in " ".join(text.split())
+    )
+    # the on-branch statement is unchanged and still names all three ways
+    assert "> The implementation is committed on this branch and not yet published." in handoff
+    for word in ("/omc:audit", "omc review", "/omc:finish"):
+        assert word in handoff
+    phase_m1 = text.split("## Phase -1", 1)[1].split("## Phase 0", 1)[0]
+    assert "continue into `/omc:audit` when provider selection per step is off" in phase_m1
+    contract = text.split("## Completion contract", 1)[1]
+    assert "`/omc:audit` has been invoked" in contract and "omc implement" in contract
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert "with provider selection per step on" in m.group(1)
+    assert "off (the default) continues into the next stage" in m.group(1)
 
 
 def test_write_plan_skill_contract():
@@ -1371,6 +1406,34 @@ def test_write_plan_skill_contract():
         text.index("plan file only"),
     ]
     assert order == sorted(order)
+    # provider selection per step (spec 2026-11-12 §4.4, D8)
+    for needle in (
+        "provider_selection_per_step",
+        'Only an `OMC_MODELS` verdict with `"ok": true` and '
+        '`"provider_selection_per_step": false` continues; a missing field or any '
+        "other value stops as below.",
+        "> Provider selection per step is off — continuing to `/omc:implement`\n"
+        "> (turn on: `omc configure` → LLM → Provider Selection Per Step).",
+    ):
+        assert needle in text, f"write-plan skill missing {needle!r}"
+    assert text.count("omc internal models") == 1
+    step1 = text.split("## Step 1 — record gate", 1)[1].split("## Step 2", 1)[0]
+    step3 = text.split("## Step 3 — plan", 1)[1].split("## Step 4", 1)[0]
+    assert "omc internal models" in step1  # one unconditional read per run
+    assert "omc internal models" not in step3 and "tasks.plan.model" in step3
+    close = text.split("## Step 5 — close", 1)[1].split("## Completion contract", 1)[0]
+    direct, caller = close.split("**Caller mode**", 1)
+    assert "invoke `/omc:implement`" in direct
+    assert "Provider selection per step is off" in direct
+    assert "invoke `/omc:implement`" not in caller and "return the plan path" in caller
+    assert (
+        "If that verdict is no longer in context, read it again the same way before closing."
+        in " ".join(direct.split())
+    ), "write-plan close must re-read a lost verdict"
+    assert "/omc:audit" not in text and "$omc:audit" not in text
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert "with provider selection per step on" in m.group(1)
+    assert "off (the default) continues into the next stage" in m.group(1)
 
 
 def test_implement_keeps_task_commits_before_a_red_milestone_gate():
@@ -1492,6 +1555,11 @@ def test_audit_skill_contract():
     assert "explicitly authorizes including" in prose
     assert "left untouched and outside publication" in prose
     assert "re-read `git status --porcelain`" in text
+    intro = " ".join(text.split("## Phase -1", 1)[0].split())
+    assert (
+        "or by `/omc:implement` continuing in the same turn with provider selection per step off"
+        in intro
+    )
 
 
 def test_index_and_document_delegate():
@@ -1675,6 +1743,7 @@ def test_distribution_agents_validation_cadence():
         "CRITICAL",
         "no handoff commit",
         "no `finish`",
+        "no handoff commit, continuation offer or `/omc:audit` invocation",
     ):
         assert needle in prose, f"behavior layer missing stage-gate contract {needle!r}"
 
@@ -1748,6 +1817,43 @@ def test_design_skill_contract():
     assert "Completion contract" in text
     # the waiver section is unconditional so review can rely on it
     assert text.index("Deliberate complexity") < text.index("## Step 2")
+    # provider selection per step (spec 2026-11-12 §4.4)
+    for needle in (
+        "provider_selection_per_step",
+        "Provider Selection Per Step",
+        'Only an `OMC_MODELS` verdict with `"ok": true` and '
+        '`"provider_selection_per_step": false` continues; a missing field or any '
+        "other value stops as below.",
+        "> Provider selection per step is off — continuing to `/omc:implement`\n"
+        "> (turn on: `omc configure` → LLM → Provider Selection Per Step).",
+    ):
+        assert needle in text, f"design skill missing {needle!r}"
+    assert text.count("omc internal models") == 1  # Step 1's read is the flag read
+    close = text[text.index("## Step 5") : text.index("## Completion contract")]
+    assert "invoke `/omc:implement`" in close
+    assert (
+        "If that verdict is no longer in context, read it again the same way before closing."
+        in " ".join(close.split())
+    ), "design close must re-read a lost verdict"
+    # the completion contract quotes the behavior layer's current text exactly
+    layer = " ".join((ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text().split())
+    quote = (
+        "Waiting for a required user answer or (with provider selection per step on) the "
+        "later implementation handoff is a valid stop"
+    )
+    contract = " ".join(text.split("## Completion contract", 1)[1].split())
+    assert f'(behavior layer: "{quote}")' in contract and quote in layer
+    assert "Provider selection per step is off" in close
+    # the on-branch statement is unchanged
+    assert "> The design record is committed. To plan and build on this provider, type" in close
+    step0 = text[text.index("## Step 0") : text.index("## Step 1")]
+    assert "continue into `/omc:implement` when provider selection per step is off" in step0
+    # the chain goes through implement, never straight to audit
+    assert "/omc:audit" not in text and "$omc:audit" not in text
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert "two authority words" not in m.group(1)
+    assert "with provider selection per step on" in m.group(1)
+    assert "off (the default) continues into the next stage" in m.group(1)
 
 
 def test_design_is_user_facing_and_owns_the_record():
@@ -1758,6 +1864,7 @@ def test_design_is_user_facing_and_owns_the_record():
     assert "/omc:implement" in text and "omc implement" in text
     assert "/omc:write-plan" in text and "$omc:write-plan" in text
     assert "three continuations" in text and "two continuations" not in text
+    assert "`/omc:implement` has been invoked" in text
     assert not (ROOT / "skills" / "spec").exists()
 
 
@@ -1932,6 +2039,53 @@ def test_behavior_layer_names_three_authority_words():
     externalize = text.split("Externalize a composed flow")[1].split("\n- ")[0]
     assert "/omc:write-plan" in externalize
     assert "write-plan lists end at the committed plan" in " ".join(externalize.split())
+
+    # provider selection per step (spec 2026-11-12 §4.5)
+    assert "`llm.provider_selection_per_step`" in flat
+    assert "exactly as if the user had typed each word" in flat
+    assert "With it on, each word must be typed." in flat
+    lifecycle = flat.split("Lifecycle scope is binding", 1)[1].split("Worktrees are snapshots", 1)[
+        0
+    ]
+    assert (
+        lifecycle.index("launch fresh seeded sessions")
+        < lifecycle.index("llm.provider_selection_per_step")
+        < lifecycle.index("Agreement or `ok` is none of these invocations")
+    )
+    assert "Three direct user invocations carry authority, in order" in lifecycle
+    ext = " ".join(externalize.split())
+    assert "at the invoked `/omc:implement` when provider selection per step is off" in ext
+    assert "or at the invoked `/omc:audit` when it is off" in ext
+    assert "write-plan lists end at the committed plan" in ext  # existing needle kept
+
+    # the per-word grants are scoped to provider selection per step on
+    assert (
+        "the design record — by itself nothing else; with provider selection per step on, "
+        "the session then stays open"
+    ) in lifecycle
+    assert (
+        "the plan — by itself nothing else; with provider selection per step on, the session "
+        "then stays open, and a later `/omc:implement` builds from that plan"
+    ) in lifecycle
+    assert (
+        "Waiting for a required user answer or (with provider selection per step on) the "
+        "later implementation handoff is a valid stop."
+    ) in flat
+
+    # the design and write-plan intros do not contradict the chain
+    design = " ".join((ROOT / "skills" / "design" / "SKILL.md").read_text().split())
+    assert "and, by itself, nothing else" in design
+    assert (
+        "with provider selection per step off the committed record carries forward "
+        "into `/omc:implement` (behavior layer)"
+    ) in design
+    write_plan = " ".join((ROOT / "skills" / "write-plan" / "SKILL.md").read_text().split())
+    assert "By itself it never builds, never touches product code, never pushes." in write_plan
+    assert "for this slug — by itself, nothing else." in write_plan
+    assert (
+        "to the user's next command in direct use (or to `/omc:implement` with provider "
+        "selection per step off)"
+    ) in write_plan
 
 
 def test_mr_review_stops_when_grug_skips_its_lens():

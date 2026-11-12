@@ -139,6 +139,20 @@ def test_configure_set_gitnexus_embeddings_writes_only_the_global_file(tmp_path,
     assert store.load_global(home).gitnexus.embeddings is False
 
 
+def test_configure_set_provider_selection_per_step_writes_only_the_global_file(
+    tmp_path, monkeypatch
+):
+    home = _home(tmp_path, monkeypatch)
+    repo = _repo(tmp_path, monkeypatch)
+    assert main(["configure", "--set", "llm.provider_selection_per_step=true"]) == 0
+    assert store.load_global(home).llm.provider_selection_per_step is True
+    assert not store.project_config_path(repo).exists()  # personal, never project
+    assert main(["configure", "--set", "llm.provider_selection_per_step=false"]) == 0
+    assert store.load_global(home).llm.provider_selection_per_step is False
+    assert main(["configure", "--set", "llm.provider_selection_per_step=yes"]) == 1
+    assert store.load_global(home).llm.provider_selection_per_step is False
+
+
 def test_configure_set_global(tmp_path, monkeypatch):
     home = _home(tmp_path, monkeypatch)
     rc = main(

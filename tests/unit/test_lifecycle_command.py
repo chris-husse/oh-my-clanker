@@ -22,6 +22,7 @@ FULL = {
     "test_failing_build_blocks_publication[claude]",
     "test_codex_implement_handoff_from_claude_record",
     "test_codex_review_handoff_from_claude_implementation",
+    "test_design_auto_advances_to_push",
 }
 GOLDEN = {
     "test_stage_start",
@@ -66,3 +67,8 @@ def test_default_e2e_collects_measured_failing_verify_variation():
 
 def test_default_e2e_collects_write_plan_variation():
     assert "test_write_plan_commits_plan_only" in _collected("e2e-tests")
+
+
+def test_default_e2e_never_collects_the_auto_advance_chain():
+    # one /omc:design turn that runs to the push: expensive tier only
+    assert "test_design_auto_advances_to_push" not in _collected("e2e-tests")

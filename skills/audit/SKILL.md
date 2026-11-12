@@ -5,9 +5,11 @@ description: Use when a committed omc design record and implementation are ready
 
 # omc audit (conductor)
 
-Invoked directly (`/omc:audit` in Claude, `$omc:audit` in Codex) or by the
-bare `/omc:audit` seed from `omc review`. This command authorizes conformance
-review, conformance fixes, record amendments and publication through `finish`.
+Invoked directly (`/omc:audit` in Claude, `$omc:audit` in Codex), by the
+bare `/omc:audit` seed from `omc review`, or by `/omc:implement` continuing in
+the same turn with provider selection per step off. This command authorizes
+conformance review, conformance fixes, record amendments and publication
+through `finish`.
 Do not ask for permission between phases. A required CRITICAL answer pauses the
 flow; after it arrives, resume without asking for another command.
 
