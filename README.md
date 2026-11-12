@@ -69,6 +69,7 @@ The worktree section appears only when configure runs inside a git repository. T
 - **Documentation provider**, **Documentation backend** (`cli` or `api`) and **Documentation model**.
 - **Native notifications**, **Branch prefix** (default `feature/`) and **Base branch** (default `main`).
 - **GitNexus → Embeddings** (`gitnexus.embeddings`, off by default; also `omc configure --set gitnexus.embeddings=true`). When on, omc installs GitNexus's local embedding runtime under `~/.omc`, embeds on every index refresh, backfills an existing index once, and falls back to keyword-only indexing when the runtime or a download fails. It never fails `omc update`, `omc watch` or a refresh.
+- **LLM → Provider Selection Per Step** (`llm.provider_selection_per_step`, off by default; also `omc configure --set llm.provider_selection_per_step=true`). Off means `/omc:design` runs through implement, audit, finish and the push in one session, printing one notice line at each automatic step. On restores the per-stage stops that offer another provider (`omc implement` or `omc review` with `--claude` or `--codex`). Off also means the implementing session audits itself; turn it on, or run `omc review` after a typed stop, for a second provider's audit. Existing installs get the off default on upgrade, with no migration.
 
 Provider defaults are:
 
@@ -154,10 +155,12 @@ flowchart TD
     Context["Ticket or description"] --> Design["omc design: worktree, session, brainstorm"]
     Design --> Record["/omc:design: commit design record"]
     Record --> Build["/omc:implement or omc implement: plan and build"]
-    Record --> WritePlan["Optional /omc:write-plan: commit the plan, stop"]
+    Record --> WritePlan["Optional /omc:write-plan: commit the plan"]
     WritePlan --> Build
+    Record -->|Provider Selection Per Step off| Build
     Build --> Branch["Committed unpublished branch"]
     Branch --> Audit["/omc:audit or omc review: conformance, fixes, finish"]
+    Branch -->|Provider Selection Per Step off| Audit
     Audit --> Push["Squashed commit pushed; you open the MR"]
 ```
 
@@ -177,17 +180,17 @@ The CLI fetches the base and creates or re-enters `{branch_prefix}{slug}` throug
 
 The session gathers tracker context, parent/epic and linked docs, reporting anything it cannot fetch, and assigns the ticket to you and moves it to In Progress on a best-effort basis. It checks base freshness, rebases or stops on conflicts, then builds a primer with `/omc:explain` and prior design records. It waits for your seed and material scope answers before discussing the full design.
 
-Type **`/omc:design`** to write, harden and commit the design record. Agreement or `ok` is not this command. The session stays open after the commit, and its closing names three continuations: `/omc:implement` here, the optional `/omc:write-plan` here (plan here, build elsewhere), or `omc implement --claude` or `omc implement --codex` from the worktree.
+Type **`/omc:design`** to write, harden and commit the design record. Agreement or `ok` is not this command. With Provider Selection Per Step on, the session stays open after the commit and its closing names three continuations: `/omc:implement` here, the optional `/omc:write-plan` here (plan here, build elsewhere), or `omc implement --claude` or `omc implement --codex` from the worktree. With it off (the default), `/omc:design` continues into `/omc:implement` without a typed command, printing one notice line.
 
-The optional **`/omc:write-plan`** also requires the committed design record. It writes the implementation plan, pressure-tests it with `/omc:explain`, commits only the plan file and stops with the session open; a later `/omc:implement` or `omc implement` builds from that plan.
+The optional **`/omc:write-plan`** also requires the committed design record. It writes the implementation plan, pressure-tests it with `/omc:explain`, commits only the plan file and stops with the session open when Provider Selection Per Step is on (off, the default, continues into implement); a later `/omc:implement` or `omc implement` builds from that plan.
 
 ### `omc implement`
 
-Type `/omc:implement` in the design session, or run `omc implement --claude` or `omc implement --codex` from its worktree to hand off to a fresh provider session. Both paths require the committed design record and produce a plan (via `/omc:write-plan`, or the plan it already committed), subagent implementation and a clean, committed **unpublished** branch. `/omc:check` runs after every task, and the build ends with `/omc:build` then `/omc:verify` before handoff. Claude's fresh session is named `<slug>-implement`.
+Type `/omc:implement` in the design session, or run `omc implement --claude` or `omc implement --codex` from its worktree to hand off to a fresh provider session. Both paths require the committed design record and produce a plan (via `/omc:write-plan`, or the plan it already committed), subagent implementation and a clean, committed **unpublished** branch. `/omc:check` runs after every task, and the build ends with `/omc:build` then `/omc:verify` before handoff. Claude's fresh session is named `<slug>-implement`. With Provider Selection Per Step off, implement continues into `/omc:audit` without a typed command, printing one notice line; on, it states the continuations and waits. With it off, `omc implement` (also with `--headless`) continues through audit and the push too.
 
 ### `omc review`
 
-Type `/omc:audit` in the implementation session, or run `omc review --claude` or `omc review --codex` from the worktree. The committed-record gate applies here too. Audit checks conformance, fixes drift, amends the record where needed, records an Implementation review trace in it, and publishes through `/omc:finish`; Claude's fresh session is `<slug>-audit`.
+Type `/omc:audit` in the implementation session, or run `omc review --claude` or `omc review --codex` from the worktree. The committed-record gate applies here too. Audit checks conformance, fixes drift, amends the record where needed, records an Implementation review trace in it, and publishes through `/omc:finish`; Claude's fresh session is `<slug>-audit`. With Provider Selection Per Step off, implement invokes `/omc:audit` itself.
 
 | Flag | Applies to / effect |
 |---|---|
@@ -282,7 +285,7 @@ sequenceDiagram
     Note over Skill: Continue on success or surface refusal
 ```
 
-The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_REBASE_MAIN`, `OMC_SLUG`, `OMC_MODELS` and `OMC_TICKET`. The CLI emits knowledge, design-record, rebase-main and models verdicts (`omc internal models` resolves every task's model and effort); stage, slug and ticket-sync verdicts come from skills, and the behavior layer names all seven as sacred. Finish's squash count travels in the CLI's rebase-main verdict as `squashed`; no skill emits a squash verdict. A stage verdict reads `OMC_STAGE {"stage", "configured", "passed", "summary"}`. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
+The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_REBASE_MAIN`, `OMC_SLUG`, `OMC_MODELS` and `OMC_TICKET`. The CLI emits knowledge, design-record, rebase-main and models verdicts (`omc internal models` resolves every task's model and effort and carries the provider-selection-per-step flag); stage, slug and ticket-sync verdicts come from skills, and the behavior layer names all seven as sacred. Finish's squash count travels in the CLI's rebase-main verdict as `squashed`; no skill emits a squash verdict. A stage verdict reads `OMC_STAGE {"stage", "configured", "passed", "summary"}`. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
 
 The CLI handles mechanics and launches model work for slugging, docs, auto-build and sessions. Skills supply judgment and may run git or project commands directly. `ToolContext` centralizes the Python CLI's subprocess and network calls; provider adapters supply each harness's argv and settings. See [Development](#development) for this repo's project integration.
 

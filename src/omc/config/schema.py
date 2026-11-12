@@ -94,6 +94,16 @@ class LLMConfig:
         default_factory=lambda: {"claude": ProviderConfig()},
         metadata={"label": "Providers", "help": "Configured LLM providers."},
     )
+    # Spec 2026-11-12: off (the default) lets the lifecycle conductors continue
+    # design → implement → audit → finish → push without a typed word per stage.
+    provider_selection_per_step: bool = field(
+        default=False,
+        metadata={
+            "label": "Provider Selection Per Step",
+            "help": "Stop after each stage to offer another provider; "
+            "off = continue automatically through to the push.",
+        },
+    )
 
 
 @dataclass

@@ -12,12 +12,13 @@ repo). In any other repository, ignore everything in this section.
   investigates, presents a primer, waits for the user's seed and material
   scope answers, and discusses the full design. Three direct user invocations
   carry authority, in order. `$omc:design` in Codex, `/omc:design` in Claude,
-  authorizes writing, hardening and committing the design record — nothing
-  else; the session then stays open. `$omc:write-plan` in Codex,
-  `/omc:write-plan` in Claude, is optional: it requires a committed design
-  record and authorizes writing, pressure-testing and committing the plan —
-  nothing else; the session then stays open, and a later `/omc:implement`
-  builds from that plan. `$omc:implement` in Codex,
+  authorizes writing, hardening and committing the design record — by itself
+  nothing else; with provider selection per step on, the session then stays
+  open. `$omc:write-plan` in Codex, `/omc:write-plan` in Claude, is optional:
+  it requires a committed design record and authorizes writing,
+  pressure-testing and committing the plan — by itself nothing else; with
+  provider selection per step on, the session then stays open, and a later
+  `/omc:implement` builds from that plan. `$omc:implement` in Codex,
   `/omc:implement` in Claude, requires a committed design record (the gate is
   `omc internal design-record`) and authorizes plan, subagent build, and
   clean committed work on an unpublished branch; assigned implementation workers
@@ -26,6 +27,13 @@ repo). In any other repository, ignore everything in this section.
   and publication through finish; assigned fix workers inherit it.
   `omc implement [--claude|--codex]` and `omc review [--claude|--codex]`
   launch fresh seeded sessions in the worktree for the second and third words.
+  With `llm.provider_selection_per_step` off (the default; `omc configure` →
+  LLM → Provider Selection Per Step), a committed design record carries the
+  implement and audit authority forward: after `/omc:design`, or a directly
+  typed `/omc:write-plan` or `/omc:implement`, the session continues through
+  `/omc:implement` and `/omc:audit` to publication exactly as if the user had
+  typed each word, and the skills say so in one line as they continue. With it
+  on, each word must be typed.
   Agreement or `ok` is none of these invocations. Stop
   for required answers or genuine blockers. A pending async question is not an
   answer.
@@ -61,7 +69,8 @@ repo). In any other repository, ignore everything in this section.
   At the bound, stop with one CRITICAL question naming the
   red stage, its failure summary, what both fixes tried, and what answer is
   needed from the user. No later phase runs on a red gate: implement makes
-  no handoff commit or continuation offer, and audit invokes no `finish`.
+  no handoff commit, continuation offer or `/omc:audit` invocation, and audit
+  invokes no `finish`.
   A required answer resumes the remaining phases under the same authorization;
   in a headless run, make the question the final output.
 - **Ask the graph, not grep**: `/omc:explain <question>` answers from the
@@ -89,8 +98,9 @@ repo). In any other repository, ignore everything in this section.
   SUB-SKILL, never the turn. "Nothing may follow it", "no commentary", "and
   end", "last line" are scoped to that skill's own output; none of them ever
   licenses stopping while authorized work remains. Continue to the caller's
-  next step in the same phase. Waiting for a required user answer or the later
-  implementation handoff is a valid stop.
+  next step in the same phase. Waiting for a required user answer or (with
+  provider selection per step on) the later implementation handoff is a valid
+  stop.
 - **Externalize a composed flow before entering it.** On `/omc:start`,
   `/omc:design`, `/omc:write-plan`, `/omc:finish`, `/omc:implement`,
   `/omc:audit`: write every remaining step
@@ -100,9 +110,11 @@ repo). In any other repository, ignore everything in this section.
   list is the only thing that survives that — "am I done in this authorized
   phase?" is answered by reading it. Start/plan lists end at discussion and
   waiting for /omc:design; design lists end at the committed record and the
-  stated continuations; write-plan lists end at the committed plan and the
-  stated continuations; implementation lists end at the committed branch and
-  the three stated continuations; audit lists run through finish. A
+  stated continuations, write-plan lists end at the committed plan and the
+  stated continuations — or, for both, at the invoked `/omc:implement` when
+  provider selection per step is off; implementation lists end at the
+  committed branch and the three stated continuations, or at the invoked
+  `/omc:audit` when it is off; audit lists run through finish. A
   stale-task-list reminder mid-flow is the warning it appears to be.
 - Skills marked "not meant for direct invocation" are internal — compose
   them via their user-facing entry points.

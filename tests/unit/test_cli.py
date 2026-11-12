@@ -315,6 +315,60 @@ def test_readme_documents_gitnexus_embeddings():
     assert "off by default" in readme.lower() or "default off" in readme.lower()
 
 
+def test_readme_documents_provider_selection_per_step():
+    root = Path(__file__).resolve().parents[2]
+    recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
+    readme = (root / "README.md").read_text()
+    recipe_configure = recipe.split("#### `## Configure`", 1)[1].split("\n#### ", 1)[0]
+    recipe_lifecycle = recipe.split("#### `` ## The lifecycle:", 1)[1].split("\n#### ", 1)[0]
+    for needle in (
+        "Provider Selection Per Step",
+        "`llm.provider_selection_per_step`",
+        "--set llm.provider_selection_per_step=true",
+    ):
+        assert needle in recipe_configure, f"recipe Configure slot missing {needle!r}"
+    assert "Provider Selection Per Step" in recipe_lifecycle
+    configure = readme.split("## Configure", 1)[1].split("\n## ", 1)[0]
+    flat_configure = " ".join(configure.split())
+    assert "Provider Selection Per Step" in configure
+    assert "`llm.provider_selection_per_step`" in configure
+    assert "--set llm.provider_selection_per_step=true" in configure
+    assert "off by default" in flat_configure.lower()
+    lifecycle = readme.split("## The lifecycle", 1)[1].split("\n## ", 1)[0]
+    flowchart = lifecycle.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert "Provider Selection Per Step" in flowchart
+    flat = " ".join(lifecycle.split())
+    assert "Provider Selection Per Step off" in flat
+    assert "commits only the plan file and stops with the session open" in flat
+    # D7: existing installs get the off default on upgrade, in recipe and README
+    assert "upgrade" in recipe_configure and "upgrade" in flat_configure
+    # no every-mode stop: the write-plan node and the design paragraph scope their stops
+    write_plan_node = next(line for line in flowchart.splitlines() if "WritePlan[" in line)
+    assert "stop" not in write_plan_node.lower(), write_plan_node
+    design = next(p for p in lifecycle.split("\n\n") if p.startswith("Type **`/omc:design`**"))
+    flat_design = " ".join(design.split())
+    assert "The session stays open after the commit." not in flat_design
+    assert "With Provider Selection Per Step on, the session stays open after the commit" in (
+        flat_design
+    )
+    flat_recipe_lifecycle = " ".join(recipe_lifecycle.split())
+    assert "(commits the plan, stops)" not in flat_recipe_lifecycle
+    assert "(commits the plan; stops only with Provider Selection Per Step on)" in (
+        flat_recipe_lifecycle
+    )
+    assert "and leaves session open" not in flat_recipe_lifecycle
+    assert "commits record; with Provider Selection Per Step on, leaves the session open" in (
+        flat_recipe_lifecycle
+    )
+    # with the setting off a fresh `omc implement` session runs on through audit and the push
+    implement = " ".join(lifecycle.split("### `omc implement`", 1)[1].split("\n### ", 1)[0].split())
+    assert "`omc implement` (also with `--headless`) continues through audit and the push" in (
+        implement
+    )
+    review = " ".join(lifecycle.split("### `omc review`", 1)[1].split("\n\n|", 1)[0].split())
+    assert "With Provider Selection Per Step off, implement invokes `/omc:audit` itself" in review
+
+
 def test_readme_documents_optional_write_plan():
     root = Path(__file__).resolve().parents[2]
     recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()

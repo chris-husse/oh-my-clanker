@@ -1,15 +1,19 @@
 ---
 name: design
-description: Write the design record from a converged brainstorm, harden it section by section with /omc:explain and the grug lens, commit it, and stop with the session open. Type it when the brainstorm has converged; it is the first of the two authority words (/omc:implement is the second).
+description: Write the design record from a converged brainstorm, harden it section by section with /omc:explain and the grug lens, and commit it; with provider selection per step on it then stops with the session open, off (the default) continues into the next stage (/omc:implement). Type it when the brainstorm has converged; it is the first of the three authority words.
 ---
 
 # omc design (conductor)
 
 Invoked directly after a brainstorm has converged (`$omc:design` in Codex,
 `/omc:design` in Claude). /omc:design IS the user's approval to write, harden
-and commit the design record — and nothing else. It never plans, builds or
-pushes. When it ends, the session stays open and the user chooses how to
-continue.
+and commit the design record — and, by itself, nothing else; with provider
+selection per step off the committed record carries forward into
+`/omc:implement` (behavior layer). By itself it never plans,
+builds or pushes. With provider selection per step on, the session stays open
+when it ends and the user chooses how to continue. With it off (the default),
+its close continues into `/omc:implement`, which carries the run to the push
+(Step 5).
 
 ## User Input
 
@@ -27,9 +31,11 @@ question deferred until after hardening. Resume at Step 0 once answered.
 
 **Write the remaining steps into the task list now**: record check → Design
 worker writes → per-section hardening → whole-record pass → iterate → commit and report →
-wait for the implementation handoff. Mark each completed as you pass it. The
-last task is literally to wait: a committed record is an argument to the
-user's next command, not a destination. Reading the list is how you answer
+close: continue into `/omc:implement` when provider selection per step is off,
+otherwise state the three continuations and wait. Mark each completed as you
+pass it. The last task is the close; with the setting on it is literally to
+wait: a committed record is an argument to the user's next command, not a
+destination. Reading the list is how you answer
 "am I done in this authorized phase?".
 
 ## Step 1 — record check, then write
@@ -47,7 +53,8 @@ line (never wrapped in markdown):
   message.
 
 Run `omc internal models` once and read its single `OMC_MODELS` verdict. An
-`"ok": false` verdict is a blocker; report its `message`. Dispatch a Design
+`"ok": false` verdict is a blocker; report its `message`. Keep this verdict;
+its `provider_selection_per_step` field decides Step 5's close. Dispatch a Design
 worker with `tasks.design.model` and, where the harness accepts it,
 `tasks.design.effort`. On Claude, start a fresh worker and supply the seed,
 all material answers, and the converged design text. On Codex, a model override
@@ -134,18 +141,30 @@ Important grug finding is dispositioned in this order — fix first, ask last:
    What the user waives goes into "Deliberate complexity" with its reason.
    A CRITICAL question is a required answer: wait for it, then resume.
 
-## Step 5 — commit, report, and wait
+## Step 5 — commit, report, then continue or wait
 
 Commit the record if hardening changed it (a re-hardened record that is
 already committed and unchanged has nothing to commit; say so instead of
 failing) (`docs/superpowers/specs/…-design.md` only). A
 grug-unavailable stop (Step 2, `grug skill unavailable — plugin stale? run
-omc update`) is a hard stop: do NOT commit and do NOT report success; hand
-the sentence to the user, whose remediation is `omc update` and a new
-session.
+omc update`) is a hard stop in both settings: do NOT commit, do NOT report
+success and do NOT continue; hand the sentence to the user, whose remediation
+is `omc update` and a new session.
 
-Then post a short summary of what hardening found and changed, and end with
-this statement — a statement, not a question; no approval is requested:
+Then post a short summary of what hardening found and changed, and close by
+the `OMC_MODELS` verdict Step 1 read. If that verdict is no longer in context, read it again the same way before closing. Only an `OMC_MODELS` verdict with `"ok": true` and `"provider_selection_per_step": false` continues; a missing field or any other value stops as below.
+
+- **Provider selection per step off** — print this one notice line, then
+  invoke `/omc:implement` as a black box in this same turn. State no
+  continuations.
+
+> Provider selection per step is off — continuing to `/omc:implement`
+> (turn on: `omc configure` → LLM → Provider Selection Per Step).
+
+On Codex the command is spelled `$omc:implement`.
+
+- **Otherwise** — end with this statement, a statement and not a question;
+  no approval is requested:
 
 > The design record is committed. To plan and build on this provider, type
 > `/omc:implement` here (`$omc:implement` on Codex). To write the plan here
@@ -156,8 +175,11 @@ this statement — a statement, not a question; no approval is requested:
 
 ## Completion contract
 
-`design` is complete when the record is committed and the three continuations
-have been stated. Waiting for the user's later direct implementation handoff
-is a valid stop (behavior layer: "Waiting for a required user answer or the
-later implementation handoff is a valid stop"). Agreement, `ok`, or praise is
-not that handoff. Do not plan, build, or push from here.
+`design` is complete when the record is committed and either the three
+continuations have been stated (provider selection per step on) or
+`/omc:implement` has been invoked (off). With the setting on, waiting for the
+user's later direct implementation handoff is a valid stop (behavior layer:
+"Waiting for a required user answer or (with provider selection per step on)
+the later implementation handoff is a valid stop"). Agreement, `ok`, or praise is not that handoff. Do not plan,
+build, or push from this skill itself; with the setting off, `/omc:implement`
+does that work.

@@ -10,7 +10,10 @@ from ..harness import run_in
 from ..lifecycle_helpers import (
     _assert_boundary,
     _assert_critical_wait,
+    _assert_finish_stage_order,
+    _assert_implement_stage_order,
     _assert_primary_boundary,
+    _assert_published_fix,
     _direct_design,
     _direct_implement,
     _judge_claude,
@@ -158,3 +161,70 @@ def test_review_dry_run_from_a_fixture_record(stage_session):
     assert rc == 0, head_after
     rc, dirty = run_in(container, ["git", "status", "--porcelain"], cwd=worktree)
     assert head_after == head_before and not dirty.strip(), "dry run changed the worktree"
+
+
+# Spec 2026-11-12 D1/D11: with provider selection per step off, ONE /omc:design
+# turn runs design → implement → audit → finish → push. Budget is the
+# monolithic run's design 900 + implement 1800 + audit 1800 s, as one turn.
+CHAIN_TURN_BUDGET = 4500
+
+
+@pytest.mark.expensive
+@pytest.mark.timeout(4800)
+@pytest.mark.variation("agreed")
+def test_design_auto_advances_to_push(stage_session):
+    """No judge: the pushed, squashed, audited branch is the proof that both
+    provider-offer stops are gone."""
+    container, session, m = stage_session
+    worktree, branch = m["worktree"], m["branch"]
+    baseline, _ = _baseline(session, m)
+    rc, out = run_in(
+        container, ["omc", "configure", "--set", "llm.provider_selection_per_step=false"]
+    )
+    assert rc == 0, out
+    rc, out = run_in(container, ["omc", "internal", "models"])
+    assert rc == 0 and '"provider_selection_per_step": false' in out, out
+
+    session.send(_direct_design("claude"))
+    turn = session.wait_turn(CHAIN_TURN_BUDGET)
+    final = session.snapshot(worktree)
+    answer = f"chained answer (tail): {turn['text'][-2000:]}"
+
+    assert any(ref.startswith(f"refs/heads/{branch} ") for ref in final["remote_refs"]), (
+        f"the chain did not push {branch}; {answer}"
+    )
+    rc, commits = run_in(
+        container, ["git", "-C", worktree, "rev-list", "--count", "origin/main..HEAD"]
+    )
+    assert rc == 0 and commits.strip() == "1", f"finish did not squash: {commits!r}; {answer}"
+    records = [
+        key
+        for key in final["spec_plan"]
+        if key.startswith("docs/superpowers/specs/") and key not in baseline["spec_plan"]
+    ]
+    assert len(records) == 1, f"expected one new design record: {records}; {answer}"
+    rc, content = run_in(container, ["git", "-C", worktree, "show", f"HEAD:{records[0]}"])
+    assert rc == 0 and "## Implementation review" in content, f"audit trace missing; {answer}"
+    plans = [
+        key
+        for key in final["spec_plan"]
+        if key.startswith("docs/superpowers/plans/") and key not in baseline["spec_plan"]
+    ]
+    assert plans, f"the chain wrote no plan; {answer}"
+    for plan in plans:
+        rc, _ = run_in(container, ["git", "-C", worktree, "cat-file", "-e", f"HEAD:{plan}"])
+        assert rc == 0, f"plan not committed: {plan}; {answer}"
+    assert final["source"]["greeting.py"] != baseline["source"]["greeting.py"], answer
+    rc, dirty = run_in(container, ["git", "-C", worktree, "status", "--porcelain"])
+    assert rc == 0 and not dirty.strip(), f"the chain left a dirty tree: {dirty}; {answer}"
+    rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
+    assert rc == 0, f"project stages never executed; {answer}"
+    _assert_implement_stage_order(markers)
+    # the implement milestone and finish each run verify: the chain skipped neither
+    assert markers.splitlines().count("verify") >= 2, (
+        f"expected implement-milestone and finish verify runs: {markers}; {answer}"
+    )
+    _assert_finish_stage_order(markers)
+    _assert_published_fix(
+        container, m["repo"], worktree, branch, "def greeting():\n    return 'Goodbye, world!'\n"
+    )

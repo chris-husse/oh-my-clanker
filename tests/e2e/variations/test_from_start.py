@@ -39,6 +39,7 @@ def test_seeded_session_reports_pinned_task_models(stage_session):
     assert verdict == {
         "ok": True,
         "provider": "claude",
+        "provider_selection_per_step": True,
         "tasks": {
             task: {"model": manifest["model"], "effort": ""}
             for task in ("orchestrator", "design", "plan", "review", "simple", "medium", "high")

@@ -226,9 +226,18 @@ def configure_omc(container, provider: str) -> str:
         )
         if login.exit_code != 0:
             pytest.fail(f"Codex API login failed in E2E container (exit {login.exit_code}).")
+    # Every E2E container keeps today's per-stage stops (spec 2026-11-12 D11);
+    # the one chain variation turns the setting off in its own container.
     rc, out = run_in(
         container,
-        ["omc", "configure", "--set", f"llm.default={provider}"],
+        [
+            "omc",
+            "configure",
+            "--set",
+            f"llm.default={provider}",
+            "--set",
+            "llm.provider_selection_per_step=true",
+        ],
     )
     assert rc == 0, f"omc configure failed in container:\n{out}"
     if provider == "codex":

@@ -343,6 +343,13 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
         # The backend/provider consistency check is the save path's job
         # (validate_llm): --set order is arbitrary, see that docstring.
         return
+    if isinstance(cfg, LLMConfig) and head == "provider_selection_per_step":
+        if tail:
+            raise ConfigError(f"unknown config key: provider_selection_per_step.{tail}")
+        if value not in ("true", "false"):
+            raise ConfigError("llm.provider_selection_per_step expects true or false")
+        cfg.provider_selection_per_step = value == "true"
+        return
     if isinstance(cfg, WorktreeConfig):
         # values reach git argv — validate (option-injection surface) on the set
         # path too, exactly as the load path does via _hydrate.
@@ -408,6 +415,10 @@ def _hydrate(cls: type, data: dict, path: str, unknown: list[str] | None = None,
             kwargs[name] = value
     obj = cls(**kwargs)
     if cls is LLMConfig:
+        if not isinstance(obj.provider_selection_per_step, bool):
+            raise ConfigError(
+                f"invalid llm.provider_selection_per_step in {path}: expected true/false"
+            )
         validate_llm(obj)
     if cls is ProviderConfig:
         provider_path = prefix.rstrip(".")

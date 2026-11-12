@@ -48,7 +48,14 @@ def test_shared_fixture_pins_all_seven_choices(monkeypatch, provider, model, env
     )
     # One configure run for all seven pins: one validation probe per container.
     assert seen == [
-        ["omc", "configure", "--set", f"llm.default={provider}"],
+        [
+            "omc",
+            "configure",
+            "--set",
+            f"llm.default={provider}",
+            "--set",
+            "llm.provider_selection_per_step=true",
+        ],
         [
             "omc",
             "configure",
@@ -102,6 +109,7 @@ def test_seeded_model_variation_uses_resumed_session(monkeypatch):
         verdict = {
             "ok": True,
             "provider": "claude",
+            "provider_selection_per_step": True,
             "tasks": {
                 task: {"model": model, "effort": ""}
                 for task in ("orchestrator", "design", "plan", "review", "simple", "medium", "high")

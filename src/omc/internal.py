@@ -499,6 +499,9 @@ def _models(ctx: ToolContext) -> int:
                 task: {"model": choice.model_arg, "effort": choice.effort}
                 for task, choice in choices.items()
             },
+            # Lifecycle conductors read this (spec 2026-11-12 §4.3): only an
+            # explicit false auto-advances; a missing key stops as before.
+            "provider_selection_per_step": cfg.llm.provider_selection_per_step,
         }
     except OmcError as exc:
         payload = {"ok": False, "message": str(exc)}

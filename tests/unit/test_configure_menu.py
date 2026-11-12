@@ -60,6 +60,26 @@ def test_gitnexus_embeddings_toggle_saves_only_the_global_file(tmp_path):
     assert store.load_global(ctx.home).gitnexus.embeddings is False
 
 
+def test_provider_selection_per_step_toggle_saves_only_the_global_file(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session, (ctx, gcfg, _, _) = _menu(tmp_path, root=repo)
+    tag = session.root["LLM"]["Provider Selection Per Step"]
+    assert tag.val is False
+    assert tag.description == (
+        "Stop after each stage to offer another provider; "
+        "off = continue automatically through to the push."
+    )
+    assert tag.update(True)
+    assert gcfg.llm.provider_selection_per_step is True  # in-memory copy-back
+    assert store.load_global(ctx.home).llm.provider_selection_per_step is True
+    assert not store.project_config_path(repo).exists()
+    assert session.flags == (True, False, False)
+    assert tag.update(False)
+    assert gcfg.llm.provider_selection_per_step is False
+    assert store.load_global(ctx.home).llm.provider_selection_per_step is False
+
+
 def test_menu_groups_schema_fields_and_registry_providers(tmp_path):
     session, _ = _menu(tmp_path)
     assert list(session.root) == ["LLM", "Documentation", "GitNexus"]
@@ -68,7 +88,7 @@ def test_menu_groups_schema_fields_and_registry_providers(tmp_path):
     )
     llm = session.root["LLM"]
     assert llm["Default provider"].description == "Provider for new sessions."
-    assert set(llm) == {"Default provider", "claude", "codex"}
+    assert set(llm) == {"Default provider", "Provider Selection Per Step", "claude", "codex"}
     assert set(llm["claude"]) == {
         "Configured",
         "Orchestrator model",
