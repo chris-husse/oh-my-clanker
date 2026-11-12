@@ -169,7 +169,6 @@ USER_FACING_SKILLS = (
 INTERNAL_SKILLS = (
     "create-mr",
     "get-mr-description",
-    "squash",
     "gitnexus-ensure",
     "gitnexus-index",
     "gitnexus-document",
@@ -259,13 +258,14 @@ def test_finish_skill_contract():
     ):
         assert needle in text, f"finish skill missing {needle!r}"
     assert "gh pr create" not in text  # never creates the MR/PR
-    # squash is delegated, then stages run check -> build -> verify -> review, then push
-    order = [text.index("`squash`"), text.index("`check`"), text.index("`build`")]
+    # rebase-main squashes and rebases, then stages run check -> build -> verify -> review,
+    # then push
+    order = [text.index("`rebase-main`"), text.index("`check`"), text.index("`build`")]
     order += [text.index("`verify`"), text.index("`review`"), text.index("`create-mr`")]
     assert order == sorted(order), (
-        "finish must order squash -> check -> build -> verify -> review -> push"
+        "finish must order rebase-main -> check -> build -> verify -> review -> push"
     )
-    stage = text.split("## Step 4", 1)[1].split("## Step 5", 1)[0]
+    stage = text.split("## Step 3", 1)[1].split("## Step 4", 1)[0]
     tracked_changes = stage.split("- A stage that changed TRACKED files", 1)[1].split(
         "- Unconfigured", 1
     )[0]
@@ -1036,10 +1036,9 @@ def test_mr_review_early_refusals_print_only_their_message():
     assert "no summary line" in summary
 
 
-def test_squash_skill_contract():
-    text = (ROOT / "skills" / "squash" / "SKILL.md").read_text()
-    for needle in ("reset --soft", "OMC_SQUASH", "rev-list --count"):
-        assert needle in text, f"squash skill missing {needle!r}"
+def test_squash_skill_is_retired():
+    # The squash is deterministic Python now (`omc internal rebase-main --squash`).
+    assert not (ROOT / "skills" / "squash").exists()
 
 
 def test_dogfood_build_stage():
@@ -1200,10 +1199,29 @@ def test_machine_contract_listings_include_knowledge_and_models():
         ".omc/config/AGENTS.md",
         ".omc/skills/review/SKILL.md",
         ".omc/skills/explain-context/SKILL.md",
+        ".claude/skills/regenerate-readme/SKILL.md",
     ):
         assert "OMC_KNOWLEDGE" in (ROOT / rel).read_text(), rel
         assert "OMC_DESIGN_RECORD" in (ROOT / rel).read_text(), rel
         assert "OMC_MODELS" in (ROOT / rel).read_text(), rel
+        assert "OMC_SQUASH" not in (ROOT / rel).read_text(), rel
+
+
+def test_ticket_sync_names_finish_follow_ups_step():
+    # ticket-sync's headless fallback names finish's next step by number; a
+    # finish renumbering must carry it along.
+    finish = (ROOT / "skills" / "finish" / "SKILL.md").read_text()
+    m = re.search(r"^## (Step \d+) — offer follow-ups", finish, re.MULTILINE)
+    assert m is not None
+    ticket_sync = (ROOT / "skills" / "ticket-sync" / "SKILL.md").read_text()
+    assert f"for `/omc:finish` it is {m.group(1)}." in ticket_sync
+
+
+def test_publish_route_squashes_before_rebasing():
+    for rel in ("src/omc/distribution/AGENTS.md", "skills/audit/SKILL.md"):
+        text = " ".join((ROOT / rel).read_text().split())
+        assert "rebase, squash" not in text, rel
+        assert "squash, rebase" in text, rel
 
 
 def test_investigate_skill_contract():
@@ -1495,9 +1513,31 @@ def test_dogfood_stage_and_context_skills():
 
 def test_rebase_main_skill_contract():
     text = (ROOT / "skills" / "rebase-main" / "SKILL.md").read_text()
-    for needle in ("omc internal rebase-main", "OMC_REBASE_MAIN", "rc 3", "conflict", "knowledge"):
+    for needle in (
+        "omc internal rebase-main",
+        "OMC_REBASE_MAIN",
+        "rc 3",
+        "conflict",
+        "knowledge",
+        "--squash",
+        "squashed",
+        "rc 2",
+        "git merge --abort",  # rc 2 also covers a resolved-but-unconcluded merge
+        "cherry-pick",
+        "rc 1",
+        "git reset --hard <old>",
+        "A standalone `/omc:rebase-main` always keeps history",
+        # The undo reset drops folded uncommitted edits from the tree; say where they live.
+        "folded uncommitted changes stay in <wip>",
+        "(they see the pre-rebase tree)",
+    ):
         assert needle in text, f"rebase-main skill missing {needle!r}"
     assert "rsync" not in text  # the mirror is Python; the skill never shells rsync
+    # finish's --squash on a feature branch in the primary (a plain clone) squashes
+    # and rebases there, but mirrors nothing; otherwise the primary stays a no-op.
+    flat = " ".join(text.split())
+    assert "The primary is never squashed" not in flat
+    assert "squashes and rebases but mirrors nothing" in flat
 
 
 def test_check_wt_config_skill_contract():
@@ -1511,9 +1551,40 @@ def test_check_wt_config_skill_contract():
 
 def test_finish_starts_with_rebase_main():
     text = (ROOT / "skills" / "finish" / "SKILL.md").read_text()
-    assert "rebase-main" in text
-    order = [text.index("`rebase-main`"), text.index("`squash`"), text.index("`create-mr`")]
-    assert order == sorted(order), "finish must order rebase-main -> squash -> push"
+    step2 = text.split("## Step 2", 1)[1].split("## Step 3", 1)[0]
+    assert "`rebase-main`" in step2 and "--squash" in step2
+    # finish works on any feature branch, a plain clone's primary included: Step 2
+    # never sends the user off to a worktree. A `note` verdict (only reachable on
+    # the base branch, which Step 0.1 refuses, or a detached HEAD in the primary)
+    # still stops — never improvised.
+    flat = " ".join(step2.split())
+    assert "only in a worktree" not in flat and "never squashed" not in flat
+    assert "a `note` verdict → stop and report it" in flat.lower()
+    assert "`squash`" not in text and "OMC_SQUASH" not in text  # the squash skill is gone
+    assert '"squashed"' in text  # continue only on the --squash verdict
+    # A branch whose changes are already on the base (squash-merged, or the user
+    # skipped the conflicting commit) leaves 0 commits after an ok verdict: amending
+    # and pushing then would publish the base's own tip as the feature branch.
+    assert "git rev-list --count origin/<base>..HEAD" in flat
+    # 0 has two causes; the wording must be true for both and name the way back.
+    assert (
+        "nothing is left over <base> — either the branch's changes are already on"
+        " <base>, or a conflict was skipped" in flat
+    )
+    assert "`pre-squash tip … (undo: …)`" in flat
+    assert "never amend or push" in flat.lower()
+    assert "any other count → stop and report it" in flat.lower()
+    # The report's N is Step 1's count: the commits finish found before squashing.
+    # (After a conflict resume the re-run reports "squashed": 1, so the verdict's
+    # value is not N on that path — Step 1's count is.)
+    step5 = " ".join(text.split("## Step 5", 1)[1].split("## Completion", 1)[0].split())
+    assert "squashed N→1, N being Step 1's count" in step5
+    assert "conflict resume" not in step5
+    assert text.index("`rebase-main`") < text.index("`create-mr`")
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert m is not None
+    description = m.group(1)
+    assert description.index("squash") < description.index("rebase")
 
 
 def test_integrate_skill_describes_global_section():
@@ -1775,7 +1846,7 @@ def test_readme_lists_mr_review():
 
 
 # --- Anti-stall contract -----------------------------------------------------
-# Composed omc flows nest 3-4 deep (start -> ticket-sync; finish -> squash/
+# Composed omc flows nest 3-4 deep (start -> ticket-sync; finish -> rebase-main/
 # stages/create-mr -> get-mr-description; design -> explain/grug; implement ->
 # plan/finish). Each sub-skill arrives as a fresh instruction block and ends in
 # a verdict line or a polished artifact, both of which read as "done". Runs

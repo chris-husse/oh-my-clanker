@@ -209,7 +209,7 @@ The rebase-main row and finish prose say only `.omc/docs/` is mirrored, while
 explain queries the primary graph.
 Explain optional check/build/verify/review semantics, order, standalone forms,
 no-op unconfigured project stages, always-on grug and human-review lenses,
-and Important fix/waiver into Deliberate complexity. Finish rebases/mirrors, squashes with
+and Important fix/waiver into Deliberate complexity. Finish squashes, rebases/mirrors, describes with
 MR description, gates before force-with-lease; user opens MR. Preserve finish
 without audit and close-worktree/review-comments/discuss continuations.
 
@@ -235,9 +235,11 @@ Exactly three Mermaid diagrams, each with a short explanatory paragraph:
    keyword-only warning disappears.
 3. Sequence for a real internal contract (e.g. design-record): skill → internal
    command → single prefixed JSON verdict → caller continues. List exactly
-   OMC_KNOWLEDGE, OMC_DESIGN_RECORD, OMC_STAGE, OMC_REBASE_MAIN, OMC_SQUASH,
+   OMC_KNOWLEDGE, OMC_DESIGN_RECORD, OMC_STAGE, OMC_REBASE_MAIN,
    OMC_SLUG, OMC_MODELS (`omc internal models`, resolved task choices); include OMC_TICKET from behavior layer. Distinguish CLI verdicts
-   from skill-emitted contracts. Exit codes 0 ok / 1 error / 2 refusal or usage /
+   from skill-emitted contracts. The finish squash count travels in the CLI's
+   rebase-main verdict (`squashed`); no skill emits a squash verdict.
+   Exit codes 0 ok / 1 error / 2 refusal or usage /
    3 bail (internal: inconclusive, caller judges).
    Use plain note text without semicolons: Mermaid treats semicolons as statement
    separators, including inside sequence notes. Example: "Continue on success or surface refusal".

@@ -218,6 +218,21 @@ def current_branch(ctx: ToolContext, root: str) -> str | None:
     return (cp.stdout or "").strip() or None
 
 
+def rebase_in_progress(ctx: ToolContext, root: str) -> bool:
+    """True only when git has an actual rebase checked out. `git rebase
+    --autostash` can REFUSE before starting (e.g. an untracked file the replay
+    would overwrite): it exits non-zero with HEAD still on the branch and no
+    rebase state, so a following `git rebase --abort` would just fail with
+    'no rebase in progress'. Detect the real thing via the state dirs git
+    itself uses (rebase-merge for the merge backend, rebase-apply for am)."""
+    for name in ("rebase-merge", "rebase-apply"):
+        cp = ctx.run([ctx.git_bin, "rev-parse", "--git-path", name], cwd=root)
+        p = (cp.stdout or "").strip() if cp.returncode == 0 else ""
+        if p and (Path(root) / p).exists():
+            return True
+    return False
+
+
 def _record_name_re(slug: str) -> re.Pattern[str]:
     # Anchored: a loose `*-<slug>-design.md` glob also matches a slug that
     # merely ENDS with this one (…-bar-<slug>-design.md). The date is fixed-width.
