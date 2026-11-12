@@ -14,6 +14,7 @@ from omc.wtconfig import (
     branch_for,
     ensure_wt_config,
     find_design_record,
+    rebase_in_progress,
     resolve_design_record,
     sanitize_slug,
     slug_for,
@@ -404,3 +405,47 @@ def test_resolve_outside_a_repo_is_an_error(tmp_path, monkeypatch):
     ctx = ToolContext.from_env({**os.environ, "HOME": str(tmp_path)})
     with pytest.raises(OmcError, match="not inside a git repository"):
         resolve_design_record(ctx, Config())
+
+
+def _repo_with_conflicting_branches(tmp_path):
+    """Branch `side` and `main` both rewrite f.txt; HEAD is on `side`."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def g(*args):
+        return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+
+    g("init", "-q")
+    g("config", "user.email", "t@t")
+    g("config", "user.name", "t")
+    (repo / "f.txt").write_text("base\n")
+    g("add", ".")
+    g("commit", "-qm", "base")
+    g("branch", "-M", "main")
+    g("checkout", "-q", "-b", "side")
+    (repo / "f.txt").write_text("side\n")
+    g("commit", "-qam", "side")
+    g("checkout", "-q", "main")
+    (repo / "f.txt").write_text("main\n")
+    g("commit", "-qam", "main")
+    g("checkout", "-q", "side")
+    return repo, g
+
+
+def test_rebase_in_progress_tracks_git_state_dirs(tmp_path):
+    import omc.watch as watch
+
+    repo, g = _repo_with_conflicting_branches(tmp_path)
+    ctx = ToolContext.from_env()
+    assert rebase_in_progress(ctx, str(repo)) is False
+    assert g("rebase", "main").returncode != 0  # conflict: the rebase pauses
+    assert rebase_in_progress(ctx, str(repo)) is True
+    assert g("rebase", "--abort").returncode == 0
+    assert rebase_in_progress(ctx, str(repo)) is False
+    # the am backend's state dir counts too
+    apply_dir = repo / g("rev-parse", "--git-path", "rebase-apply").stdout.strip()
+    apply_dir.mkdir()
+    assert rebase_in_progress(ctx, str(repo)) is True
+    # one copy: watch uses the shared helper, its private twin is gone
+    assert watch.rebase_in_progress is rebase_in_progress
+    assert not hasattr(watch, "_rebase_in_progress")

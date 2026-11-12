@@ -143,7 +143,7 @@ stage and someone later invokes `/omc:audit` again.
 
 ## Phase 3 — publish
 
-Invoke `finish` (`/omc:finish`) and follow its full flow: rebase, squash,
+Invoke `finish` (`/omc:finish`) and follow its full flow: squash, rebase,
 check, build, verify, review, describe, push, ticket sync and follow-ups. Its
 failing-stage behavior and conflict handoff apply unchanged. Do not stop at
 the audit commit; `finish` is the publication route.

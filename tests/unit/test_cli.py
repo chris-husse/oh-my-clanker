@@ -336,6 +336,15 @@ def test_readme_documents_optional_write_plan():
     assert "commits only the plan file and stops with the session open" in flat
 
 
+def test_readme_documents_squash_before_rebase():
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    assert "OMC_SQUASH" not in readme
+    finish = next(p for p in readme.split("\n\n") if "squash" in p and "--force-with-lease" in p)
+    assert finish.index("squash") < finish.index("rebase"), finish
+    # finish works on any feature branch: a plain clone's primary squashes too.
+    assert "never squashed" not in finish and "runs from the branch's worktree" not in finish
+
+
 def test_readme_documents_gitnexus_storage_contract():
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
     architecture = readme.split("## How omc is put together", 1)[1].split("## Prerequisites", 1)[0]

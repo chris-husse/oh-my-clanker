@@ -35,7 +35,7 @@ repo). In any other repository, ignore everything in this section.
   also `/omc:finish`'s first step). Never hand-copy or hand-delete `.omc/docs/`;
   its deterministic mirror lives in `omc internal rebase-main`. Existing
   worktree `.gitnexus/` content is left untouched.
-- **Publish through `/omc:finish`** — rebase, squash, project stage gates
+- **Publish through `/omc:finish`** — squash, rebase, project stage gates
   (`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review`), described
   push. Do not bypass a failing stage.
 - **Validation cadence**: `/omc:check` is the quick "am I on the right
@@ -80,7 +80,7 @@ repo). In any other repository, ignore everything in this section.
     three-line rubric over a one-line fixture needs no more), overridable
     through `CLAUDE_E2E_MODEL` / `CLAUDE_E2E_JUDGE_MODEL`.
 - **Machine contracts are sacred**: single-line `OMC_SLUG` / `OMC_STAGE` /
-  `OMC_SQUASH` / `OMC_REBASE_MAIN` / `OMC_TICKET` / `OMC_KNOWLEDGE` /
+  `OMC_REBASE_MAIN` / `OMC_TICKET` / `OMC_KNOWLEDGE` /
   `OMC_DESIGN_RECORD` / `OMC_MODELS` verdicts are
   parsed by tools — emit them exactly as their skills specify, never wrapped in
   markdown.

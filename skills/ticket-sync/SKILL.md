@@ -117,7 +117,7 @@ same turn.** Concretely, in order of preference:
    list then shows you the caller's next pending step.
 2. No task list exists (headless, or a caller that skipped it) → make the first
    tool call of the caller's next step directly. For `/omc:start` that is Step 3
-   (`git fetch origin <base>`); for `/omc:finish` it is Step 6.
+   (`git fetch origin <base>`); for `/omc:finish` it is Step 5.
 
 Do not ask the user whether to continue — the caller's flow is already
 authorized, and the verdict is not a checkpoint. Then carry on with the

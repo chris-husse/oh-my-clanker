@@ -1,9 +1,14 @@
 import json
 import os
+import re
 import stat
 import subprocess
 
+import pytest
+
 from omc.internal import run_internal
+from omc.toolctx import ToolContext
+from omc.wtconfig import rebase_in_progress
 
 
 def test_global_instructions_dispatch_writes_each_provider_from_installed_package(
@@ -89,7 +94,14 @@ def _advance_main(primary, content="two\n"):
     _git("push", "-q", "origin", "main", cwd=primary)
 
 
-def _run(args, cwd, tmp_path, capsys):
+def _git_out(*args, cwd):
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _run_err(args, cwd, tmp_path, capsys):
+    """`_run` plus stderr: the rc 1 / rc 2 paths print `error:` and no verdict."""
     old = os.getcwd()
     os.chdir(cwd)
     try:
@@ -99,9 +111,16 @@ def _run(args, cwd, tmp_path, capsys):
     finally:
         os.chdir(old)
         os.environ.pop("OMC_HOME", None)
-    out = capsys.readouterr().out
-    verdict_line = next((ln for ln in out.splitlines() if ln.startswith("OMC_REBASE_MAIN ")), None)
+    captured = capsys.readouterr()
+    verdict_line = next(
+        (ln for ln in captured.out.splitlines() if ln.startswith("OMC_REBASE_MAIN ")), None
+    )
     verdict = json.loads(verdict_line.split(" ", 1)[1]) if verdict_line else None
+    return rc, verdict, captured.out, captured.err
+
+
+def _run(args, cwd, tmp_path, capsys):
+    rc, verdict, out, _ = _run_err(args, cwd, tmp_path, capsys)
     return rc, verdict, out
 
 
@@ -452,6 +471,101 @@ def test_rebase_main_conflict_bails_rc3_and_leaves_rebase_paused(tmp_path, capsy
     assert "knowledge" in verdict
     cp = subprocess.run(["git", "status"], cwd=wt, capture_output=True, text=True)
     assert "rebase" in cp.stdout.lower()  # paused, not aborted
+
+
+def _conflicting_branch(primary, tmp_path, versions=("worktree version\n",)):
+    """A worktree whose commits each rewrite f.txt, and main's own f.txt change pushed."""
+    wt = _add_worktree(primary, tmp_path)
+    for i, text in enumerate(versions):
+        (wt / "f.txt").write_text(text)
+        _git("commit", "-qam", f"branch {i}", cwd=wt)
+    (primary / "f.txt").write_text("main version\n")
+    _git("commit", "-qam", "main change", cwd=primary)
+    _git("push", "-q", "origin", "main", cwd=primary)
+    return wt
+
+
+def test_rebase_main_dirty_tree_without_squash_is_rc1_not_a_fake_conflict(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    # ToolContext.child_env inherits the host's global git config; an autostashing
+    # host would otherwise rebase cleanly.
+    _git("config", "rebase.autoStash", "false", cwd=wt)
+    _advance_main(primary)
+    (wt / "f.txt").write_text("unstaged edit\n")
+    head = _git_out("rev-parse", "HEAD", cwd=wt)
+
+    rc, verdict, out, err = _run_err(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
+
+    assert rc == 1
+    assert verdict is None and "OMC_REBASE_MAIN" not in out
+    assert "git rebase origin/main failed" in err and "cannot rebase" in err
+    assert not rebase_in_progress(ToolContext.from_env(), str(wt))
+    assert _git_out("rev-parse", "HEAD", cwd=wt) == head
+    assert (wt / "f.txt").read_text() == "unstaged edit\n"
+
+
+@pytest.mark.parametrize("extra", [[], ["--squash"]], ids=["standalone", "squash"])
+@pytest.mark.parametrize("state", ["rebase", "merge"])
+def test_rebase_main_refuses_mid_rebase(tmp_path, capsys, state, extra):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _conflicting_branch(primary, tmp_path)
+    paused = subprocess.run(["git", state, "origin/main"], cwd=wt, capture_output=True)
+    assert paused.returncode != 0  # conflict: rebase paused, or merge left unmerged paths
+    # Any fetch would now fail rc 1, so rc 2 proves the guard runs before the network.
+    _git("remote", "set-url", "origin", str(tmp_path / "gone.git"), cwd=wt)
+    ctx = ToolContext.from_env()
+    head = _git_out("rev-parse", "HEAD", cwd=wt)
+    unmerged = _git_out("ls-files", "-u", cwd=wt)
+    assert unmerged
+    was_rebasing = rebase_in_progress(ctx, str(wt))
+    assert was_rebasing is (state == "rebase")
+
+    rc, verdict, _, err = _run_err(["rebase-main", "--base", "main", *extra], wt, tmp_path, capsys)
+
+    assert rc == 2 and verdict is None
+    assert "a rebase or merge is in progress" in err
+    assert _git_out("rev-parse", "HEAD", cwd=wt) == head
+    assert _git_out("ls-files", "-u", cwd=wt) == unmerged
+    assert rebase_in_progress(ctx, str(wt)) is was_rebasing
+
+
+_PAUSED_OPS = {
+    "merge": (["merge", "origin/main"], "MERGE_HEAD"),
+    "cherry-pick": (["cherry-pick", "origin/main"], "CHERRY_PICK_HEAD"),
+    "revert": (["revert", "--no-edit", "HEAD~1"], "REVERT_HEAD"),
+}
+
+
+@pytest.mark.parametrize("extra", [[], ["--squash"]], ids=["standalone", "squash"])
+@pytest.mark.parametrize("op", sorted(_PAUSED_OPS))
+def test_rebase_main_refuses_resolved_but_unfinished_operation(tmp_path, capsys, op, extra):
+    # Conflicts resolved and staged, the operation not concluded: no unmerged paths
+    # remain, yet a squash's `reset --soft` would fail mid-merge (or silently fold a
+    # half-done cherry-pick/revert).
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _conflicting_branch(primary, tmp_path, versions=("a\n", "b\n"))
+    argv, ref = _PAUSED_OPS[op]
+    paused = subprocess.run(["git", *argv], cwd=wt, capture_output=True)
+    assert paused.returncode != 0  # stopped on the f.txt conflict
+    (wt / "f.txt").write_text("resolved\n")
+    _git("add", "f.txt", cwd=wt)
+    assert _git_out("ls-files", "-u", cwd=wt) == ""
+    _git("rev-parse", "-q", "--verify", ref, cwd=wt)  # still in progress
+    _git("remote", "set-url", "origin", str(tmp_path / "gone.git"), cwd=wt)
+    head = _git_out("rev-parse", "HEAD", cwd=wt)
+    staged = _git_out("diff", "--cached", "--name-only", cwd=wt)
+
+    rc, verdict, out, err = _run_err(
+        ["rebase-main", "--base", "main", *extra], wt, tmp_path, capsys
+    )
+
+    assert rc == 2 and verdict is None and "OMC_REBASE_MAIN" not in out
+    assert "a rebase or merge is in progress" in err
+    assert "git merge --abort" in err and "git rebase --continue" in err
+    assert _git_out("rev-parse", "HEAD", cwd=wt) == head
+    assert _git_out("diff", "--cached", "--name-only", cwd=wt) == staged
+    _git("rev-parse", "-q", "--verify", ref, cwd=wt)
 
 
 def test_notify_command_is_unknown(capsys):
@@ -1027,3 +1141,358 @@ def test_refresh_move_during_analyze_releases_lock(tmp_path, capsys, monkeypatch
     )
     assert "OMC_KNOWLEDGE" not in captured.out
     assert flock_free(repo / ".git/omc-watch-busy.lock")
+
+
+def _commit_a(wt, *versions):
+    """One branch commit per version, each rewriting a.txt (no overlap with main)."""
+    for text in versions:
+        (wt / "a.txt").write_text(text)
+        _git("add", "a.txt", cwd=wt)
+        _git("commit", "-qm", f"a {text.strip()}", cwd=wt)
+
+
+def _resolve_and_continue(wt):
+    (wt / "f.txt").write_text("resolved\n")
+    _git("add", "f.txt", cwd=wt)
+    return subprocess.run(
+        ["git", "rebase", "--continue"],
+        cwd=wt,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_EDITOR": "true"},
+    )
+
+
+def test_rebase_main_squash_hits_a_conflict_once(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _conflicting_branch(primary, tmp_path, versions=("a\n", "b\n", "c\n"))
+
+    rc, verdict, _, _ = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys
+    )
+
+    assert rc == 3 and verdict["ok"] is False and verdict["conflicts"] == ["f.txt"]
+    cont = _resolve_and_continue(wt)
+    assert cont.returncode == 0, cont.stderr  # the one squashed commit was the only stop
+    assert not rebase_in_progress(ToolContext.from_env(), str(wt))
+    assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=wt) == "1"
+    assert _git_out("log", "-1", "--format=%s", cwd=wt) == "wip: squash of feature/x"
+
+
+def test_rebase_main_squash_rerun_after_resume_is_idempotent(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _conflicting_branch(primary, tmp_path, versions=("a\n", "b\n"))
+    rc, _, _, _ = _run_err(["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys)
+    assert rc == 3
+    assert _resolve_and_continue(wt).returncode == 0
+    tree = _git_out("rev-parse", "HEAD^{tree}", cwd=wt)
+
+    rc, verdict, _, _ = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys
+    )
+
+    assert rc == 0 and verdict["ok"] is True and verdict["squashed"] == 1
+    assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=wt) == "1"
+    assert _git_out("rev-parse", "HEAD^{tree}", cwd=wt) == tree
+    assert _git_out("log", "-1", "--format=%s", cwd=wt) == "wip: squash of feature/x"
+
+
+def test_rebase_main_squash_does_not_revert_main(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _commit_a(wt, "a1\n", "a2\n")
+    _advance_main(primary)  # main gains f2.txt after the branch was cut
+    old = _git_out("rev-parse", "--short", "HEAD", cwd=wt)
+
+    rc, verdict, _, err = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys
+    )
+
+    assert rc == 0 and verdict["ok"] is True and verdict["squashed"] == 2
+    assert list(verdict) == ["ok", "rebased", "synced", "shared", "squashed", "knowledge"]
+    assert verdict["rebased"].startswith(f"{old}..")
+    assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=wt) == "1"
+    assert (wt / "f2.txt").exists()  # nothing of main is reverted
+    assert _git_out("diff", "--name-only", "origin/main..HEAD", cwd=wt) == "a.txt"
+    assert f"pre-squash tip {old} (undo: git reset --hard {old})" in err
+    assert "folded uncommitted changes" not in err  # a clean tree loses nothing on undo
+
+
+def test_rebase_main_squash_folds_dirty_tree(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _commit_a(wt, "a1\n")
+    _advance_main(primary)
+    (wt / "f.txt").write_text("unstaged edit\n")
+    (wt / "new.txt").write_text("untracked\n")
+    old = _git_out("rev-parse", "--short", "HEAD", cwd=wt)
+
+    rc, verdict, _, err = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys
+    )
+
+    assert rc == 0 and verdict["squashed"] == 1
+    assert "→ folding uncommitted changes into the squash" in err
+    assert _git_out("status", "--porcelain", cwd=wt) == ""
+    assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=wt) == "1"
+    changed = set(_git_out("diff", "--name-only", "origin/main..HEAD", cwd=wt).split())
+    assert changed == {"a.txt", "f.txt", "new.txt"}
+    # `git reset --hard <old>` would drop the folded edits from the tree: the undo
+    # line names the squash commit (as created, pre-rebase) that still holds them.
+    m = re.search(
+        rf"pre-squash tip {old} \(undo: git reset --hard {old};"
+        r" folded uncommitted changes stay in ([0-9a-f]{4,})\)",
+        err,
+    )
+    assert m is not None, err
+    wip = m.group(1)
+    assert _git_out("cat-file", "-t", wip, cwd=wt) == "commit"
+    assert _git_out("show", f"{wip}:f.txt", cwd=wt) == "unstaged edit"
+    assert _git_out("show", f"{wip}:new.txt", cwd=wt) == "untracked"
+    assert _git_out("log", "-1", "--format=%s", wip, cwd=wt) == "wip: squash of feature/x"
+
+
+def test_rebase_main_squash_restores_commits_when_hook_rejects(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _commit_a(wt, "a1\n", "a2\n")
+    _advance_main(primary)  # before the hook: the shared config would reject main's commit too
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    hook = hooks / "commit-msg"
+    hook.write_text('#!/bin/sh\necho "hook says no" >&2\nexit 1\n')
+    hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
+    # Pinned in the repo's own config so a host-wide core.hooksPath cannot shadow it.
+    _git("config", "core.hooksPath", str(hooks), cwd=wt)
+    head = _git_out("rev-parse", "HEAD", cwd=wt)
+    old = _git_out("rev-parse", "--short", "HEAD", cwd=wt)
+    log = _git_out("log", "--format=%s", "-3", cwd=wt)
+
+    rc, verdict, out, err = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys
+    )
+
+    assert rc == 1 and verdict is None and "OMC_REBASE_MAIN" not in out
+    assert "hook says no" in err
+    assert f"pre-squash tip {old}" in err  # named on the failure path too
+    assert _git_out("rev-parse", "HEAD", cwd=wt) == head
+    assert _git_out("log", "--format=%s", "-3", cwd=wt) == log
+    assert not rebase_in_progress(ToolContext.from_env(), str(wt))
+
+
+def test_rebase_main_without_squash_keeps_history(tmp_path, capsys):
+    # Guard (green before and after): a standalone refresh never rewrites commits.
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _commit_a(wt, "a1\n", "a2\n")
+    _advance_main(primary)
+
+    rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
+
+    assert rc == 0 and verdict["ok"] is True and "squashed" not in verdict
+    assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=wt) == "2"
+
+
+_PRIMARY_NOOP_KEYS = ["ok", "rebased", "synced", "shared", "note", "knowledge"]
+
+
+def test_rebase_main_in_primary_on_base_is_noop_with_squash(tmp_path, capsys):
+    # On the base branch the primary belongs to `omc watch`: --squash changes nothing.
+    _, primary = _setup_primary_with_origin(tmp_path)
+    (primary / "f.txt").write_text("dirty\n")  # a squash would fold this
+    head = _git_out("rev-parse", "HEAD", cwd=primary)
+
+    rc, verdict, _ = _run(["rebase-main", "--base", "main", "--squash"], primary, tmp_path, capsys)
+
+    assert rc == 0 and list(verdict) == _PRIMARY_NOOP_KEYS
+    assert verdict["ok"] is True and verdict["note"] == "primary checkout — nothing to rebase"
+    assert verdict["rebased"] == "" and verdict["synced"] == [] and verdict["shared"] == []
+    assert _git_out("rev-parse", "HEAD", cwd=primary) == head
+    assert _git_out("status", "--porcelain", cwd=primary) == "M f.txt"
+
+
+def _primary_feature_branch(primary, *versions):
+    """The primary checkout on feature/x (cut before main advanced), its own commits
+    each rewriting a.txt — a plain clone finishing a branch with no worktree."""
+    _git("checkout", "-qb", "feature/x", cwd=primary)
+    _commit_a(primary, *versions)
+    _git("checkout", "-q", "main", cwd=primary)
+    _advance_main(primary)
+    _git("checkout", "-q", "feature/x", cwd=primary)
+
+
+def test_rebase_main_in_primary_squashes_a_feature_branch(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    _primary_feature_branch(primary, "a1\n", "a2\n")
+    old = _git_out("rev-parse", "--short", "HEAD", cwd=primary)
+
+    rc, verdict, _, err = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], primary, tmp_path, capsys
+    )
+
+    assert rc == 0 and verdict["ok"] is True and verdict["squashed"] == 2
+    assert list(verdict) == ["ok", "rebased", "synced", "shared", "squashed", "knowledge"]
+    assert verdict["synced"] == [] and verdict["shared"] == []  # the primary mirrors nothing
+    assert verdict["rebased"].startswith(f"{old}..")
+    assert f"pre-squash tip {old} (undo: git reset --hard {old})" in err
+    assert _git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=primary) == "feature/x"
+    assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=primary) == "1"
+    assert _git_out("merge-base", "origin/main", "HEAD", cwd=primary) == _git_out(
+        "rev-parse", "origin/main", cwd=primary
+    )
+    assert _git_out("log", "-1", "--format=%s", cwd=primary) == "wip: squash of feature/x"
+    assert _git_out("diff", "--name-only", "origin/main..HEAD", cwd=primary) == "a.txt"
+    assert (primary / "f2.txt").exists()  # nothing of main is reverted
+
+
+def test_rebase_main_in_primary_feature_branch_conflict_bails_rc3(tmp_path, capsys):
+    # rc 3 semantics are the worktree's: paused once, resumable, re-run idempotent.
+    _, primary = _setup_primary_with_origin(tmp_path)
+    _git("checkout", "-qb", "feature/x", cwd=primary)
+    for i, text in enumerate(("a\n", "b\n")):
+        (primary / "f.txt").write_text(text)
+        _git("commit", "-qam", f"branch {i}", cwd=primary)
+    _git("checkout", "-q", "main", cwd=primary)
+    (primary / "f.txt").write_text("main version\n")
+    _git("commit", "-qam", "main change", cwd=primary)
+    _git("push", "-q", "origin", "main", cwd=primary)
+    _git("checkout", "-q", "feature/x", cwd=primary)
+
+    rc, verdict, _, _ = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], primary, tmp_path, capsys
+    )
+
+    assert rc == 3 and verdict["ok"] is False and verdict["conflicts"] == ["f.txt"]
+    assert rebase_in_progress(ToolContext.from_env(), str(primary))  # paused, not aborted
+    assert _resolve_and_continue(primary).returncode == 0
+    rc, verdict, _, _ = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], primary, tmp_path, capsys
+    )
+    assert rc == 0 and verdict["squashed"] == 1 and "note" not in verdict
+    assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=primary) == "1"
+
+
+def test_rebase_main_in_primary_feature_branch_without_squash_is_noop(tmp_path, capsys):
+    # A standalone refresh in the primary stays the no-op, feature branch or not.
+    _, primary = _setup_primary_with_origin(tmp_path)
+    _primary_feature_branch(primary, "a1\n", "a2\n")
+    head = _git_out("rev-parse", "HEAD", cwd=primary)
+
+    rc, verdict, _ = _run(["rebase-main", "--base", "main"], primary, tmp_path, capsys)
+
+    assert rc == 0 and list(verdict) == _PRIMARY_NOOP_KEYS
+    assert verdict["note"] == "primary checkout — nothing to rebase"
+    assert _git_out("rev-parse", "HEAD", cwd=primary) == head
+    assert _git_out("rev-list", "--count", "main..HEAD", cwd=primary) == "2"
+
+
+def test_rebase_main_squash_nothing_to_squash(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _advance_main(primary)
+
+    rc, verdict, _, err = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys
+    )
+
+    assert rc == 0 and verdict["squashed"] == 0
+    assert "· nothing to squash" in err
+    assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=wt) == "0"
+    assert _git_out("rev-parse", "HEAD", cwd=wt) == _git_out("rev-parse", "origin/main", cwd=wt)
+
+
+def test_rebase_main_squash_fails_closed_when_git_status_fails(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _advance_main(primary)
+    (wt / "f.txt").write_text("unstaged edit\n")
+    head = _git_out("rev-parse", "HEAD", cwd=wt)
+    # Only `git status` parses this key: an invalid value makes it exit 128 while
+    # merge-base and rev-list still succeed — a failed status must not read as clean.
+    _git("config", "status.showUntrackedFiles", "bogus", cwd=wt)
+
+    rc, verdict, out, err = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys
+    )
+
+    assert rc == 1 and verdict is None and "OMC_REBASE_MAIN" not in out
+    assert "error: git status failed:" in err
+    assert "· nothing to squash" not in err
+    assert _git_out("rev-parse", "HEAD", cwd=wt) == head
+
+
+def test_rebase_main_squash_reports_a_failed_rollback(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _commit_a(wt, "a1\n", "a2\n")
+    _advance_main(primary)
+    mb = _git_out("rev-parse", "HEAD~2", cwd=wt)
+    old = _git_out("rev-parse", "--short", "HEAD", cwd=wt)
+    # `reset --soft` takes no index lock, only the branch ref's: a hook that leaves
+    # that lock behind makes the rollback after the rejected commit fail for sure.
+    common = _git_out("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=wt)
+    ref_lock = f"{common}/refs/heads/feature/x.lock"
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    hook = hooks / "commit-msg"
+    hook.write_text(f"#!/bin/sh\n: > '{ref_lock}'\necho 'hook says no' >&2\nexit 1\n")
+    hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
+    _git("config", "core.hooksPath", str(hooks), cwd=wt)
+
+    rc, verdict, out, err = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys
+    )
+
+    assert rc == 1 and verdict is None and "OMC_REBASE_MAIN" not in out
+    assert "could not restore the original commits" in err
+    assert f"HEAD is at the merge-base {mb}" in err
+    assert f"git reset --soft {old}" in err
+    assert _git_out("rev-parse", "HEAD", cwd=wt) == mb
+    # The printed command really restores them once the lock is gone.
+    os.remove(ref_lock)
+    _git("reset", "--soft", old, cwd=wt)
+    assert _git_out("log", "--format=%s", "-2", cwd=wt) == "a a2\na a1"
+
+
+def test_rebase_main_squash_folds_dirty_tree_without_commits(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _advance_main(primary)
+    (wt / "f.txt").write_text("unstaged edit\n")
+
+    rc, verdict, _, err = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys
+    )
+
+    assert rc == 0 and verdict["ok"] is True and verdict["squashed"] == 0
+    assert "→ folding uncommitted changes into the squash" in err
+    assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=wt) == "1"
+    assert _git_out("diff", "--name-only", "origin/main..HEAD", cwd=wt) == "f.txt"
+    assert _git_out("status", "--porcelain", cwd=wt) == ""
+
+
+def test_rebase_main_squash_refuses_a_branch_that_changes_nothing(tmp_path, capsys):
+    _, primary = _setup_primary_with_origin(tmp_path)
+    wt = _add_worktree(primary, tmp_path)
+    _commit_a(wt, "a1\n")
+    _git("rm", "-q", "a.txt", cwd=wt)
+    _git("commit", "-qm", "drop a", cwd=wt)  # the two commits cancel out
+    _advance_main(primary)
+    mb = _git_out("merge-base", "HEAD", "main", cwd=wt)
+    head = _git_out("rev-parse", "HEAD", cwd=wt)
+    old = _git_out("rev-parse", "--short", "HEAD", cwd=wt)
+    log = _git_out("log", "--format=%s", "-2", cwd=wt)
+
+    rc, verdict, out, err = _run_err(
+        ["rebase-main", "--base", "main", "--squash"], wt, tmp_path, capsys
+    )
+
+    assert rc == 1 and verdict is None and "OMC_REBASE_MAIN" not in out
+    assert (
+        f"error: the branch changes nothing over the merge-base {mb}"
+        f" (pre-squash tip {old}) — nothing to squash or publish"
+    ) in err
+    assert "squash commit failed" not in err
+    assert _git_out("rev-parse", "HEAD", cwd=wt) == head
+    assert _git_out("log", "--format=%s", "-2", cwd=wt) == log
+    assert not rebase_in_progress(ToolContext.from_env(), str(wt))

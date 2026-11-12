@@ -1,6 +1,6 @@
 ---
 name: finish
-description: Finish the current feature branch - rebase onto the base, squash to one commit whose message is the MR description, run the project's check/build/verify/review stages, push, then offer to close the worktree, address review comments, or discuss. Use when work on a ticket is done and ready for review.
+description: Finish the current feature branch - squash to one commit, rebase onto the base, run the project's check/build/verify/review stages, describe the commit as the MR and push, then offer to close the worktree, address review comments, or discuss. Use when work on a ticket is done and ready for review.
 ---
 
 # omc finish
@@ -11,11 +11,11 @@ but any feature branch works.
 ## Step 0 — externalize the flow (before the gate, no exceptions)
 
 **Write every step below into the task list now**, as your first action:
-gate → anything-to-finish → rebase-main → squash → the four project stages →
+gate → anything-to-finish → rebase-main --squash → the four project stages →
 create-mr (describe + push) → ticket-sync (review phase) → offer follow-ups.
 Mark each completed as you pass it.
 
-This is the longest composed flow in omc: nine sub-skills, each arriving as a
+This is the longest composed flow in omc: eight sub-skills, each arriving as a
 fresh instruction block that reads like a new user request and pushes this one
 out of view. Every one of them ends in a verdict line or an artifact, and every
 one of those is an argument to the next step — never a place to stop. The task
@@ -39,24 +39,39 @@ often leaving the commit still reading `wip: squash of…`.
 `git fetch origin <base>`, then count `git rev-list --count origin/<base>..HEAD`.
 Zero commits and a clean tree → "nothing to finish on this branch", stop.
 
-## Step 2 — rebase onto fresh base + refresh the snapshot
+## Step 2 — squash and rebase onto the fresh base + refresh the snapshot
 
-Invoke the **`rebase-main`** skill — it runs `omc internal rebase-main`,
-which rebases onto `origin/<base>` AND re-mirrors `.omc/docs` from the primary
-checkout. The `.gitnexus/` graph stays primary for `/omc:explain` queries.
-On its **rc 3 bail**
-(conflicts, rebase left paused): hand control to the user per that skill —
-never resolve conflicts silently, never `--abort` on their behalf. Only
-continue to Step 3 once the rebase has completed cleanly.
+Invoke the **`rebase-main`** skill **with `--squash`** (`omc internal
+rebase-main --squash`) — it folds uncommitted changes (with notice),
+squashes the branch to one `wip:` commit over
+`merge-base origin/<base> HEAD`, rebases that single commit onto
+`origin/<base>`, and re-mirrors `.omc/docs` from the primary checkout
+(in the primary checkout itself — a plain clone — it squashes and rebases
+the same way and mirrors nothing). Only one commit is replayed, so a
+conflict with the base stops the rebase at most once. The `.gitnexus/`
+graph stays primary for `/omc:explain` queries.
 
-## Step 3 — squash to one commit
+- **rc 3 bail** (conflicts, rebase left paused): hand control to the user
+  per that skill — never resolve conflicts silently, never `--abort` on
+  their behalf. Once the rebase has completed, re-run the `rebase-main`
+  skill with `--squash` (idempotent: the branch is already one commit over
+  the base) before continuing.
+- **rc 1 or rc 2** (the fetch failed, git refused the rebase, the squash
+  failed — e.g. a hook rejected the squash commit — or a rebase or merge
+  is already in progress): surface the stderr message and stop.
+- On an `"ok": true` verdict carrying `"squashed"`, count
+  `git rev-list --count origin/<base>..HEAD`: **1** → continue to Step 3;
+  **0** → say "nothing is left over <base> — either the branch's changes
+  are already on <base>, or a conflict was skipped; the stderr
+  `pre-squash tip … (undo: …)` line restores the original commits" and
+  stop. Never amend or push then — that would publish the base's own tip
+  as this branch. Any other count → stop and report it.
+- A `note` verdict → stop and report it (it is reachable only on the base
+  branch, which Step 0.1 refuses, or on a detached HEAD in the primary —
+  e.g. a rebase still paused there after an rc 3 bail; finish the rebase
+  first).
 
-Invoke the internal **`squash`** skill with the base — it folds uncommitted
-changes (with notice), does the `reset --soft`, and leaves exactly one
-temp-message commit on `origin/<base>..HEAD`. An `OMC_SQUASH {"ok": false}`
-outcome → surface its message and stop.
-
-## Step 4 — project stages: check → build → verify → review
+## Step 3 — project stages: check → build → verify → review
 
 Invoke the **`check`**, **`build`**, **`verify`**, and **`review`** skills,
 in that order — check first, as the cheap fail-fast gate: a broken unit
@@ -77,7 +92,7 @@ project's own `.omc/skills/<stage>/SKILL.md`:
   proxy also runs omc's own grug and human-review lenses on every project,
   so `review` can report `"configured": false, "passed": false`.
 
-## Step 5 — describe and push
+## Step 4 — describe and push
 
 Invoke **`create-mr`** — it generates the MR description
 (via `get-mr-description`), amends it into the squashed commit, and pushes
@@ -87,19 +102,20 @@ the commit carries the full description.
 Then, once `create-mr` reports a successful push, invoke the internal
 **`ticket-sync`** skill with phase `review` — it moves the ticket (key
 derived from the branch name) to an "In Review"-equivalent column. Any
-failure: report its one-line message and continue to Step 6 — the push
-already succeeded, and the ticket can be moved by hand. The Step 6
+failure: report its one-line message and continue to Step 5 — the push
+already succeeded, and the ticket can be moved by hand. The Step 5
 "address review comments" loop re-runs `create-mr` WITHOUT re-invoking
 ticket-sync (the ticket is already in review).
 
 Its `OMC_TICKET {…}` verdict is an argument to you, not the end of your turn:
 whatever it says, your very next action after it is a tool call that begins
-Step 6. `finish` is not complete until the user has been offered the
+Step 5. `finish` is not complete until the user has been offered the
 follow-ups.
 
-## Step 6 — offer follow-ups
+## Step 5 — offer follow-ups
 
-Report what happened (rebased onto `<base>`, squashed N→1, stage outcomes,
+Report what happened (squashed N→1, N being Step 1's count — 0 means only
+uncommitted changes were folded; rebased onto `<base>`, stage outcomes,
 pushed, title),
 then offer exactly these three options (interactively where the harness
 supports it; in a non-interactive/headless run, list them and end):
@@ -117,7 +133,7 @@ supports it; in a non-interactive/headless run, list them and end):
 
 ## Completion contract
 
-`finish` is complete only once Step 6 has run and the branch is pushed with a
+`finish` is complete only once Step 5 has run and the branch is pushed with a
 real description. Before ending the turn, read the task list: any step still
 pending means you are not done — continue with it. A branch left squashed under
 a `wip:` message, or pushed but with the ticket never moved, is a failed run,

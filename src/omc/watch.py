@@ -44,7 +44,7 @@ from .skills_source import skill_prompt
 from .taskmodels import orchestrator
 from .toolctx import ToolContext
 from .watchlock import WATCH_BAIL_MSG, acquire_busy_narrated, acquire_instance, watch_locks
-from .wtconfig import current_branch, ensure_wt_config, primary_root, repo_root
+from .wtconfig import current_branch, ensure_wt_config, primary_root, rebase_in_progress, repo_root
 
 
 def _say(msg: str) -> None:
@@ -54,20 +54,6 @@ def _say(msg: str) -> None:
 def _out(ctx: ToolContext, argv: list[str], cwd: str) -> str:
     cp = ctx.run(argv, cwd=cwd)
     return (cp.stdout or "").strip() if cp.returncode == 0 else ""
-
-
-def _rebase_in_progress(ctx: ToolContext, root: str) -> bool:
-    """True only when git has an actual rebase checked out. `git rebase
-    --autostash` can REFUSE before starting (e.g. an untracked file the replay
-    would overwrite): it exits non-zero with HEAD still on the branch and no
-    rebase state, so a following `git rebase --abort` would just fail with
-    'no rebase in progress'. Detect the real thing via the state dirs git
-    itself uses (rebase-merge for the merge backend, rebase-apply for am)."""
-    for name in ("rebase-merge", "rebase-apply"):
-        p = _out(ctx, [ctx.git_bin, "rev-parse", "--git-path", name], root)
-        if p and (Path(root) / p).exists():
-            return True
-    return False
 
 
 def _decode(v: object) -> str:
@@ -331,7 +317,7 @@ def _tick(
         cp = ctx.run([ctx.git_bin, "rebase", "--autostash", f"origin/{base}"], cwd=root)
         if cp.returncode != 0:
             why = (cp.stderr or "").strip()[:200]
-            if _rebase_in_progress(ctx, root):
+            if rebase_in_progress(ctx, root):
                 # A rebase actually started then hit a conflict: abort restores
                 # HEAD and the autostash.
                 abort = ctx.run([ctx.git_bin, "rebase", "--abort"], cwd=root)
