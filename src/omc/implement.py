@@ -145,5 +145,6 @@ def run_implement(
         startup_argv=plan.session_argv,
         title_seq=plan.title_seq,
         title_argv=plan.title_argv,
+        origin_cwd=plan.origin_cwd,
     )
     return 0  # pragma: no cover - unreachable after execvp

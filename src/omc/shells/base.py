@@ -34,6 +34,7 @@ class Shell(ABC):
         startup_argv: list[str],
         title_seq: str,
         title_argv: list[str] | None = None,
+        origin_cwd: str | None = None,
     ) -> tuple[list[str], dict[str, str]]: ...
 
     def exec_env_overrides(self, tmpdir: str | None) -> dict[str, str]:
@@ -47,6 +48,7 @@ class Shell(ABC):
         startup_argv: list[str],
         title_seq: str,
         title_argv: list[str] | None = None,
+        origin_cwd: str | None = None,
     ) -> None:  # pragma: no cover - effectful exec, E2E-verified
         argv, extra_files = self.build_invocation(
             cwd=cwd,
@@ -54,6 +56,7 @@ class Shell(ABC):
             startup_argv=startup_argv,
             title_seq=title_seq,
             title_argv=title_argv,
+            origin_cwd=origin_cwd,
         )
         tmpdir: str | None = None
         if extra_files:

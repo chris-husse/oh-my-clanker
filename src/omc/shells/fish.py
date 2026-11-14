@@ -19,6 +19,26 @@ _ITERM2_HOOK_PREDICATE = (
 )
 
 
+def _herdr_block(origin_cwd: str | None) -> str:
+    """Spec 2026-11-14 §4.2: host-less OSC 7 reports for herdr's sidebar, guarded in fish.
+
+    Reports $PWD now and on every later cd, and the origin when the shell exits.
+    """
+    parts = [
+        'if test "$TERM_PROGRAM" = herdr',
+        "function __omc_herdr_report; "
+        "printf '\\e]7;file://%s\\a' (string escape --style=url -- $argv[1]); end",
+        "__omc_herdr_report $PWD",
+        "function __omc_herdr_pwd --on-variable PWD; __omc_herdr_report $PWD; end",
+    ]
+    if origin_cwd:
+        parts.append(
+            "function __omc_herdr_exit --on-event fish_exit; "
+            f"__omc_herdr_report {shlex.quote(origin_cwd)}; end"
+        )
+    return "; ".join([*parts, "end"])
+
+
 class FishShell(Shell):
     name = "fish"
 
@@ -26,7 +46,9 @@ class FishShell(Shell):
     def detect(cls, env: Mapping[str, str]) -> bool:
         return os.path.basename(env.get("SHELL", "")) == "fish"
 
-    def build_invocation(self, *, cwd, title, startup_argv, title_seq, title_argv=None):
+    def build_invocation(
+        self, *, cwd, title, startup_argv, title_seq, title_argv=None, origin_cwd=None
+    ):
         if title_argv:
             helper = shlex.join(title_argv)
             inline = [
@@ -67,6 +89,7 @@ class FishShell(Shell):
                 f"cd {shlex.quote(cwd)}",
                 f"printf '%s' {shlex.quote(title_seq)}",
             ]
+        parts.append(_herdr_block(origin_cwd))
         startup = joined_startup(startup_argv)
         if startup:
             parts.append(startup)

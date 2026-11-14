@@ -30,6 +30,8 @@ class SessionPlan:
     title_seq: str
     title_argv: list[str]
     shell_argv: list[str]
+    # The launch directory (PWD), reported to herdr when the session shell exits.
+    origin_cwd: str | None
 
 
 def session_plan(
@@ -58,12 +60,14 @@ def session_plan(
         session_argv = ["direnv", "exec", ".", *session_argv]
     title_seq = detect_terminal(ctx.env).title_sequence(title)
     title_argv = terminal_title_argv()
+    origin_cwd = ctx.env.get("PWD") or None
     shell_argv, _ = detect_shell(ctx.env).build_invocation(
         cwd=cwd,
         title=title,
         startup_argv=session_argv,
         title_seq=title_seq,
         title_argv=title_argv,
+        origin_cwd=origin_cwd,
     )
     return SessionPlan(
         session_argv=session_argv,
@@ -76,6 +80,7 @@ def session_plan(
         title_seq=title_seq,
         title_argv=title_argv,
         shell_argv=shell_argv,
+        origin_cwd=origin_cwd,
     )
 
 

@@ -184,8 +184,10 @@ def test_interactive_execs_in_worktree_with_slug_env(tmp_path, monkeypatch):
         lambda env: SimpleNamespace(exec_interactive=lambda **kwargs: seen.append(kwargs)),
     )
     monkeypatch.setattr(review, "os", SimpleNamespace(environ={}, path=os.path))
+    ctx.env["PWD"] = "/launch dir"
     assert run_review(ctx, Config()) == 0
     assert os.path.realpath(seen[0]["cwd"]) == os.path.realpath(str(repo))
+    assert seen[0]["origin_cwd"] == "/launch dir"
     assert seen[0]["title"] == f"feature/{SLUG}"
     assert seen[0]["startup_argv"] == [
         "claude",

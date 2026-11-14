@@ -34,7 +34,7 @@ Claude Code users can skip step 3: `omc configure`, `omc update`, `omc design`, 
 
 Inside your project, run `/omc:integrate` in a session. It walks through check/build/verify/review, explain-context and investigation-context skills using your codebase; rerun it after updates or when the integration feels off.
 
-On macOS with fish and iTerm2, omc pins each tab's title to its branch; see [Shell integration](docs/shell-integration.md).
+On macOS with fish and iTerm2, omc pins each tab's title to its branch, and inside herdr it keeps the sidebar's worktree folder and branch current; see [Shell integration](docs/shell-integration.md).
 
 ## Update
 

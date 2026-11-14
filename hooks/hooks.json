@@ -1,0 +1,7 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "[ \"${TERM_PROGRAM-}\" = herdr ] && omc internal herdr-cwd >/dev/null 2>&1 || true", "timeout": 5 } ] }
+    ]
+  }
+}

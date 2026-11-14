@@ -124,6 +124,24 @@ RUN set -eux; \
     cd / && rm -rf /tmp/embed-fixture; \
     test ! -e /root/.gitnexus/embedding-runtime
 
+# herdr (sidebar E2E, spec 2026-11-14) + the shells its launch blocks target.
+# Static release binaries; bump HERDR_VERSION and both sha256 values together.
+ARG HERDR_VERSION=0.9.5
+RUN set -eux; \
+    apt-get update && apt-get install -y --no-install-recommends fish zsh procps \
+      && rm -rf /var/lib/apt/lists/*; \
+    case "${TARGETARCH}" in \
+      amd64) HERDR_ASSET=herdr-linux-x86_64; \
+             HERDR_SHA256=14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d ;; \
+      arm64) HERDR_ASSET=herdr-linux-aarch64; \
+             HERDR_SHA256=17d7536f2da50859523680ef279dffcac8e4a235f4e46fe8da6c2ec44141897c ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -LsSf -o /tmp/herdr "https://github.com/herdrdev/herdr/releases/download/v${HERDR_VERSION}/${HERDR_ASSET}"; \
+    echo "${HERDR_SHA256}  /tmp/herdr" | sha256sum -c -; \
+    install -m 0755 /tmp/herdr /usr/local/bin/herdr; rm /tmp/herdr; \
+    herdr --version
+
 # the repo under test + omc installed from it
 COPY . /repo
 # Built from a worktree, /repo/.git is a pointer file to a host path that does

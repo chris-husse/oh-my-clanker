@@ -17,7 +17,10 @@ class ShShell(Shell):
     def detect(cls, env: Mapping[str, str]) -> bool:
         return True
 
-    def build_invocation(self, *, cwd, title, startup_argv, title_seq, title_argv=None):
+    def build_invocation(
+        self, *, cwd, title, startup_argv, title_seq, title_argv=None, origin_cwd=None
+    ):
+        # No portable exit hook in plain sh: origin_cwd is accepted and ignored (spec §4.3).
         startup = joined_startup(startup_argv)
         title_command = joined_title(title_argv, title)
         command = (

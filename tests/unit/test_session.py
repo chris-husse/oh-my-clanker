@@ -41,6 +41,22 @@ def test_session_plan_defaults_to_unprefixed_provider_argv():
     assert plan.session_argv == ["claude", "-n", "s", "--model", "opus", "seed"]
 
 
+def test_session_plan_carries_pwd_as_origin_cwd():
+    ctx = ToolContext.from_env(
+        {"HOME": "/nowhere", "PATH": "/nowhere", "SHELL": "/usr/bin/fish", "PWD": "/launch dir"}
+    )
+    plan = session_plan(
+        ctx, Config(), seed="s", slug="s", session_name="s", title="t", cwd="/w/tree"
+    )
+    assert plan.origin_cwd == "/launch dir"
+    assert "__omc_herdr_report '/launch dir'; end" in plan.shell_argv[3]
+
+
+def test_session_plan_origin_cwd_is_none_without_pwd():
+    plan = session_plan(_ctx(), Config(), seed="s", slug="s", session_name="s", title="t", cwd=".")
+    assert plan.origin_cwd is None
+
+
 @pytest.mark.parametrize("direnv, prefix", [(False, []), (True, ["direnv", "exec", "."])])
 def test_run_headless_prefixes_provider_argv_only_when_enabled(direnv, prefix):
     from types import SimpleNamespace

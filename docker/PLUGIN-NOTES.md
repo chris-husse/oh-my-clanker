@@ -1,3 +1,33 @@
+## Plugin hooks/ directory (2026-11-14)
+
+The plugin gained a root `hooks/hooks.json` with one SessionStart hook
+(`[ "${TERM_PROGRAM-}" = herdr ] && omc internal herdr-cwd >/dev/null 2>&1 || true`,
+timeout 5). Observed in the newest E2E image (`omc-e2e:d742ac141aec`, built
+2026-11-14), token-free, read-only `docker run --rm` commands:
+
+**Claude Code.** `claude plugin list --json` lists `omc@oh-my-clanker`
+0.1.46 as `enabled: true` with no `errors` key (installPath
+`/root/.claude/plugins/cache/oh-my-clanker/omc/0.1.46`). Finding `hooks.json`
+under `/root/.claude/plugins` with an `omc` path returns
+`.../omc/0.1.46/hooks/hooks.json`, with the SessionStart command as it stood
+at that build (the same command without the leading `TERM_PROGRAM` test). The
+installed copy carries `hooks/`, and the plugin loads cleanly with it.
+
+**Codex.** `codex plugin list --json` shows `omc@oh-my-clanker` 0.1.46
+`installed` and `enabled` (local source `/repo`). `find / -xdev -path
+"*omc*/hooks/hooks.json" -not -path "/repo/*"` finds
+`/root/.codex/plugins/cache/oh-my-clanker/omc/0.1.46/hooks/hooks.json`, so
+`codex plugin add` copied `hooks/` into its cache (the copy is the whole repo
+tree). The image build's `codex_plugin_payload record` step in
+`setup-plugins.sh` passed, since the image was built. Codex has no omc hook
+wiring of its own here: the file is carried but this record does not show
+Codex firing it.
+
+**Not proven here.** That Claude actually fires the hook at session start is
+covered only by `test_claude_session_start_hook_reports_session_cwd`. It needs
+an LLM token and was not run on this host. The above shows only that the
+install carries the file.
+
 ## Parallel E2E, golden path and stage snapshots (2026-10-01)
 
 The live lifecycle matrix (ten cases in `test_e2e_lifecycle.py`) took over an

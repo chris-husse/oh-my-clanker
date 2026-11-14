@@ -44,7 +44,7 @@ _USAGE = (
     "|query|context|impact|cypher> [args…]"
     " | dependency <ensure|document|list> [args…]"
     " | skills list NAME"
-    " | build-progress LOGFILE}"
+    " | build-progress LOGFILE | herdr-cwd}"
 )
 
 _GITNEXUS_VERBS = ("query", "context", "impact", "cypher")
@@ -527,6 +527,13 @@ def run_internal(argv: list[str]) -> int:
             print(_USAGE, file=sys.stderr)
             return 2
         return _models(ToolContext.from_env())
+    if cmd == "herdr-cwd":
+        if rest:
+            print(_USAGE, file=sys.stderr)
+            return 2
+        from .herdr import run_herdr_cwd
+
+        return run_herdr_cwd(ToolContext.from_env(), sys.stdin)
     if cmd == "global-instructions":
         if len(rest) != 1:
             print(_USAGE, file=sys.stderr)
