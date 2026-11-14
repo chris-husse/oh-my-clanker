@@ -1597,7 +1597,7 @@ def test_rebase_main_skill_contract():
         "--squash",
         "squashed",
         "rc 2",
-        "git merge --abort",  # rc 2 also covers a resolved-but-unconcluded merge
+        "git merge --continue",  # rc 2 also covers a resolved-but-unconcluded merge
         "cherry-pick",
         "rc 1",
         "git reset --hard <old>",
@@ -1605,6 +1605,8 @@ def test_rebase_main_skill_contract():
         # The undo reset drops folded uncommitted edits from the tree; say where they live.
         "folded uncommitted changes stay in <wip>",
         "(they see the pre-rebase tree)",
+        # The re-run's pre-squash-tip line names the rebased tip; it is not the undo.
+        "not the way back",
     ):
         assert needle in text, f"rebase-main skill missing {needle!r}"
     assert "rsync" not in text  # the mirror is Python; the skill never shells rsync
@@ -1660,6 +1662,57 @@ def test_finish_starts_with_rebase_main():
     assert m is not None
     description = m.group(1)
     assert description.index("squash") < description.index("rebase")
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_rebase_conflicts_are_resolved_not_handed_back():
+    # D9: the agent resolves an agent-run rebase's conflicts; it never asks whether to
+    # continue, hand over or give up. Banned phrases catch the old handoff verbatim.
+    for path in sorted((ROOT / "skills").glob("*/SKILL.md")):
+        flat = _flat(path.read_text()).lower()
+        for phrase in (
+            "never resolve conflicts silently",
+            "hand control to the user",
+            "conflicts → stop",
+            "conflict handoff",
+        ):
+            assert phrase not in flat, f"{path.parent.name} still hands conflicts back: {phrase!r}"
+
+    # rebase-main owns the one rule (D3).
+    rebase = _flat((ROOT / "skills" / "rebase-main" / "SKILL.md").read_text())
+    for needle in (
+        "not a question",
+        "REBASE_HEAD",
+        # merge-base against HEAD is origin/<base> itself while the rebase is paused
+        "git merge-base origin/<base> REBASE_HEAD",
+        "GIT_EDITOR=true git rebase --continue",
+        # leftover markers, checked mechanically and scoped to the resolved paths
+        "git diff --cached --check --",
+        "/omc:check",  # D7: validate a resolution made outside finish
+    ):
+        assert needle in rebase, f"rebase-main rule missing {needle!r}"
+    assert "never `git rebase --abort`" in rebase.lower()
+    assert "or `git rebase --abort` if they choose" not in rebase
+
+    # finish follows the rule for rc 3 and rc 2; rc 1 still stops.
+    finish = (ROOT / "skills" / "finish" / "SKILL.md").read_text()
+    step2 = _flat(finish.split("## Step 2", 1)[1].split("## Step 3", 1)[0])
+    assert "resolve it per the `rebase-main` skill's rule" in step2
+    assert "rc 1" in step2 and "surface the stderr message and stop" in step2
+
+    # audit inherits finish's resolution.
+    audit = _flat((ROOT / "skills" / "audit" / "SKILL.md").read_text())
+    assert "conflict resolution apply unchanged" in audit
+
+    # start: conflicts go through the rebase-main skill; a dirty tree still stops (D6).
+    start = (ROOT / "skills" / "start" / "SKILL.md").read_text()
+    step3 = _flat(start.split("## Step 3", 1)[1].split("## Step 4", 1)[0])
+    assert "invoke the `rebase-main` skill with `--base <base>`" in step3
+    assert "dirty tree → stop" in step3.lower()
+    assert "never brainstorm on a stale base" in step3.lower()
 
 
 def test_integrate_skill_describes_global_section():

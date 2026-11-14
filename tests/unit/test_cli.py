@@ -399,6 +399,18 @@ def test_readme_documents_squash_before_rebase():
     assert "never squashed" not in finish and "runs from the branch's worktree" not in finish
 
 
+def test_readme_says_rebase_conflicts_are_resolved_not_handed_back():
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    paras = [" ".join(p.split()) for p in readme.split("\n\n")]
+    start = next(p for p in paras if "primer" in p and "seed" in p)
+    finish = next(p for p in paras if "squash" in p and "--force-with-lease" in p)
+    assert "stops on conflicts" not in start, start
+    assert "resolv" in start.lower(), start
+    assert "resolv" in finish.lower(), finish
+    # omc watch --rebase keeps abort-on-conflict (D2).
+    assert "A conflicting rebase is aborted to restore the checkout." in readme
+
+
 def test_readme_documents_gitnexus_storage_contract():
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
     architecture = readme.split("## How omc is put together", 1)[1].split("## Prerequisites", 1)[0]
