@@ -1,6 +1,7 @@
 """Exercise generated fish integration in a real shell and repository."""
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import sys
 import pytest
 
 from omc.fish_integration import fish_hook_path
+from omc.herdr import osc7_report
 from omc.shells.fish import FishShell
 
 
@@ -55,13 +57,14 @@ def fish_session(tmp_path):
         "XDG_DATA_HOME": str(tmp_path / "data"),
     }
 
-    def run(extra="", *, title_argv=None, startup=None, env_extra=None):
+    def run(extra="", *, title_argv=None, startup=None, env_extra=None, origin_cwd=None):
         argv, files = FishShell().build_invocation(
             cwd=str(repo),
             title="feature/first",
             startup_argv=startup or ["/bin/sh", "-c", 'echo STARTUP >> "$OMC_TITLE_LOG"'],
             title_seq="\033]0;feature/first\007",
             title_argv=[str(recorder)] if title_argv is None else title_argv,
+            origin_cwd=origin_cwd,
         )
         assert not files
         argv[0] = fish
@@ -229,3 +232,32 @@ def test_generated_start_with_session_disable_uses_inline_path(fish_session):
     )
     assert proc.returncode == 0, proc.stderr
     assert lines == ["USER_CONFIG", "feature/first", "STARTUP"]
+
+
+def test_herdr_reports_worktree_cd_and_origin_without_host(fish_session, tmp_path):
+    repo, run = fish_session
+    other = tmp_path / "other dir ü"
+    other.mkdir()
+    origin = tmp_path / "launch 100%"
+    proc, _ = run(
+        f"cd {shlex.quote(str(other))}",
+        origin_cwd=str(origin),
+        env_extra={"TERM_PROGRAM": "herdr"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert re.findall("\x1b\\]7;file:///[^\x07]*\x07", proc.stdout) == [
+        osc7_report(str(repo)),
+        osc7_report(str(other)),
+        osc7_report(str(origin)),
+    ]
+
+
+@pytest.mark.parametrize("env_extra", [{}, {"TERM_PROGRAM": "tmux"}])
+def test_no_hostless_report_outside_herdr(fish_session, tmp_path, env_extra):
+    _, run = fish_session
+    other = tmp_path / "other dir ü"
+    other.mkdir()
+    origin = tmp_path / "launch 100%"
+    proc, _ = run(f"cd {shlex.quote(str(other))}", origin_cwd=str(origin), env_extra=env_extra)
+    assert proc.returncode == 0, proc.stderr
+    assert "\x1b]7;file:///" not in proc.stdout

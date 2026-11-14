@@ -82,7 +82,7 @@ Superpowers is required: automatic for Claude Code, user-installed for Codex.
 Link the marketplace dependency pitfall in `docker/PLUGIN-NOTES.md` and
 `obra/superpowers`. Introduce `/omc:integrate`, including reruns after updates,
 for check/build/verify/review/explain-context/investigation-context integration.
-One sentence links macOS fish/iTerm2 branch titles to `docs/shell-integration.md`.
+One sentence links macOS fish/iTerm2 branch titles and the herdr sidebar's worktree folder and branch to `docs/shell-integration.md`.
 
 #### `## Update` — target 10 lines
 

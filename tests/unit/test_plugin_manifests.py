@@ -1,9 +1,16 @@
 import json
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
+
+HERDR_HOOK_COMMAND = (
+    '[ "${TERM_PROGRAM-}" = herdr ] && omc internal herdr-cwd >/dev/null 2>&1 || true'
+)
 
 
 def test_all_version_strings_agree():
@@ -2157,3 +2164,54 @@ def test_mr_review_follows_only_material_links():
     assert "at most 20 followed documents" not in material
     compile_ = " ".join(text.split("## 5. Compile", 1)[1].split("## 6.", 1)[0].split())
     assert "never lists a *not material* link" in compile_
+
+
+def test_plugin_registers_one_quiet_session_start_hook():
+    data = json.loads((ROOT / "hooks" / "hooks.json").read_text())
+    assert list(data["hooks"]) == ["SessionStart"]
+    [entry] = data["hooks"]["SessionStart"]
+    assert "matcher" not in entry
+    assert entry["hooks"] == [{"type": "command", "command": HERDR_HOOK_COMMAND, "timeout": 5}]
+
+
+def _run_herdr_hook(tmp_path, omc_body, env):
+    data = json.loads((ROOT / "hooks" / "hooks.json").read_text())
+    command = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    if omc_body is not None:
+        omc = bindir / "omc"
+        omc.write_text(f"#!/bin/sh\n{omc_body}\n")
+        omc.chmod(0o755)
+    return subprocess.run(
+        ["/bin/sh", "-c", command],
+        input='{"cwd": "/x"}',
+        env={"PATH": str(bindir), **env},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+@pytest.mark.parametrize(
+    "omc_body",
+    [
+        None,
+        "printf 'usage: omc internal {…}\\n' >&2; exit 2",
+        "exit 1",
+        "printf 'noise\\n'; exit 0",
+    ],
+    ids=["no-omc", "older-cli", "fails", "prints"],
+)
+def test_herdr_hook_command_is_a_silent_success_whatever_omc_is(tmp_path, omc_body):
+    result = _run_herdr_hook(tmp_path, omc_body, {"TERM_PROGRAM": "herdr"})
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+
+
+def test_herdr_hook_command_outside_herdr_never_starts_omc(tmp_path):
+    marker = tmp_path / "omc-ran"
+    result = _run_herdr_hook(
+        tmp_path, f": > {marker}; printf 'noise\\n'; printf 'err\\n' >&2; exit 1", {}
+    )
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    assert not marker.exists()

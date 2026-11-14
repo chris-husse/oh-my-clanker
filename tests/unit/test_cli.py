@@ -731,3 +731,27 @@ def test_current_session_dry_run_continues_to_full_preview(monkeypatch, argv):
     monkeypatch.setattr("omc.review.run_review", preview)
     assert cli.main([*argv, "--dry-run"]) == 0
     assert seen == ["current", "full preview"]
+
+
+def test_shell_integration_documents_herdr_sidebar():
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "shell-integration.md").read_text()
+    for needle in (
+        "herdr",
+        "TERM_PROGRAM=herdr",
+        "SessionStart",
+        "omc internal herdr-cwd",
+        "tmux",
+        "plain `cd`",
+    ):
+        assert needle in doc, needle
+
+
+def test_readme_links_herdr_to_shell_integration():
+    root = Path(__file__).resolve().parents[2]
+    recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
+    readme = (root / "README.md").read_text()
+    install = recipe.split("#### `## Install`", 1)[1].split("\n#### ", 1)[0]
+    assert "herdr" in install
+    assert any(
+        "herdr" in line and "(docs/shell-integration.md)" in line for line in readme.splitlines()
+    )

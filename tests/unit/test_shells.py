@@ -1,10 +1,14 @@
+import os
 import shlex
+import shutil
+import subprocess
 import sys
 
 import pytest
 
 from omc.config.schema import Config
 from omc.fish_integration import fish_hook_path
+from omc.herdr import osc7_report
 from omc.session import session_plan
 from omc.shells.base import TMPDIR_PLACEHOLDER
 from omc.shells.registry import detect_shell
@@ -16,6 +20,50 @@ ARGS = dict(
     startup_argv=["claude", "-n", "proj-1-fix", "/omc:start PROJ-1"],
     title_seq="\033]0;proj-1-fix\007",
 )
+
+
+def fish_herdr(origin=None):
+    parts = [
+        'if test "$TERM_PROGRAM" = herdr',
+        "function __omc_herdr_report; "
+        "printf '\\e]7;file://%s\\a' (string escape --style=url -- $argv[1]); end",
+        "__omc_herdr_report $PWD",
+        "function __omc_herdr_pwd --on-variable PWD; __omc_herdr_report $PWD; end",
+    ]
+    if origin:
+        parts.append(
+            f"function __omc_herdr_exit --on-event fish_exit; "
+            f"__omc_herdr_report {shlex.quote(origin)}; end"
+        )
+    return "; ".join([*parts, "end"])
+
+
+def zsh_herdr(cwd, origin=None):
+    lines = [
+        'if [ "${TERM_PROGRAM-}" = herdr ]; then',
+        f"printf '%s' {shlex.quote(osc7_report(cwd))}",
+    ]
+    if origin:
+        lines += [
+            f"__omc_herdr_exit() {{ printf '%s' {shlex.quote(osc7_report(origin))} }}",
+            "zshexit_functions+=(__omc_herdr_exit)",
+        ]
+    return "\n".join([*lines, "fi"])
+
+
+def bash_herdr(cwd, origin=None):
+    lines = [
+        'if [ "${TERM_PROGRAM-}" = herdr ]; then',
+        f"printf '%s' {shlex.quote(osc7_report(cwd))}",
+    ]
+    if origin:
+        lines += [
+            "__omc_herdr_prev_exit=$(trap -p EXIT)",
+            'eval "__omc_herdr_prev_exit=(${__omc_herdr_prev_exit})"',
+            f"trap -- \"printf '%s' {shlex.quote(osc7_report(origin))}; "
+            '${__omc_herdr_prev_exit[2]-}" EXIT',
+        ]
+    return "\n".join([*lines, "fi"])
 
 
 def test_detect_by_shell_env():
@@ -181,6 +229,9 @@ def test_fish_generated_command_is_one_if_else_around_the_hook(monkeypatch):
     )
     assert files == {} and argv[:3] == ["fish", "-i", "-C"]
     body = argv[3]
+    startup = shlex.join(ARGS["startup_argv"])
+    assert body.endswith("; end; " + fish_herdr() + "; " + startup)
+    body = body.replace("; " + fish_herdr(), "", 1)
     assert body.count("; else; ") == 1
     if_branch, rest = body.split("; else; ", 1)
     else_branch, startup = rest.rsplit("; end; ", 1)
@@ -204,12 +255,13 @@ def test_fish_generated_command_is_one_if_else_around_the_hook(monkeypatch):
     assert '/usr/bin/python3 -m omc.terminal_title "$__omc_desired_title"' in else_branch
 
 
-def test_fish_without_title_argv_is_unchanged():
+def test_fish_without_title_argv_exact_text():
     argv, _ = detect_shell({"SHELL": "fish"}).build_invocation(**ARGS)
     assert "; else; " not in argv[3] and "__omc_title_helper" not in argv[3]
     assert argv[3] == (
         "function fish_title; echo proj-1-fix; end; cd /w/tree; "
-        f"printf '%s' {shlex.quote(ARGS['title_seq'])}; {shlex.join(ARGS['startup_argv'])}"
+        f"printf '%s' {shlex.quote(ARGS['title_seq'])}; {fish_herdr()}; "
+        f"{shlex.join(ARGS['startup_argv'])}"
     )
 
 
@@ -219,3 +271,129 @@ def test_fish_dry_run_output_is_terminal_independent():
     first, _ = shell.build_invocation(**ARGS, title_argv=FISH_TITLE_ARGV)
     second, _ = shell.build_invocation(**ARGS, title_argv=FISH_TITLE_ARGV)
     assert first == second
+
+
+@pytest.mark.parametrize("title_argv", [None, FISH_TITLE_ARGV])
+def test_fish_herdr_block_sits_between_title_code_and_startup(title_argv):
+    argv, _ = detect_shell({"SHELL": "fish"}).build_invocation(
+        **ARGS, title_argv=title_argv, origin_cwd="/launch dir"
+    )
+    body = argv[3]
+    block = fish_herdr("/launch dir")
+    assert (
+        body.index("cd /w/tree") < body.index(block) < body.index(shlex.join(ARGS["startup_argv"]))
+    )
+    if title_argv == FISH_TITLE_ARGV:
+        assert "; end; " + block + "; " in body
+
+
+def test_fish_herdr_exit_handler_only_with_origin():
+    argv, _ = detect_shell({"SHELL": "fish"}).build_invocation(**ARGS, origin_cwd=None)
+    body = argv[3]
+    assert fish_herdr() in body and "__omc_herdr_exit" not in body
+
+
+@pytest.mark.parametrize("origin", [None, "/launch dir"])
+@pytest.mark.parametrize("shell_name", ["zsh", "bash"])
+def test_zsh_and_bash_herdr_block_after_cd_before_startup(shell_name, origin):
+    _, files = detect_shell({"SHELL": shell_name}).build_invocation(**ARGS, origin_cwd=origin)
+    rc = next(iter(files.values()))
+    block = (zsh_herdr if shell_name == "zsh" else bash_herdr)("/w/tree", origin)
+    startup = shlex.join(ARGS["startup_argv"])
+    assert rc.index("cd /w/tree") < rc.index(block) < rc.index(startup)
+    if origin is None:
+        assert "__omc_herdr_exit" not in rc and "trap -- " not in rc
+
+
+def test_sh_ignores_origin_cwd():
+    shell = detect_shell({})
+    assert shell.build_invocation(**ARGS) == shell.build_invocation(
+        **ARGS, origin_cwd="/launch dir"
+    )
+
+
+def test_exec_interactive_forwards_origin_cwd(monkeypatch):
+    import omc.shells.base as base
+    from omc.shells.fish import FishShell
+
+    monkeypatch.setattr(base.os, "chdir", lambda path: None)
+    executed = []
+    monkeypatch.setattr(base.os, "execvp", lambda program, argv: executed.append(argv))
+    FishShell().exec_interactive(**ARGS, origin_cwd="/o")
+    assert executed and "__omc_herdr_report /o; end" in executed[0][3]
+
+
+def _run_bash_session(
+    tmp_path, *, wt, bashrc, startup_argv, origin_cwd, term_program=None
+) -> subprocess.CompletedProcess:
+    """Run an interactive bash on omc's generated rcfile for worktree ``wt`` and exit."""
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.fail("bash is required: sudo apt-get install bash")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text(bashrc)
+    rcdir = tmp_path / "rc"
+    rcdir.mkdir()
+    argv, files = detect_shell({"SHELL": "bash"}).build_invocation(
+        cwd=str(wt),
+        title="t",
+        startup_argv=startup_argv,
+        title_seq="",
+        origin_cwd=origin_cwd,
+    )
+    for name, contents in files.items():
+        (rcdir / name).write_text(contents)
+    rc = next(a for a in argv if TMPDIR_PLACEHOLDER in a).replace(TMPDIR_PLACEHOLDER, str(rcdir))
+    env = {"HOME": str(home), "PATH": os.environ["PATH"]}
+    if term_program is not None:
+        env["TERM_PROGRAM"] = term_program
+    return subprocess.run(
+        [bash, "--rcfile", rc, "-i"],
+        input="exit\n",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=25,
+    )
+
+
+@pytest.mark.parametrize(
+    ("bashrc", "user_tail"),
+    [
+        ("", ""),
+        ('trap -- "echo USER_BYE" EXIT\n', "USER_BYE\n"),
+        ("set -u\n", ""),
+    ],
+    ids=["no-user-trap", "user-exit-trap", "set-u-no-trap"],
+)
+def test_bash_exit_report_keeps_user_exit_trap(tmp_path, bashrc, user_tail):
+    wt = tmp_path / "wt dir"
+    wt.mkdir()
+    launch = tmp_path / "launch dir"
+    launch.mkdir()
+    proc = _run_bash_session(
+        tmp_path,
+        wt=wt,
+        bashrc=bashrc,
+        startup_argv=["true"],
+        origin_cwd=str(launch),
+        term_program="herdr",
+    )
+    assert proc.stdout == osc7_report(str(wt)) + osc7_report(str(launch)) + user_tail
+    assert "unbound variable" not in proc.stderr
+
+
+def test_bash_herdr_guard_tolerates_set_u_without_term_program(tmp_path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    proc = _run_bash_session(
+        tmp_path,
+        wt=wt,
+        bashrc="set -u\n",
+        startup_argv=["printf", "STARTED\\n"],
+        origin_cwd=str(tmp_path),
+    )
+    assert "unbound variable" not in proc.stderr
+    assert "\x1b]7;" not in proc.stdout
+    assert proc.stdout == "STARTED\n"

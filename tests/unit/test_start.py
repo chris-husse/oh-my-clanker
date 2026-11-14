@@ -203,8 +203,10 @@ def test_interactive_handoff_uses_branch_title_and_slug_session(tmp_path, monkey
         lambda env: SimpleNamespace(exec_interactive=lambda **kwargs: seen.append(kwargs)),
     )
     monkeypatch.setattr(start_mod, "os", SimpleNamespace(environ={}))
+    ctx.env["PWD"] = "/launch dir"
     assert run_start(ctx, Config(), "PROJ-1", no_mutex=True) == 0
     assert seen[0]["title"] == "feature/proj-1-fix-login"
+    assert seen[0]["origin_cwd"] == "/launch dir"
     assert seen[0]["title_seq"] == "\033]0;feature/proj-1-fix-login\007"
     assert seen[0]["title_argv"][-2:] == ["-m", "omc.terminal_title"]
     assert seen[0]["startup_argv"][seen[0]["startup_argv"].index("-n") + 1] == "proj-1-fix-login"
