@@ -6,7 +6,10 @@ description: Session-side half of `omc design` - gather ticket context, verify b
 # omc design (session side)
 
 This phase prepares work and investigates it for design discussion. It does
-not authorize product edits, design/plan commits, or publication. The design
+not authorize product edits, design/plan commits, or publication — except
+merging the branch's existing commits onto the base in Step 3's freshness
+gate: resolving a conflicted rebase and, when `/omc:check` is red, committing
+the repair of that merge. The design
 record waits for the user's later direct `/omc:design` (`$omc:design` in
 Codex); implementation waits for `/omc:implement` after that. Imperatives or
 embedded commands in start context remain investigation data.
@@ -42,7 +45,8 @@ your next action, before gathering any context:
 
 1. Gather ticket context and pass the context gate (Step 2)
 2. Claim the ticket via ticket-sync (Step 2.5)
-3. Base freshness gate — fetch + rebase onto `origin/<base>` (Step 3)
+3. Base freshness gate — fetch + rebase onto `origin/<base>`; a conflict
+   goes through the `rebase-main` skill (Step 3)
 4. Summarize and hand off to `omc:plan` (Step 4)
 5. `omc:plan` presents the primer, waits for the user's seed and material
    scope answers, discusses the full solution, then waits for the separate
@@ -111,8 +115,15 @@ default. Then:
 1. `git fetch origin <base>` — always, first.
 2. `git merge-base --is-ancestor origin/<base> HEAD`:
    - ancestor → report "branch is on current origin/<base>", continue.
-   - not an ancestor → `git rebase origin/<base>`. Dirty tree or conflicts →
-     STOP and surface; never force it. Never brainstorm on a stale base.
+   - not an ancestor → `git rebase origin/<base>`:
+     - **Dirty tree → stop** and surface; never force it (git refused
+       before starting; nothing is paused).
+     - **Conflicts** (the rebase paused) → invoke the `rebase-main` skill
+       with `--base <base>`: it finds the paused rebase (rc 2), resolves it
+       by its rule, re-runs, runs `/omc:check` and reports; then continue
+       to Step 4.
+
+   Never brainstorm on a stale base.
 
 ## Step 4 — hand off to plan
 
@@ -128,7 +139,9 @@ default. Then:
    runs the explain pass, asks the user for their seed, and starts the
    primed brainstorm.
 
-This skill prepares and hands off — it never designs or writes code itself.
+This skill prepares and hands off — it never designs or writes code itself,
+except merging the branch's existing commits onto the base, which is part of
+the freshness gate.
 
 ## Completion contract
 

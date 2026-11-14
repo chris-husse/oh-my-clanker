@@ -48,17 +48,20 @@ squashes the branch to one `wip:` commit over
 `origin/<base>`, and re-mirrors `.omc/docs` from the primary checkout
 (in the primary checkout itself — a plain clone — it squashes and rebases
 the same way and mirrors nothing). Only one commit is replayed, so a
-conflict with the base stops the rebase at most once. The `.gitnexus/`
-graph stays primary for `/omc:explain` queries.
+conflict with the base stops the rebase at most once — and this session
+resolves that stop itself (rc 3 below). The `.gitnexus/` graph stays
+primary for `/omc:explain` queries.
 
-- **rc 3 bail** (conflicts, rebase left paused): hand control to the user
-  per that skill — never resolve conflicts silently, never `--abort` on
-  their behalf. Once the rebase has completed, re-run the `rebase-main`
-  skill with `--squash` (idempotent: the branch is already one commit over
-  the base) before continuing.
-- **rc 1 or rc 2** (the fetch failed, git refused the rebase, the squash
-  failed — e.g. a hook rejected the squash commit — or a rebase or merge
-  is already in progress): surface the stderr message and stop.
+- **rc 3 bail** (conflicts, rebase left paused): resolve it per the
+  `rebase-main` skill's rule — this is not a question. The rule's step-4
+  re-run, with `--squash`, is finish's re-run — run it once (idempotent:
+  the branch is already one commit over the base) before continuing.
+- **rc 1** (the fetch failed, git refused the rebase, the squash failed —
+  e.g. a hook rejected the squash commit): surface the stderr message and
+  stop.
+- **rc 2** (a rebase, merge, cherry-pick or revert already in progress):
+  finish it per the `rebase-main` skill's rc 2; its re-run, with
+  `--squash`, is finish's re-run — run it once.
 - On an `"ok": true` verdict carrying `"squashed"`, count
   `git rev-list --count origin/<base>..HEAD`: **1** → continue to Step 3;
   **0** → say "nothing is left over <base> — either the branch's changes

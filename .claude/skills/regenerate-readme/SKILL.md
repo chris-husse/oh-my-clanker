@@ -189,8 +189,10 @@ Three command subsections:
   `start` alias; configure gate; real tool probes with install hints; headless
   slug/refusal; fetch + create/re-enter worktree; branch title; seeded context
   is JSON data, never phase authority. Ticket tools supply tracker context.
-  Start gathers parent/epic/docs (unavailable docs reported), refreshes base,
-  builds primer via explain and prior records, asks for seed and material scope
+  Start gathers parent/epic/docs (unavailable docs reported), refreshes base
+  (a dirty tree stops; a conflicting rebase is resolved by the session through
+  `/omc:rebase-main`, which then runs `/omc:check`, never handed back — two
+  sentences, naming the skill `/omc:rebase-main`), builds primer via explain and prior records, asks for seed and material scope
   answers, discusses full design. Agreement is not authority. `/omc:design`
   alone writes/hardens/commits record; with Provider Selection Per Step on, leaves
   the session open ("With Provider Selection Per Step on, the session stays open
@@ -229,8 +231,10 @@ The rebase-main row and finish prose say only `.omc/docs/` is mirrored, while
 explain queries the primary graph.
 Explain optional check/build/verify/review semantics, order, standalone forms,
 no-op unconfigured project stages, always-on grug and human-review lenses,
-and Important fix/waiver into Deliberate complexity. Finish squashes, rebases/mirrors, describes with
-MR description, gates before force-with-lease; user opens MR. Preserve finish
+and Important fix/waiver into Deliberate complexity. Finish squashes, rebases/mirrors (a
+conflict with the base stops the rebase at most once; the session resolves that
+conflict itself, as `/omc:rebase-main` does, before the stage gates, rather than
+handing it back), describes with MR description, gates before force-with-lease; user opens MR. Preserve finish
 without audit and close-worktree/review-comments/discuss continuations.
 
 #### `## How omc is put together` — target 60 lines

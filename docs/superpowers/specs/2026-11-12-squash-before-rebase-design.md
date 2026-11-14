@@ -69,6 +69,12 @@ call on the guard's placement.
 - Stacked branches (finish's gate still refuses them); resolving conflicts on
   the user's behalf; a `--no-squash` escape hatch for finish.
 
+> **2026-11-14 — superseded in part:** the non-goal "resolving conflicts on the
+> user's behalf" (and "automatic conflict resolution" in D4 and §7) is superseded
+> by `docs/superpowers/specs/2026-11-14-auto-resolve-rebase-conflicts-design.md`:
+> the agent now resolves an agent-run rebase's conflicts. The rest of this record
+> stands as written.
+
 **Anti-goals.**
 
 - Any path where the squash commit is created over a ref other than the
