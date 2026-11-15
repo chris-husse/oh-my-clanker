@@ -21,7 +21,8 @@ session combines their findings into one disposition and one verdict.
    blocks dispatch with its `message`.
    - **Missing** → report "no project `review` stage configured —
      nothing to do for the project stage; omc's grug and human-review lenses
-     still run". The project half is a PASS. Continue to step 3.
+     still run". The project half is a PASS. Continue to the index hygiene
+     paragraph below.
    - **Present** → read it. Dispatch a Review worker with
      `tasks.review.model` and, where supported, `tasks.review.effort` to run
      its instructions and judge the project stage from the project root.
@@ -37,7 +38,19 @@ session combines their findings into one disposition and one verdict.
      the final stage verdict.
      - Project stage **failed** → skip both lenses in step 3 (the stage is
        already failing) and go to step 4.
-     - Project stage **passed** → continue to step 3.
+     - Project stage **passed** → continue to the index hygiene paragraph below.
+
+   **GitNexus index hygiene.** Reached from either passing branch above;
+   run it inline in the main session, no worker. omc indexes this repo with
+   GitNexus, the code knowledge graph behind `/omc:explain`. Committed
+   generated code, build/output and vendored files bloat it. If the branch
+   diff adds or changes tracked files of that kind, make sure the repo-root
+   `.gitnexusignore` (gitignore syntax) covers their *directory* (e.g.
+   `src/**/generated/`; a `linguist-generated` line in `.gitattributes` is a
+   strong hint), then `git add .gitnexusignore` so finish's amend includes
+   it. Hand-written source, tests and docs stay indexed. This never fails
+   the stage; name any added patterns in the summary. Then continue to
+   step 3.
 3. **Grug lens.** Resolve one base branch the way `finish` does
    (`worktree.base_branch` in `.omc/config.yaml`, else the remote's HEAD
    branch). Dispatch a grug judge worker for the complexity lens. Dispatch a

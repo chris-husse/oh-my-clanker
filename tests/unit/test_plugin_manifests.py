@@ -386,6 +386,37 @@ def test_review_proxy_runs_human_review():
         assert "human-review" not in (ROOT / "skills" / stage / "SKILL.md").read_text()
 
 
+def test_review_proxy_keeps_gitnexusignore_covering_generated_code():
+    steps = (ROOT / "skills" / "review" / "SKILL.md").read_text().split("## Steps", 1)[1]
+    heading = "**GitNexus index hygiene.**"
+    assert heading in steps, "review has no GitNexus index hygiene step"
+    hygiene = _flat(steps.split(heading, 1)[1].split("3. **Grug lens.**", 1)[0])
+    for needle in (
+        "`.gitnexusignore`",
+        "`git add .gitnexusignore`",
+        "never fails the stage",
+        "*directory*",
+        "stay indexed",
+        "inline",
+        "summary",
+    ):
+        assert needle in hygiene, f"index hygiene step missing {needle!r}"
+    # after the project stage, before the grug lens (and so before its unavailable exits)
+    assert (
+        steps.index("Project stage **passed**")
+        < steps.index(heading)
+        < steps.index("3. **Grug lens.**")
+    )
+    # both passing branches route through it; a failed project stage skips it with the lenses
+    missing = _flat(steps.split("**Missing**", 1)[1].split("**Present**", 1)[0])
+    passed = _flat(steps.split("Project stage **passed**", 1)[1].split(heading, 1)[0])
+    failed = _flat(
+        steps.split("Project stage **failed**", 1)[1].split("Project stage **passed**", 1)[0]
+    )
+    assert "index hygiene" in missing and "index hygiene" in passed
+    assert "index hygiene" not in failed and "step 4" in failed
+
+
 def test_mr_review_skill_contract():
     text = (ROOT / "skills" / "mr-review" / "SKILL.md").read_text()
     flat_text = " ".join(text.split()).casefold()
