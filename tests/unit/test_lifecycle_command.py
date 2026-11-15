@@ -33,14 +33,21 @@ GOLDEN = {
 }
 
 
-def _collected(recipe: str) -> set[str]:
-    run = subprocess.run(
-        ["just", recipe, "--collect-only"],
+_COLLECT_ENV = {"CODEX_AUTH_VOLUME": "omc-e2e-codex-auth", "OMC_E2E_NO_DOCKER": "1"}
+
+
+def _collect(recipe: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["just", recipe, *args, "--collect-only"],
         cwd=ROOT,
         capture_output=True,
         text=True,
-        env={**os.environ, "CODEX_AUTH_VOLUME": "omc-e2e-codex-auth", "OMC_E2E_NO_DOCKER": "1"},
+        env={**os.environ, **_COLLECT_ENV},
     )
+
+
+def _collected(recipe: str, *args: str) -> set[str]:
+    run = _collect(recipe, *args)
     assert run.returncode == 0, run.stdout + run.stderr
     return {m.group(1) for m in re.finditer(r"::(test_[^\s]+)$", run.stdout, re.M)}
 
@@ -61,8 +68,8 @@ def test_default_golden_collects_through_implemented_without_audited():
     assert _collected("golden") == GOLDEN
 
 
-def test_default_e2e_collects_measured_failing_verify_variation():
-    assert "test_failing_verify_blocks_implementation_handoff" in _collected("e2e-tests")
+def test_default_e2e_collects_implement_never_runs_verify_variation():
+    assert "test_implement_never_runs_verify" in _collected("e2e-tests")
 
 
 def test_default_e2e_collects_write_plan_variation():
@@ -72,3 +79,23 @@ def test_default_e2e_collects_write_plan_variation():
 def test_default_e2e_never_collects_the_auto_advance_chain():
     # one /omc:design turn that runs to the push: expensive tier only
     assert "test_design_auto_advances_to_push" not in _collected("e2e-tests")
+
+
+def test_e2e_tests_subset_runs_a_golden_node_id():
+    # the parallel pass collects nothing for a golden node id; that is not a failure
+    assert (
+        _collected("e2e-tests", "tests/e2e/golden/test_golden_claude.py::test_stage_recorded")
+        == GOLDEN
+    )
+
+
+def test_e2e_tests_subset_runs_a_variation_after_the_golden_path():
+    # the golden path always runs in full first: the variation forks its snapshots
+    assert _collected(
+        "e2e-tests", "tests/e2e/variations/test_from_recorded.py::test_write_plan_commits_plan_only"
+    ) == GOLDEN | {"test_write_plan_commits_plan_only"}
+
+
+def test_e2e_tests_subset_still_fails_when_nothing_matches():
+    run = _collect("e2e-tests", "tests/e2e/variations/test_from_recorded.py::test_no_such_test")
+    assert run.returncode != 0, run.stdout + run.stderr

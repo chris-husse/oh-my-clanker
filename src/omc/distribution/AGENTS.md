@@ -44,33 +44,47 @@ repo). In any other repository, ignore everything in this section.
   its deterministic mirror lives in `omc internal rebase-main`. Existing
   worktree `.gitnexus/` content is left untouched.
 - **Publish through `/omc:finish`** — squash, rebase, project stage gates
-  (`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review`), described
-  push. Do not bypass a failing stage.
+  (`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review` → final
+  `/omc:verify`, the final run skipped when the tree is unchanged since
+  verify passed), described push. Do not bypass a failing stage.
 - **Validation cadence**: `/omc:check` is the quick "am I on the right
-  track" gate (build what the unit tests need, run them) — use it
-  constantly while working. `/omc:build` builds the world, no tests.
-  `/omc:verify` is full E2E — run it only after major milestones, never as
-  a routine dev-loop gate. The end of `/omc:implement`'s build is a milestone:
-  its final green check is followed by `/omc:build` → `/omc:verify` before
-  handoff. `/omc:audit` always runs `/omc:check` → `/omc:build` after its
-  disposition pass, and also `/omc:verify` when its fixes changed tracked
-  product files. `/omc:finish` runs all four stages on the squashed commit.
+  track" gate (build what the unit tests need, run them) — it gates
+  everything while working, including the end of `/omc:implement`'s build
+  and `/omc:audit`'s post-fix pass. `/omc:build` builds the world, no tests.
+  `/omc:verify` is full E2E: an agent starts it only within `/omc:finish`
+  (before review, and last before the push); the user or the project may
+  run it at any time.
 - **stage-gate rule — bounded fix-forward, then a CRITICAL stop**: Consume
   each stage's single `OMC_STAGE` verdict. Only `"passed": true` passes;
   `"configured": false` is success when `"passed": true`. A `"passed": false`
   verdict or no verdict fails closed. On failure, dispatch one fix subagent at
   the heavy coding tier with the failed stage's `summary` as its brief (or
   the observed failure when no verdict exists), run `/omc:check`, then
-  restart from `/omc:build` and rerun the remaining gate stages in order.
+  restart from `/omc:build` and rerun the remaining gate stages in order;
+  a fix repairs the code under test, never the stage's own definition
+  (`.omc/skills/<stage>/`) or the script or command it runs, and a stage
+  that only passes by editing itself is the CRITICAL question, asked at
+  once, without spending the remaining cycles.
   A failed `/omc:check` blocks progression to build. It is the cycle's red
   stage; any further repair consumes the remaining cycle budget and never
-  resets the bound. Allow at most two fix-and-rerun cycles, or three gate
-  runs total when checks pass; even a flaky pass on rerun consumes a cycle.
-  At the bound, stop with one CRITICAL question naming the
-  red stage, its failure summary, what both fixes tried, and what answer is
-  needed from the user. No later phase runs on a red gate: implement makes
-  no handoff commit, continuation offer or `/omc:audit` invocation, and audit
-  invokes no `finish`.
+  resets the bound. A red `/omc:verify` is repaired instead of restarted
+  from build: the fix subagent is briefed with verify's failure output, then
+  `/omc:check`, then `/omc:verify rerun only: <pieces>` to rerun only the
+  failed pieces. Still red takes the next fix; green runs `/omc:build` once,
+  then the full `/omc:verify`. Without a "Running a subset" section in the
+  project's verify skill, the targeted rerun is skipped: `/omc:check`, then
+  `/omc:build` once, then the full `/omc:verify`, one full run per cycle.
+  A red full run takes the next fix, briefed with the pieces that are red
+  now; a green one continues with the stage after verify, and nothing
+  before it is rerun. Allow at most two
+  fix-and-rerun cycles: a cycle is one fix dispatch with whatever reruns
+  follow it, targeted or full; reruns are never counted on their own; the
+  two cycles are per conductor run, shared by every stage in it; a fix
+  whose rerun passes by flake still spent its cycle. At the bound, stop
+  with one CRITICAL question naming the red stage, its failure summary,
+  what both fixes tried, and what answer is needed from the user. No later
+  phase runs on a red gate: implement makes no handoff on a red check,
+  audit invokes no `finish`, finish pushes nothing.
   A required answer resumes the remaining phases under the same authorization;
   in a headless run, make the question the final output.
 - **Ask the graph, not grep**: `/omc:explain <question>` answers from the

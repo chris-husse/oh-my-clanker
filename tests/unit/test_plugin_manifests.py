@@ -265,19 +265,24 @@ def test_finish_skill_contract():
     ):
         assert needle in text, f"finish skill missing {needle!r}"
     assert "gh pr create" not in text  # never creates the MR/PR
-    # rebase-main squashes and rebases, then stages run check -> build -> verify -> review,
-    # then push
-    order = [text.index("`rebase-main`"), text.index("`check`"), text.index("`build`")]
-    order += [text.index("`verify`"), text.index("`review`"), text.index("`create-mr`")]
-    assert order == sorted(order), (
-        "finish must order rebase-main -> check -> build -> verify -> review -> push"
-    )
+    # rebase-main squashes and rebases, then Step 3 runs check -> build -> verify ->
+    # review -> final verify, then create-mr pushes
     stage = text.split("## Step 3", 1)[1].split("## Step 4", 1)[0]
+    body = stage.split("\n", 1)[1]  # skip the heading line
+    assert text.index("`rebase-main`") < text.index("## Step 3")
+    review_at = body.index("`review`")
+    order = [body.index("`check`"), body.index("`build`"), body.index("`verify`")]
+    order += [review_at, body.index("final `verify`", review_at)]
+    assert order == sorted(order), (
+        "finish Step 3 must order check -> build -> verify -> review -> final verify"
+    )
+    assert text.index("`create-mr`") > text.index("## Step 3")
     tracked_changes = stage.split("- A stage that changed TRACKED files", 1)[1].split(
         "- Unconfigured", 1
     )[0]
     unconfigured_review = stage.split("- Unconfigured", 1)[1]
     assert "grug and human-review" in tracked_changes
+    assert "tool drift" in tracked_changes  # never sweep lockfile drift into the commit
     assert "grug and human-review" in unconfigured_review
 
 
@@ -288,6 +293,43 @@ def test_stage_proxy_contract():
             assert needle in text, f"{stage} proxy missing {needle!r}"
         # the project half of an unconfigured stage is a pass (review's grug half still runs)
         assert "nothing to do" in text
+
+
+def test_verify_proxy_runs_only_in_finish_and_reruns_subsets():
+    verify = (ROOT / "skills" / "verify" / "SKILL.md").read_text()
+    check = (ROOT / "skills" / "check" / "SKILL.md").read_text()
+    m = re.match(r"\A---\n(.*?)\n---\n", verify, re.DOTALL)
+    assert m, "verify: missing frontmatter"
+    description = m.group(1)
+    body = " ".join(verify[m.end() :].split())
+    # an agent starts verify only within finish; the user or the project any time
+    assert "only within finish" in description
+    assert "the user or the project may run it at any time" in description
+    assert "only within `finish`" in body
+    assert "the user or the project may run it at any time" in body
+    assert "major milestones" not in verify
+    assert "major milestones" not in check
+    assert "`verify` (finish only)" in " ".join(check.split())
+    # the optional "rerun only: <pieces>" input, read like write-plan's
+    assert "## User Input" in verify and "$ARGUMENTS" in verify
+    assert verify.index("## User Input") < verify.index("## Steps")
+    assert "The whole input selects the mode:" in body
+    for needle in (
+        "rerun only: <pieces>",
+        "Empty, or anything not starting with `rerun only:`",
+        "Running a subset",
+        "Without that section, run the full stage and say so;",
+        "asks for no targeted rerun then, so this fallback only serves a direct call",
+        "`rerun only:` with no pieces runs the full stage",
+        "names the failing pieces",
+        "describes the subset",
+    ):
+        assert needle in body, f"verify proxy missing {needle!r}"
+    # the machine contract is byte-identical
+    assert (
+        '`OMC_STAGE {"stage": "verify", "configured": true|false, '
+        '"passed": true|false, "summary": "<one sentence>"}`'
+    ) in verify
 
 
 def test_review_proxy_runs_grug():
@@ -1102,6 +1144,12 @@ def test_dogfood_verify_stage_gates_on_parallel_e2e_only():
     assert "just e2e-tests" in text and "just codex-gate" in text
     assert "never a gate" in text
     assert "lifecycle-tests" not in text  # the hour-long matrix is gone as a gate
+    # Running a subset: the section the omc verify proxy follows for `rerun only:`
+    assert "## Running a subset" in text
+    assert "just e2e-tests tests/e2e/" in text
+    assert "node id" in text
+    assert "never `-k`" in text  # it deselects the golden stages
+    assert "just codex-gate tests/e2e/" in text
 
 
 def test_create_mr_skill_contract():
@@ -1326,7 +1374,6 @@ def test_implement_skill_contract():
         "/omc:check",
         "before dispatching the next task",
         "plan already exists",
-        "## Phase 2b — milestone gate",
         "stage-gate rule",
         "bounded fix-forward, then a CRITICAL stop",
         '"passed": true',
@@ -1340,17 +1387,24 @@ def test_implement_skill_contract():
         text.index("/omc:write-plan"),
         text.index("omc internal models"),
         text.index("subagent-driven-development"),
-        text.index("## Phase 2b — milestone gate"),
-        text.index("/omc:build", text.index("## Phase 2b — milestone gate")),
-        text.index("/omc:verify", text.index("## Phase 2b — milestone gate")),
         text.index("## Phase 3 — hand off"),
     ]
     assert order == sorted(order), (
-        "implement must order record gate -> write-plan -> models -> build -> "
-        "milestone gate -> handoff"
+        "implement must order record gate -> write-plan -> models -> build -> handoff"
     )
-    assert "finish runs it" not in text
     assert "Invoke the `finish` skill" not in text
+    # verify runs only inside finish (spec 2026-11-15 §5.3): no milestone gate
+    flat = " ".join(text.split())
+    for needle in ("/omc:verify", "/omc:build", "Phase 2b", "milestone"):
+        assert needle not in text, f"implement skill must not mention {needle!r}"
+    for needle in (
+        "Full E2E never runs in implement",
+        "`finish` runs `verify`",
+        "Three phases, strictly in order",
+    ):
+        assert needle in flat, f"implement skill missing {needle!r}"
+    phase_minus_1 = text.split("## Phase -1", 1)[1].split("## Phase 0", 1)[0]
+    assert "plan → subagent build → handoff" in " ".join(phase_minus_1.split())
     # provider selection per step (spec 2026-11-12 §4.4, D9)
     for needle in (
         "provider_selection_per_step",
@@ -1369,8 +1423,11 @@ def test_implement_skill_contract():
         "If that verdict is no longer in context, read it again the same way before closing."
         in " ".join(handoff.split())
     ), "implement Phase 3 must re-read a lost OMC_MODELS verdict"
-    gate = text.split("## Phase 2b — milestone gate", 1)[1].split("## Phase 3 — hand off", 1)[0]
-    assert "a red gate never reaches `/omc:audit`" in " ".join(gate.split())
+    build = text.split("## Phase 2 — build", 1)[1].split("## Phase 3 — hand off", 1)[0]
+    assert (
+        "Even with provider selection per step off, a red `/omc:check` never reaches "
+        "`/omc:audit`." in " ".join(build.split())
+    )
     assert (
         "the user typed /omc:implement (or the chain invoked it), that IS the instruction to build"
         in " ".join(text.split())
@@ -1474,23 +1531,21 @@ def test_write_plan_skill_contract():
     assert "off (the default) continues into the next stage" in m.group(1)
 
 
-def test_implement_keeps_task_commits_before_a_red_milestone_gate():
+def test_implement_keeps_task_commits_before_the_handoff():
     text = (ROOT / "skills" / "implement" / "SKILL.md").read_text()
-    build = text.split("## Phase 2 — build", 1)[1].split("## Phase 2b — milestone gate", 1)[0]
-    gate = text.split("## Phase 2b — milestone gate", 1)[1].split("## Phase 3 — hand off", 1)[0]
+    build = text.split("## Phase 2 — build", 1)[1].split("## Phase 3 — hand off", 1)[0]
 
     assert "commit each task's tested changes" in build, (
-        "task commits must happen during the subagent build, before the milestone gate"
+        "task commits must happen during the subagent build, before the handoff"
     )
-    assert "at least one task commit" in gate, "the milestone must check for task commits"
-    assert "keep those task commits" in gate, "a red verify must preserve completed task commits"
-    assert "the plan was already committed by `/omc:write-plan`" in gate
-    assert "plan uncommitted" not in gate
+    assert "keep those task commits" in build, "a red check must preserve completed task commits"
+    assert "the plan was already committed by `/omc:write-plan`" in build
+    assert "plan uncommitted" not in text
     # write-plan commits the plan after the record, so a plan commit alone must
-    # never satisfy the task-commit guards
-    handoff = text.split("## Phase 3 — hand off", 1)[1]
-    for section in (gate, handoff):
-        assert "touches a path outside `docs/superpowers/`" in " ".join(section.split())
+    # never satisfy the handoff's task-commit precondition
+    handoff = " ".join(text.split("## Phase 3 — hand off", 1)[1].split())
+    assert "at least one task commit" in handoff
+    assert "touches a path outside `docs/superpowers/`" in handoff
 
 
 def test_implement_always_routes_the_plan_through_write_plan():
@@ -1561,11 +1616,8 @@ def test_audit_skill_contract():
         "record is stale",
         "CRITICAL",
         "/omc:check",
-        "/omc:build",
-        "/omc:verify",
         "stage-gate rule",
         "bounded fix-forward, then a CRITICAL stop",
-        "tracked product files",
         "Implementation review",
         "## Deliberate complexity",
         "provider",
@@ -1580,7 +1632,14 @@ def test_audit_skill_contract():
     gate = text[
         text.index("## Phase 2 — disposition") : text.index("## Phase 2b — trace and commit")
     ]
-    assert gate.index("/omc:check") < gate.index("/omc:build") < gate.index("/omc:verify")
+    assert "/omc:check" in gate
+    assert "/omc:build" not in gate
+    assert "/omc:verify" not in gate
+    assert "stage is starting" not in text
+    assert "run verify too" not in text
+    phase3 = text.split("## Phase 3 — publish", 1)[1].split("## Completion contract", 1)[0]
+    assert "check, build, verify, review, final verify, describe, push" in " ".join(phase3.split())
+    assert "fix-forward" in phase3
     assert text.index("commit", text.index("## Phase 2b")) < text.index("Invoke `finish`")
     prose = " ".join(text.split())
     assert "immediately before the terminal `## Deliberate complexity`" in prose
@@ -1699,6 +1758,56 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def test_finish_runs_verify_before_review_and_last():
+    # Finish is the only place an agent starts verify: once before review, and once
+    # last before the push unless the tree is byte-identical to the one verify passed.
+    # Every red stage follows the layer's stage-gate rule instead of stopping at once.
+    text = (ROOT / "skills" / "finish" / "SKILL.md").read_text()
+    assert "## Step 3 — project stages: check → build → verify → review → final verify" in text
+    flat = _flat(text)
+    step0 = text.split("## Step 0 ", 1)[1].split("## Step 0.1", 1)[0]
+    step3 = text.split("## Step 3", 1)[1].split("## Step 4", 1)[0]
+    step5 = text.split("## Step 5", 1)[1].split("## Completion", 1)[0]
+    flat3 = _flat(step3)
+    for needle in (
+        "pre-review verify",
+        "final verify",
+        "git rev-parse HEAD^{tree}",
+        "task list",
+        "final verify skipped — tree unchanged since verify passed",
+        "that the project's `verify` stage is starting",
+        "known tool drift",
+        "never discard unknown work",
+        "stage-gate rule",
+        "bounded fix-forward, then a CRITICAL stop",
+        "without another `review`",
+        "restarts from `build`",
+        "nothing is pushed",
+        "after each stage run",  # check and build run `uv run` / `uv build` too
+        "before its reruns",  # the recorded tree is the one verify actually tested
+    ):
+        assert needle in flat3, f"finish Step 3 missing {needle!r}"
+    # The CRITICAL stop at the bound waits for the user; it is not a failed run.
+    contract = _flat(text.split("## Completion contract", 1)[1])
+    assert "is a valid stop" in contract
+    for gone in (
+        "stop at that stage",
+        "so the user can fix and re-run",
+        "the four project stages",
+        "at most two",  # the bound lives in the behavior layer only
+    ):
+        assert gone not in flat, f"finish still says {gone!r}"
+    assert "final verify" in _flat(step0)
+    assert "skipped" in step5
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert m is not None
+    assert "final verify" in m.group(1)
+    # Step 5's review-comments loop amends and re-runs create-mr; it starts no stage.
+    assert "re-run `create-mr`" in _flat(step5)
+    address = step5.split("**Address review comments**", 1)[1].split("3. **", 1)[0]
+    assert "verify" not in address
+
+
 def test_rebase_conflicts_are_resolved_not_handed_back():
     # D9: the agent resolves an agent-run rebase's conflicts; it never asks whether to
     # continue, hand over or give up. Banned phrases catch the old handoff verbatim.
@@ -1776,6 +1885,11 @@ def test_integrate_skill_contract():
     assert "review" in text.lower() and "fresh" in text.lower()
     assert "zero writes" in text.lower() or "no writes" in text.lower()
     assert "--defaults" in text  # the do-NOT-reset-config warning
+    # the verify stage paragraph: finish-only, and a subset section worth writing
+    para = text.split("### `.omc/skills/verify`", 1)[1].split("### ", 1)[0]
+    assert "Running a subset" in para
+    assert "major milestones" not in para
+    assert "only within `/omc:finish`" in " ".join(para.split())
 
 
 def test_distribution_agents_task_model_policy():
@@ -1809,34 +1923,96 @@ def test_audit_and_project_review_dispatch_review_judgment_even_without_findings
 
 def test_distribution_agents_validation_cadence():
     text = (ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text()
-    for needle in (
-        "Validation cadence",
-        "/omc:check",
-        "builds the world",
-        "major milestones",
-    ):
+    for needle in ("Validation cadence", "/omc:check", "builds the world"):
         assert needle in text, f"behavior layer missing {needle!r}"
-    # finish bullet lists all four stage gates in order
-    assert "`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review`" in text
     prose = " ".join(text.split())
+    # finish bullet: the stage arrow ends in the final verify, skipped on an unchanged tree
     for needle in (
+        "`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review` → final `/omc:verify`",
+        "skipped when the tree is unchanged since verify passed",
+    ):
+        assert needle in prose, f"behavior layer missing finish route {needle!r}"
+    cadence = prose.split("**Validation cadence**", 1)[1].split("**stage-gate rule", 1)[0]
+    for needle in (
+        "only within `/omc:finish`",
+        "before review, and last before the push",
+        "the user or the project may run it at any time",
         "end of `/omc:implement`",
-        "`/omc:audit`",
-        "stage-gate rule",
+        "post-fix pass",
+    ):
+        assert needle in cadence, f"validation cadence missing {needle!r}"
+    gate = prose.split("**stage-gate rule", 1)[1].split("**Ask the graph", 1)[0]
+    # the general clause is kept
+    for needle in (
+        "`OMC_STAGE`",
         '"passed": false',
         "no verdict",
         '"configured": false',
         "heavy coding tier",
         "at most two fix-and-rerun cycles",
-        "three gate runs",
         "restart from `/omc:build`",
         "failed `/omc:check`",
+        "never resets the bound",
         "CRITICAL",
-        "no handoff commit",
-        "no `finish`",
-        "no handoff commit, continuation offer or `/omc:audit` invocation",
+        "headless",
     ):
-        assert needle in prose, f"behavior layer missing stage-gate contract {needle!r}"
+        assert needle in gate, f"stage-gate rule missing {needle!r}"
+    # the verify clause: targeted rerun, then build once, then the full verify
+    assert (
+        gate.index("A red `/omc:verify`")
+        < gate.index("rerun only the failed pieces")
+        < gate.index("`/omc:build` once")
+        < gate.index("the full `/omc:verify`")
+    )
+    for needle in (
+        "`/omc:verify rerun only: <pieces>`",
+        "briefed with verify's failure output",
+        "pieces that are red now",
+        "nothing before it is rerun",
+    ):
+        assert needle in gate, f"stage-gate verify clause missing {needle!r}"
+    # no subset section: no targeted rerun, so one full verify per cycle
+    skip = 'Without a "Running a subset" section in the project\'s verify skill'
+    assert gate.index("rerun only the failed pieces") < gate.index(skip)
+    for needle in (
+        "the targeted rerun is skipped",
+        "`/omc:check`, then `/omc:build` once, then the full `/omc:verify`",
+        "one full run per cycle",
+    ):
+        assert needle in gate[gate.index(skip) :], f"verify clause missing skip {needle!r}"
+    # a fix never repairs the stage itself
+    for needle in (
+        "a fix repairs the code under test, never the stage's own definition",
+        "`.omc/skills/<stage>/`",
+        "the script or command it runs",
+        "a stage that only passes by editing itself is the CRITICAL question",
+        "asked at once, without spending the remaining cycles",
+    ):
+        assert needle in gate, f"stage-gate rule missing stage-definition guard {needle!r}"
+    # one counter: fix dispatches, shared across the conductor run
+    for needle in (
+        "a cycle is one fix dispatch",
+        "never counted on their own",
+        "shared by every stage",
+        "a fix whose rerun passes by flake still spent its cycle",
+    ):
+        assert needle in gate, f"stage-gate rule missing one-counter wording {needle!r}"
+    # no later phase on a red gate
+    for needle in (
+        "implement makes no handoff on a red check",
+        "audit invokes no `finish`",
+        "finish pushes nothing",
+    ):
+        assert needle in gate, f"stage-gate rule missing red-gate stop {needle!r}"
+    for gone in (
+        "major milestones",
+        "three gate runs",
+        "`/omc:build` → `/omc:verify` before handoff",
+        "no handoff commit, continuation offer or `/omc:audit` invocation",
+        "also `/omc:verify` when its fixes changed",
+        "flaky pass on rerun consumes a cycle",
+    ):
+        assert gone not in prose, f"behavior layer still carries {gone!r}"
 
 
 def test_explain_dependency_skill_contract():

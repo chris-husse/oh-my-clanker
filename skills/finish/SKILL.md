@@ -1,6 +1,6 @@
 ---
 name: finish
-description: Finish the current feature branch - squash to one commit, rebase onto the base, run the project's check/build/verify/review stages, describe the commit as the MR and push, then offer to close the worktree, address review comments, or discuss. Use when work on a ticket is done and ready for review.
+description: Finish the current feature branch - squash to one commit, rebase onto the base, run the project's check/build/verify/review stages and a final verify, describe the commit as the MR and push, then offer to close the worktree, address review comments, or discuss. Use when work on a ticket is done and ready for review.
 ---
 
 # omc finish
@@ -11,8 +11,9 @@ but any feature branch works.
 ## Step 0 — externalize the flow (before the gate, no exceptions)
 
 **Write every step below into the task list now**, as your first action:
-gate → anything-to-finish → rebase-main --squash → the four project stages →
-create-mr (describe + push) → ticket-sync (review phase) → offer follow-ups.
+gate → anything-to-finish → rebase-main --squash → check → build →
+pre-review verify → review → final verify (skipped when the tree is unchanged)
+→ create-mr (describe + push) → ticket-sync (review phase) → offer follow-ups.
 Mark each completed as you pass it.
 
 This is the longest composed flow in omc: eight sub-skills, each arriving as a
@@ -74,22 +75,60 @@ primary for `/omc:explain` queries.
   e.g. a rebase still paused there after an rc 3 bail; finish the rebase
   first).
 
-## Step 3 — project stages: check → build → verify → review
+## Step 3 — project stages: check → build → verify → review → final verify
 
 Invoke the **`check`**, **`build`**, **`verify`**, and **`review`** skills,
-in that order — check first, as the cheap fail-fast gate: a broken unit
-test dies in seconds, not after a world-build. Each is a proxy for the
-project's own `.omc/skills/<stage>/SKILL.md`:
+in that order, then **`verify`** once more: `check` → `build` → `verify` →
+`review` → final `verify`. Check comes first, as the cheap fail-fast gate: a
+broken unit test dies in seconds, not after a world-build. The first verify
+run is the **pre-review verify**; the second is the **final verify**, the
+last stage before the push. This step is the only place an agent starts
+`verify`. Each stage is a proxy for the project's own
+`.omc/skills/<stage>/SKILL.md`:
 
-- A stage that FAILED (`"passed": false`, regardless of `"configured"`) →
-  **stop at that stage** (do not run the remaining stages, do not push):
-  report which stage failed and why, and leave the branch squashed so the
-  user can fix and re-run `finish`.
+- **Announce each verify run.** Before each verify run, say on its own line
+  that the project's `verify` stage is starting and which of the two runs it
+  is (pre-review verify or final verify) — it can run for minutes, and a
+  silent minute is a bug.
+- **Restore tool drift after each stage run** (check, build and verify alike,
+  targeted reruns included), before anything is amended: restore only known
+  tool drift, such as a lockfile changed by `uv run` or `uv build`; never
+  discard unknown work. Amended drift would land in the published commit and
+  change the tree verify just passed, and `create-mr` needs a clean working
+  tree.
+- **Record the verified tree.** Each time a full verify passes — the
+  pre-review verify, the final verify, or a full run inside a repair loop —
+  record `git rev-parse HEAD^{tree}` at once, before anything is amended, in
+  the task list entry for the final verify. No file is written; the task list
+  carries the value through this flow.
+- **Skip rule for the final verify.** After `review` and its amend, compare
+  `git rev-parse HEAD^{tree}` with the recorded value. Equal → skip the final
+  verify and report "final verify skipped — tree unchanged since verify
+  passed". Different → run the final verify. Any change counts: a review that
+  only wrote a waiver into the design record changes the tree, so the final
+  verify runs; what a documentation-only change needs is the project's
+  `verify` skill's call.
+- A stage that FAILED (`"passed": false`, regardless of `"configured"`, or no
+  verdict) → follow the behavior layer's **stage-gate rule — bounded
+  fix-forward, then a CRITICAL stop**. Each fix is amended into the squashed
+  commit (`git add -u && git commit --amend --no-edit`), as stage-made
+  tracked changes are, before its reruns — so the tree a passing verify
+  records is the tree it actually tested. A red `check`, `build` or `review`
+  falls under the rule's general clause: after the fix and `/omc:check`, the
+  sequence restarts from `build` and passes through the pre-review verify,
+  `review` and the final verify (with its skip rule) again. A red verify —
+  pre-review or final — is repaired by the rule's verify clause, which
+  reruns nothing before verify: a repaired pre-review verify continues with
+  `review`, and final-verify fixes are amended and pushed without another
+  `review`. At the bound, ask the rule's one CRITICAL question: the branch
+  stays squashed and nothing is pushed. The user's answer resumes the
+  remaining steps.
 - A stage that changed TRACKED files (formatters, autofixes,
   behavior-preserving fixes from grug and human-review, or their waivers
   written into the design record)
   → amend those changes into the squashed commit (`git add -u && git commit
-  --amend --no-edit`); leave untracked artifacts alone.
+  --amend --no-edit`) — only what remains once known tool drift is
+  restored; leave untracked artifacts alone.
 - Unconfigured (`"configured": false`) → the project half was skipped; note
   it and move on once `"passed"` (read first, above) is `true`. The `review`
   proxy also runs omc's own grug and human-review lenses on every project,
@@ -118,8 +157,9 @@ follow-ups.
 ## Step 5 — offer follow-ups
 
 Report what happened (squashed N→1, N being Step 1's count — 0 means only
-uncommitted changes were folded; rebased onto `<base>`, stage outcomes,
-pushed, title),
+uncommitted changes were folded; rebased onto `<base>`, stage outcomes
+(both verify runs; whether the final verify ran or was skipped), pushed,
+title),
 then offer exactly these three options (interactively where the harness
 supports it; in a non-interactive/headless run, list them and end):
 
@@ -140,5 +180,8 @@ supports it; in a non-interactive/headless run, list them and end):
 real description. Before ending the turn, read the task list: any step still
 pending means you are not done — continue with it. A branch left squashed under
 a `wip:` message, or pushed but with the ticket never moved, is a failed run,
-not a partial success. Phase-to-phase transitions are NOT gates: do not ask
-permission between steps.
+not a partial success. The one exception is the stage-gate rule's CRITICAL
+stop at the bound: the branch stays squashed, nothing is pushed, and the run
+waits for the user's answer — that is a valid stop, not a failed run.
+Phase-to-phase transitions are NOT gates: do not ask permission between
+steps.

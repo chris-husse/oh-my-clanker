@@ -157,7 +157,14 @@ exit 0
 
 
 def _runner_with_docker_stub(
-    tmp_path, mode: str, scenario: str, *, no_docker=False, collect_only=False
+    tmp_path,
+    mode: str,
+    scenario: str,
+    *,
+    no_docker=False,
+    collect_only=False,
+    extra_args: tuple[str, ...] = (),
+    uv_body: str = "#!/bin/sh\nexit 0\n",
 ):
     stubs = tmp_path / "stubs"
     stubs.mkdir()
@@ -226,7 +233,7 @@ esac
 exit 0
 """)
     (stubs / "date").write_text("#!/bin/sh\nprintf '1700000000\\n'\n")
-    (stubs / "uv").write_text("#!/bin/sh\nexit 0\n")
+    (stubs / "uv").write_text(uv_body)
     for stub in ("docker", "date", "uv"):
         (stubs / stub).chmod(0o755)
     env = {
@@ -239,7 +246,7 @@ exit 0
         env["OMC_E2E_NO_DOCKER"] = "1"
     else:
         env.pop("OMC_E2E_NO_DOCKER", None)
-    argv = ["/bin/bash", str(REPO / "scripts" / "e2e.sh"), mode]
+    argv = ["/bin/bash", str(REPO / "scripts" / "e2e.sh"), mode, *extra_args]
     if collect_only:
         argv.append("--collect-only")
     result = subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True)
@@ -345,3 +352,91 @@ def test_runner_silent_when_nothing_to_prune(tmp_path):
     assert result.returncode == 0, result.stderr
     assert calls[0] == ["ps", "-aq", "--filter", "label=omc.e2e=holder"]
     assert "pruned" not in result.stderr
+
+
+# pytest exits 5 when its marker filter leaves nothing: a golden node id
+# collects nothing in the parallel (non-golden) pass.
+_EMPTY_PARALLEL_PASS_UV = """#!/bin/sh
+case "$*" in *"not golden"*) exit 5 ;; esac
+exit 0
+"""
+_GOLDEN_NODE_ID = "tests/e2e/golden/test_golden_claude.py::test_stage_recorded"
+
+
+def test_runner_all_tolerates_an_empty_parallel_pass_only_with_a_golden_selection(tmp_path):
+    (tmp_path / "selected").mkdir()
+    (tmp_path / "unselected").mkdir()
+    selected, _ = _runner_with_docker_stub(
+        tmp_path / "selected",
+        "all",
+        "default",
+        extra_args=(_GOLDEN_NODE_ID,),
+        uv_body=_EMPTY_PARALLEL_PASS_UV,
+    )
+    unselected, _ = _runner_with_docker_stub(
+        tmp_path / "unselected", "all", "default", uv_body=_EMPTY_PARALLEL_PASS_UV
+    )
+
+    assert selected.returncode == 0, selected.stderr
+    assert "no non-golden test matched the selection" in selected.stderr
+    assert unselected.returncode == 5, unselected.stderr
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        ("tests/e2e/test_e2e_codex_gate.py::test_codex_gate",),
+        ("tests/e2e/variations/test_from_recorded.py::test_expensive_variation",),
+        (_GOLDEN_NODE_ID, "tests/e2e/variations/test_from_recorded.py::test_expensive_variation"),
+    ],
+    ids=["codex-gate-node-id", "expensive-variation-node-id", "golden-plus-non-golden"],
+)
+def test_runner_all_never_tolerates_an_empty_parallel_pass_for_a_non_golden_node_id(
+    tmp_path, selection
+):
+    # a non-golden node id the parallel pass deselects (codex_gate, expensive)
+    # ran nowhere: the golden pass only ran the golden path
+    result, _ = _runner_with_docker_stub(
+        tmp_path, "all", "default", extra_args=selection, uv_body=_EMPTY_PARALLEL_PASS_UV
+    )
+
+    assert result.returncode == 5, result.stderr
+    assert "no non-golden test matched the selection" not in result.stderr
+
+
+def test_runner_rest_mode_still_fails_on_an_empty_selection(tmp_path):
+    result, _ = _runner_with_docker_stub(
+        tmp_path,
+        "rest",
+        "default",
+        extra_args=(_GOLDEN_NODE_ID,),
+        uv_body=_EMPTY_PARALLEL_PASS_UV,
+    )
+
+    assert result.returncode == 5, result.stderr
+
+
+def test_runner_all_never_tolerates_an_empty_parallel_pass_for_a_keyword_filter(tmp_path):
+    # `-k` deselects golden stages; its empty parallel pass is no golden node-id subset
+    result, _ = _runner_with_docker_stub(
+        tmp_path,
+        "all",
+        "default",
+        extra_args=("-k", "something"),
+        uv_body=_EMPTY_PARALLEL_PASS_UV,
+    )
+
+    assert result.returncode == 5, result.stderr
+    assert "no non-golden test matched the selection" not in result.stderr
+
+
+def test_runner_all_with_a_selection_still_fails_on_a_parallel_failure(tmp_path):
+    result, _ = _runner_with_docker_stub(
+        tmp_path,
+        "all",
+        "default",
+        extra_args=(_GOLDEN_NODE_ID,),
+        uv_body='#!/bin/sh\ncase "$*" in *"not golden"*) exit 1 ;; esac\nexit 0\n',
+    )
+
+    assert result.returncode == 1, result.stderr

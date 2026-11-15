@@ -1,10 +1,15 @@
-"""Finish stage order within the full implementation session's marker history."""
+"""Stage placement within the full session's cumulative marker history:
+implement runs check only; finish, modelled from the last review, runs
+check → build → verify → review and may add a final verify, and its bounded
+repair loops (fix → check → restart) may repeat stages; trailing checks after
+finish are tolerated."""
 
 import pytest
 
-from tests.e2e import lifecycle_helpers
 from tests.e2e.lifecycle_helpers import (
+    _assert_check_only_before_finish,
     _assert_finish_stage_order,
+    _assert_implement_check_only,
     _assert_recorded,
     _assert_reviewed_record,
 )
@@ -13,47 +18,73 @@ from tests.e2e.lifecycle_helpers import (
 @pytest.mark.parametrize(
     "markers",
     [
-        "check\nbuild\nverify\n",
-        "check\ncheck\nreview\ncheck\nbuild\nverify\n",
-        "check\nbuild\nverify\ncheck\nbuild\nverify\nreview\n",
+        "check\n",
+        "check\ncheck\nreview\ncheck\n",
     ],
-    ids=["milestone", "preceding-checks-and-review", "later-finish-block"],
+    ids=[
+        "implement-only",
+        "implement-checks-and-review",
+    ],
 )
-def test_implementation_stages_require_ordered_milestone(markers):
-    lifecycle_helpers._assert_implement_stage_order(markers)
+def test_implement_markers_accept_checks_only(markers):
+    _assert_implement_check_only(markers)
 
 
 @pytest.mark.parametrize(
     "markers",
     [
         "",
-        "build\nverify\n",
-        "verify\ncheck\nbuild\n",
-        "check\nverify\nbuild\n",
-        "check\nbuild\nreview\nverify\n",
-        "check\nbuild\ncheck\nverify\n",
+        "review\n",
         "check\nbuild\n",
+        "check\nverify\n",
+        "check\nbuild\nverify\nreview\n",
     ],
     ids=[
         "empty",
         "no-check",
-        "check-after-build",
-        "reversed",
-        "interleaved-review",
-        "interleaved-check",
-        "missing-verify",
+        "build",
+        "verify",
+        "finish-block",
     ],
 )
-def test_implementation_stages_reject_missing_or_separated_milestone(markers):
+def test_implement_markers_reject_missing_check_build_or_verify(markers):
     with pytest.raises(AssertionError):
-        lifecycle_helpers._assert_implement_stage_order(markers)
+        _assert_implement_check_only(markers)
 
 
-def test_audit_verify_count_only_applies_to_explicit_drift_repair():
-    lifecycle_helpers._assert_audit_verify_count("check\nbuild\nverify\n", drift_repair=False)
+@pytest.mark.parametrize(
+    "markers",
+    [
+        "check\ncheck\nbuild\nverify\nreview\n",
+        "check\nreview\ncheck\nbuild\nverify\nreview\nverify\n",
+        "check\nbuild\ncheck\nbuild\nverify\nreview\nverify\n",
+        "check\nbuild\nverify\ncheck\nverify\nbuild\nverify\nreview\nverify\n",
+    ],
+    ids=[
+        "checks-then-finish",
+        "review-then-finish-final-verify",
+        "red-build-restart",
+        "red-verify-repair",
+    ],
+)
+def test_no_verify_before_the_first_build_accepts_finish_repairs(markers):
+    _assert_check_only_before_finish(markers)
+
+
+@pytest.mark.parametrize(
+    "markers",
+    [
+        "check\nverify\ncheck\nbuild\nverify\nreview\n",
+        "verify\ncheck\nbuild\nverify\nreview\n",
+    ],
+    ids=[
+        "audit-verify-before-finish",
+        "verify-first",
+    ],
+)
+def test_no_verify_before_the_first_build_rejects_early_verify(markers):
     with pytest.raises(AssertionError):
-        lifecycle_helpers._assert_audit_verify_count("verify\nverify\n", drift_repair=True)
-    lifecycle_helpers._assert_audit_verify_count("verify\nverify\nverify\n", drift_repair=True)
+        _assert_check_only_before_finish(markers)
 
 
 @pytest.mark.parametrize(
@@ -61,17 +92,41 @@ def test_audit_verify_count_only_applies_to_explicit_drift_repair():
     [
         "check\nbuild\nverify\nreview\n",
         "check\ncheck\nreview\ncheck\nbuild\nverify\nreview\n",
-        "check\nbuild\nverify\nreview\ncheck\n",
         "check\nbuild\ncheck\nreview\nverify\ncheck\ncheck\ncheck\nbuild\nbuild\nverify\nverify\nreview\nreview\n",
+        "check\nbuild\nverify\nreview\nverify\n",
+        "check\nbuild\nverify\nverify\nreview\nverify\nverify\n",
+        "check\nbuild\nverify\ncheck\nverify\nbuild\nverify\nreview\nverify\n",
+        "check\nbuild\nverify\nreview\nverify\ncheck\nverify\nbuild\nverify\n",
+        "check\nbuild\ncheck\nbuild\nverify\nreview\nverify\n",
+        "check\nbuild\nverify\nreview\ncheck\nbuild\nverify\nreview\nverify\n",
+        "check\nbuild\nverify\nreview\ncheck\n",
+        "check\nbuild\nverify\nreview\nverify\ncheck\n",
+        "check\nbuild\nverify\ncheck\nbuild\nverify\nreview\n",
+        "check\nbuild\nverify\nreview\nverify\ncheck\nbuild\nverify\n",
+        "check\nbuild\nverify\nreview\nverify\ncheck\nbuild\nverify\ncheck\nbuild\nverify\n",
+        "check\nbuild\ncheck\nbuild\nverify\nreview\n",
+        "check\nbuild\nverify\nreview\ncheck\nbuild\nverify\nreview\n",
     ],
     ids=[
         "finish",
         "implementation-review-before-finish",
-        "supplemental-check-after-finish",
         "observed-repeated-finish-stages",
+        "final-verify",
+        "retried-final-verify",
+        "red-pre-review-verify-repaired",
+        "red-final-verify-repaired",
+        "red-build-repaired",
+        "red-review-repaired",
+        "supplemental-check-after-finish",
+        "final-verify-then-supplemental-check",
+        "red-pre-review-verify-no-subset",
+        "red-final-verify-no-subset",
+        "red-final-verify-no-subset-twice",
+        "red-build-repaired-no-final-verify",
+        "red-review-repaired-no-final-verify",
     ],
 )
-def test_finish_stages_allow_validation_outside_finish(markers):
+def test_finish_stages_accept_final_verify_and_repair_loops(markers):
     _assert_finish_stage_order(markers)
 
 
@@ -87,6 +142,12 @@ def test_finish_stages_allow_validation_outside_finish(markers):
         "check\nbuild\ncheck\nverify\nreview\n",
         "check\ncheck\nbuild\nbuild\nreview\nreview\nverify\nverify\n",
         "check\ncheck\nbuild\nbuild\ncheck\ncheck\nverify\nverify\nreview\nreview\n",
+        "check\nbuild\nverify\nreview\nverify\nreview\n",
+        "check\nbuild\nverify\nreview\nverify\nbuild\nverify\n",
+        "check\nbuild\nverify\nreview\nverify\ncheck\nbuild\n",
+        "check\nbuild\nverify\nreview\ncheck\nreview\n",
+        "check\nbuild\nverify\ncheck\nverify\nreview\n",
+        "check\nbuild\nverify\nreview\nverify\ncheck\nverify\n",
     ],
     ids=[
         "no-stages",
@@ -98,9 +159,15 @@ def test_finish_stages_allow_validation_outside_finish(markers):
         "interleaved-check",
         "duplicated-out-of-order",
         "duplicated-interleaved-check",
+        "review-after-final-verify",
+        "build-after-final-verify-without-fix-check",
+        "trailing-build-after-check",
+        "trailing-review-after-check",
+        "pre-review-targeted-rerun-without-build-and-full-verify",
+        "final-targeted-rerun-without-build-and-full-verify",
     ],
 )
-def test_finish_stages_require_a_complete_ordered_block(markers):
+def test_finish_stages_reject_out_of_order_or_unrepaired_tails(markers):
     with pytest.raises(AssertionError):
         _assert_finish_stage_order(markers)
 

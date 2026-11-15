@@ -155,6 +155,13 @@ def test_finish_runs_passing_check_and_build_stages_then_pushes(container):
     assert rc == 0 and count.strip() == "1", f"expected pushed squash, got {count!r}"
 
 
+# Finish may now spend up to two fix attempts on the red build stage before
+# its CRITICAL stop (spec D7, the bounded fix-forward stage-gate rule); this
+# headless run's `--allowed-tools Bash Read Skill` cannot dispatch a fix
+# subagent, so it may stop sooner. Nothing is pushed at the bound, so the
+# artifact below still holds. Not re-measured on this host (no token): the
+# next token-bearing /omc:verify run must re-measure this test against the
+# default 300 s ceiling and move it to `expensive` if it exceeds it.
 def test_finish_stops_before_push_on_failing_stage(container):
     require_token("claude")
     configure_omc(container, "claude")
@@ -171,6 +178,9 @@ def test_finish_stops_before_push_on_failing_stage(container):
         container, ["bash", "-c", f"cd {repo} && git add -A && git commit -qm 'add build stage'"]
     )
     assert rc == 0, out
+    stage_path = ".omc/skills/build/SKILL.md"
+    rc, original_stage = run_in(container, ["git", "-C", repo, "show", f"HEAD:{stage_path}"])
+    assert rc == 0, original_stage
 
     rc, out = run_in(
         container,
@@ -188,6 +198,10 @@ def test_finish_stops_before_push_on_failing_stage(container):
         cwd=repo,
         timeout=900,
     )
+    rc, stage = run_in(container, ["git", "-C", repo, "show", f"feature/manual-fix:{stage_path}"])
+    assert rc == 0 and stage == original_stage, (
+        f"finish changed the committed build stage; transcript:\n{out}"
+    )
     # the branch must NOT reach origin when a stage fails
     rc2, _ = run_in(
         container,
@@ -196,6 +210,13 @@ def test_finish_stops_before_push_on_failing_stage(container):
     assert rc2 != 0, f"failing build stage must stop the push!\ntranscript:\n{out[:2000]}"
 
 
+# Finish may now spend up to two fix attempts on the red check stage before
+# its CRITICAL stop (spec D7, the bounded fix-forward stage-gate rule); this
+# headless run's `--allowed-tools Bash Read Skill` cannot dispatch a fix
+# subagent, so it may stop sooner. Nothing is pushed at the bound, so the
+# artifact below still holds. Not re-measured on this host (no token): the
+# next token-bearing /omc:verify run must re-measure this test against the
+# default 300 s ceiling and move it to `expensive` if it exceeds it.
 def test_finish_stops_before_push_on_failing_check_stage(container):
     require_token("claude")
     configure_omc(container, "claude")
@@ -212,6 +233,9 @@ def test_finish_stops_before_push_on_failing_check_stage(container):
         container, ["bash", "-c", f"cd {repo} && git add -A && git commit -qm 'add check stage'"]
     )
     assert rc == 0, out
+    stage_path = ".omc/skills/check/SKILL.md"
+    rc, original_stage = run_in(container, ["git", "-C", repo, "show", f"HEAD:{stage_path}"])
+    assert rc == 0, original_stage
 
     rc, out = run_in(
         container,
@@ -228,6 +252,10 @@ def test_finish_stops_before_push_on_failing_check_stage(container):
         ],
         cwd=repo,
         timeout=900,
+    )
+    rc, stage = run_in(container, ["git", "-C", repo, "show", f"feature/manual-fix:{stage_path}"])
+    assert rc == 0 and stage == original_stage, (
+        f"finish changed the committed check stage; transcript:\n{out}"
     )
     # the branch must NOT reach origin when the check stage fails
     rc2, _ = run_in(
