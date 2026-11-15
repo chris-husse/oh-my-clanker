@@ -2,6 +2,8 @@
 # E2E runner: build the image ONCE per source tree, run the golden stages
 # sequentially (stage snapshots are their side effect), then everything else
 # in parallel. Usage: scripts/e2e.sh [golden|rest|all|prune] [pytest args...]
+# `all` with pytest node ids runs the golden path in full, then only the named
+# non-golden tests; a golden-only selection leaves the parallel pass empty.
 #
 # OMC_E2E_NO_DOCKER=1 skips every Docker action (build, sweep, snapshot
 # check) — for `--collect-only` runs and the unit test that pins the recipes.
@@ -145,6 +147,35 @@ run_rest() {
     uv run pytest -m "e2e and not golden and not expensive and not codex_gate" -q -n auto \
         --dist loadgroup -p no:cacheprovider "$@"
 }
+selection_is_golden_node_ids() {
+    # At least one argument, and every one except --collect-only a golden
+    # pytest node id (`tests/e2e/golden/<file>::<test>`): only then did the
+    # golden pass run the whole selection. A `-k`/`-m` filter can deselect
+    # golden stages, and a non-golden node id the parallel pass deselects
+    # (codex_gate, expensive) ran nowhere, so their empty parallel pass is
+    # no evidence that anything ran.
+    local arg node_id=0
+    for arg in "$@"; do
+        [ "$arg" = "--collect-only" ] && continue
+        case "$arg" in
+            tests/e2e/golden/*::* | */tests/e2e/golden/*::*) node_id=1 ;;
+            *) return 1 ;;
+        esac
+    done
+    [ "$node_id" = 1 ]
+}
+run_rest_selected() {
+    # pytest exits 5 when nothing is collected: with a golden node-id
+    # selection (`all` mode only), the golden pass already ran it; any other
+    # failure still fails.
+    local rc=0
+    run_rest "$@" || rc=$?
+    if [ "$rc" -eq 5 ] && selection_is_golden_node_ids "$@"; then
+        echo "no non-golden test matched the selection; the golden pass ran it" >&2
+        return 0
+    fi
+    return "$rc"
+}
 prune() {
     # Immediate cleanup of every other tree; automatic pruning above uses
     # a 72 h threshold for holders with a valid creation label.
@@ -160,7 +191,7 @@ prune() {
 case "$mode" in
     golden) prune_stale; ensure_image; hold_image; sweep; run_golden "$@" ;;
     rest) prune_stale; ensure_image; hold_image; run_rest "$@" ;;
-    all) prune_stale; ensure_image; hold_image; sweep; run_golden "$@"; run_rest "$@" ;;
+    all) prune_stale; ensure_image; hold_image; sweep; run_golden "$@"; run_rest_selected "$@" ;;
     prune) prune ;;
     *) echo "usage: scripts/e2e.sh [golden|rest|all|prune] [pytest args]" >&2; exit 2 ;;
 esac

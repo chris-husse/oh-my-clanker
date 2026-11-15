@@ -9,9 +9,9 @@ import pytest
 from ..harness import run_in
 from ..lifecycle_helpers import (
     _assert_boundary,
+    _assert_check_only_before_finish,
     _assert_critical_wait,
     _assert_finish_stage_order,
-    _assert_implement_stage_order,
     _assert_primary_boundary,
     _assert_published_fix,
     _direct_design,
@@ -219,11 +219,9 @@ def test_design_auto_advances_to_push(stage_session):
     assert rc == 0 and not dirty.strip(), f"the chain left a dirty tree: {dirty}; {answer}"
     rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
     assert rc == 0, f"project stages never executed; {answer}"
-    _assert_implement_stage_order(markers)
-    # the implement milestone and finish each run verify: the chain skipped neither
-    assert markers.splitlines().count("verify") >= 2, (
-        f"expected implement-milestone and finish verify runs: {markers}; {answer}"
-    )
+    # implement and audit gate on check only; finish runs its pre-review verify
+    # and at most a final verify after review, plus their bounded repair reruns
+    _assert_check_only_before_finish(markers)
     _assert_finish_stage_order(markers)
     _assert_published_fix(
         container, m["repo"], worktree, branch, "def greeting():\n    return 'Goodbye, world!'\n"

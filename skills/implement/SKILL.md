@@ -11,7 +11,7 @@ fresh session that `omc implement [--claude|--codex]` seeded in this worktree.
 With provider selection per step off (the default), `/omc:design` or a
 directly typed write-plan invokes it in the same turn; the committed record
 plus that setting carry the same authority as the typed word (behavior
-layer). Four phases, strictly in order; each phase is a black-box command call.
+layer). Three phases, strictly in order; each phase is a black-box command call.
 /omc:implement IS the user's approval to carry the committed record through
 committed implementation on this branch: do not ask permission between phases. The only
 interactive stops are genuine blockers and CRITICAL questions a plan cannot
@@ -24,8 +24,8 @@ satisfied by this direct command.
 
 ## Phase -1 — externalize the flow (first action, no exceptions)
 
-**Write the four phases into the task list now**, before the record gate:
-plan → subagent build → milestone gate → handoff:
+**Write the three phases into the task list now**, before the record gate:
+plan → subagent build → handoff:
 continue into `/omc:audit` when provider selection per step is off,
 otherwise state the three continuations and wait. Mark each completed as you
 pass it.
@@ -74,8 +74,8 @@ Execute the plan via `superpowers:subagent-driven-development` — a fresh
 subagent per task; its own checkpoints and reviews apply.
 
 Require each implementation worker to commit each task's tested changes before
-returning. The task commits belong to Phase 2, before the milestone gate; do
-not defer them to the Phase 3 handoff commit. After the task review, confirm
+returning. The task commits belong to Phase 2, before the handoff; do not
+defer them to the Phase 3 handoff commit. After the task review, confirm
 the worker's commit exists before running that task's `/omc:check`.
 
 For each implementation task, read its `Complexity:` value and dispatch the
@@ -94,9 +94,20 @@ After EACH task's subagent completes (and its reviews pass), run
 need, run them) — before dispatching the next task. A failing check blocks
 progression: fix forward until check passes. Never substitute ad-hoc test
 commands for the stage; an unconfigured check is a pass, so this costs
-nothing on projects without one. Full E2E (`/omc:verify`) is not part of
-the per-task loop; it runs once at the milestone gate below, and `finish`
-runs all four stages again on the squashed commit.
+nothing on projects without one. Full E2E never runs in implement; `finish`
+runs `verify` on the squashed commit.
+
+The last task's green `/omc:check` is the final gate before the handoff. Read
+its single-line `OMC_STAGE` verdict: only `"passed": true` permits
+progression, including an unconfigured check with `"configured": false`. A
+missing verdict is a failure, even if the invocation otherwise appears
+successful. For a red check, follow the behavior layer's stage-gate rule:
+bounded fix-forward, then a CRITICAL stop. Make no handoff commit while the
+check is red. Even with provider selection per step off, a red `/omc:check`
+never reaches `/omc:audit`. On a red check, keep those task commits;
+the plan was already committed by `/omc:write-plan`; the red check blocks
+only the handoff commit. After a required answer, resume the remaining phases
+under the same `/omc:implement` authorization.
 
 Phase 1 → 2 is NOT a gate: once the plan path is in hand, start the
 subagent build immediately. Do not ask which execution approach to use
@@ -105,35 +116,11 @@ and do not ask permission to begin — the user typed /omc:implement (or the
 chain invoked it), that IS the instruction to build. The only stops are CRITICAL questions a plan
 cannot answer and genuine blockers.
 
-## Phase 2b — milestone gate
-
-Before `/omc:build`, confirm at least one task commit exists after the
-design-record commit. A task commit is one that touches a path outside
-`docs/superpowers/`; the plan commit alone never counts. If none exists,
-Phase 2 is unfinished: finish and commit the implementation task before
-entering this gate.
-
-After the last task's subagent and reviews pass, its green `/omc:check`
-supplies this milestone's check. Invoke `/omc:build`, then `/omc:verify` as
-black-box project-stage proxies. Before invoking verify, announce on its own
-line that the project's `verify` stage is starting. Read each single-line
-`OMC_STAGE` verdict: only `"passed": true` permits progression, including
-an unconfigured stage with `"configured": false`. A missing verdict is a
-failure, even if the invocation otherwise appears successful.
-
-For any red stage, follow the behavior layer's stage-gate rule: bounded fix-forward, then a CRITICAL stop. Do not enter Phase 3 or make a handoff
-commit while the gate is red. With provider selection per step off too: a
-red gate never reaches `/omc:audit`. On a red gate, keep those task commits;
-the plan was already committed by `/omc:write-plan`; the gate blocks only
-the handoff commit. After a required answer, resume this gate and the
-remaining phases under the same `/omc:implement` authorization.
-
 ## Phase 3 — hand off
 
 Commit the plan's ticked checkboxes and any tracked product or documentation
 changes left by the implementation workers. Restore only known tool drift,
-such as a lockfile changed by `uv run` or the milestone verify run; never
-discard unknown work.
+such as a lockfile changed by `uv run`; never discard unknown work.
 Verify the working tree is
 clean and at least one task commit exists over the base — a commit that
 touches a path outside `docs/superpowers/`, so the record and plan commits

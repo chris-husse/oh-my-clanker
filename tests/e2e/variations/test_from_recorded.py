@@ -3,7 +3,6 @@
 import pytest
 
 from ..harness import run_in
-from ..judge import judge
 from ..lifecycle_helpers import (
     IMPLEMENT_TURN_BUDGET,
     _assert_audit_refusal,
@@ -55,24 +54,32 @@ def test_audit_refuses_design_only_branch(stage_session):
 
 
 @pytest.mark.variation("recorded")
-def test_failing_verify_blocks_implementation_handoff(stage_session):
+def test_implement_never_runs_verify(stage_session):
     container, session, m = stage_session
     recorded, _ = _baseline(session, m)
+    # The sentinel turns any verify run red, so a run that started verify
+    # cannot reach a clean, check-only handoff by luck.
     rc, out = run_in(container, ["touch", "/tmp/omc-external-verify-unavailable"])
     assert rc == 0, out
 
+    evidence = {"turns": []}
     session.send(_direct_implement("claude"))
-    # Measured at 145.71 s on 2026-10-06; cancel the actor before pytest's
-    # default 300 s ceiling so artifact checks still have time to finish.
+    # Measured at 145.71 s on 2026-10-06 with the since-removed build → verify
+    # milestone gate; cancel the actor before pytest's default 300 s ceiling
+    # so artifact checks still have time to finish.
     turn = session.wait_turn(240)
-    after = session.snapshot(m["worktree"])
-
-    rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
-    assert rc == 0 and "verify" in markers.splitlines(), (
-        f"verify never ran; implementation answer: {turn['text']}"
+    _record_phase(session, m["repo"], m["worktree"], evidence, "implement", turn)
+    after = evidence["turns"][-1]["snapshot"]
+    # New plan, product changed, record untouched, nothing pushed, clean tree,
+    # and check-only stage markers: no verify marker.
+    _assert_implemented_artifacts(
+        container, m["repo"], m["worktree"], m["branch"], evidence, recorded
     )
-    # write-plan commits the plan before the build, so only commits touching
-    # paths outside docs/superpowers/plans/ prove a task commit landed.
+    rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
+    assert rc == 0, f"no stage markers after implementation: {markers!r}"
+    # write-plan commits the plan before the build and the record commit is
+    # already on the branch, so only commits touching paths outside
+    # docs/superpowers/plans/ after the record prove a task commit landed.
     rc, commits = run_in(
         container,
         [
@@ -93,34 +100,6 @@ def test_failing_verify_blocks_implementation_handoff(stage_session):
         f"stage markers: {markers!r}\n"
         f"implementation answer: {turn['text']}"
     )
-    plans = [
-        path
-        for path in after["spec_plan"]
-        if "/plans/" in path and path not in recorded["spec_plan"]
-    ]
-    assert plans, "implementation wrote no plan"
-    for plan in plans:
-        rc, _ = run_in(container, ["git", "cat-file", "-e", f"HEAD:{plan}"], cwd=m["worktree"])
-        assert rc == 0, f"planning did not commit the plan through write-plan: {plan}"
-    assert after["remote_refs"] == recorded["remote_refs"], "failing verify published branch"
-    # Artifacts above enforce the boundary; whether the answer hands the decision
-    # back to the user is a transcript quality, so a same-provider judge decides
-    # it (a literal "?" check rejected a correct numbered-options answer, 2026-10-06).
-    verdict = judge(
-        container,
-        "claude",
-        scenario="/omc:implement hit a red project verify stage (an external sentinel marks "
-        "the E2E environment unavailable) and must stop before the handoff instead of "
-        "publishing or claiming success.",
-        rubric=[
-            "the answer says the verify stage is red (it names verify) and that the handoff "
-            "did not happen",
-            "the answer asks the user for a decision or next step instead of claiming completion",
-            "the answer does not claim the branch was pushed or the work finished",
-        ],
-        artifacts=turn["text"],
-    )
-    assert verdict["passed"], verdict["reasons"]
 
 
 # Expected cost is the planning half of implement's measured 145 s run; it

@@ -390,6 +390,45 @@ def test_readme_documents_optional_write_plan():
     assert "commits only the plan file and stops with the session open" in flat
 
 
+def test_readme_documents_verify_only_in_finish():
+    root = Path(__file__).resolve().parents[2]
+    recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
+    readme = (root / "README.md").read_text()
+    recipe_lifecycle = recipe.split("#### `` ## The lifecycle:", 1)[1].split("\n#### ", 1)[0]
+    flat_recipe_lifecycle = " ".join(recipe_lifecycle.split())
+    # a red verify reruns only its failed pieces only with a subset section,
+    # and even then build and one full verify close the repair
+    subset_repair = (
+        "a red verify first reruns only its failed pieces, then build and one full verify, "
+        'when the project\'s verify skill has a "Running a subset" section; '
+        "otherwise fix → check → build → one full verify"
+    )
+    for needle in ("final verify", "only inside finish", subset_repair):
+        assert needle in flat_recipe_lifecycle, f"recipe lifecycle slot missing {needle!r}"
+    # the recipe reads the skill bodies, not only their frontmatter, for stage placement
+    sources_row = next(
+        (line for line in recipe.splitlines() if line.startswith("| Lifecycle |")), ""
+    )
+    for source in ("skills/implement/SKILL.md", "skills/audit/SKILL.md", "skills/verify/SKILL.md"):
+        assert source in sources_row, f"recipe Lifecycle sources missing {source!r}"
+    lifecycle = readme.split("## The lifecycle", 1)[1].split("\n## ", 1)[0]
+    flat = " ".join(lifecycle.split())
+    assert "check → build → verify → review → final verify" in flat
+    assert "skipped when the tree is unchanged" in flat
+    assert subset_repair in flat, "README lifecycle missing the subset-dependent verify repair"
+    for stale in (
+        "`/omc:build` then `/omc:verify` before handoff",
+        "major milestones",
+        "(a red verify first reruns only its failed pieces)",
+        "a red verify reruns only its failed pieces when",
+    ):
+        assert stale not in readme, f"README still says {stale!r}"
+    verify_row = next(
+        (line for line in readme.splitlines() if line.startswith("| `.omc/skills/verify`")), ""
+    )
+    assert "subset" in verify_row, verify_row
+
+
 def test_readme_documents_squash_before_rebase():
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
     assert "OMC_SQUASH" not in readme

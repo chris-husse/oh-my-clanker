@@ -32,6 +32,22 @@ just codex-gate
 
 A selected Codex gate with unavailable auth fails rather than disappearing.
 
+## Running a subset
+
+To rerun only some pieces, pass pytest node ids:
+
+```sh
+just e2e-tests <pytest node ids…>
+just e2e-tests tests/e2e/variations/test_from_recorded.py::test_write_plan_commits_plan_only
+```
+
+The golden path always runs in full first: its stages chain, and a fix
+changes the source id, so the stage snapshots are rebuilt. Then only the named
+non-golden tests run. A golden node id reruns the golden path alone. Use node
+ids, never `-k`: a keyword filter deselects the golden stages, so the
+variations find no snapshots. A failed Codex-gate piece reruns on its own with
+`just codex-gate tests/e2e/<file>::<test>`.
+
 The old monolithic lifecycle run (`just lifecycle-full`, the `expensive`
 tier) is evidence-only and never a gate. Changes limited to documentation
 do not require repeating successful model calls; cite the last green run.

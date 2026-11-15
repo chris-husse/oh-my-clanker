@@ -105,8 +105,11 @@ in review mode: the skill says `make test` while CI runs `just build`.
 What's the heavier "does it still work" tier here — integration tests, e2e
 suites, docker harnesses, smoke scripts? How long does it take, what does it
 need (services, tokens)? Propose the stage with honest cost notes and hard
-pass criteria. Reserved for after major milestones — never the routine dev
-loop.
+pass criteria. An agent runs it only within `/omc:finish` (before review,
+and last before the push); the user or the project may run it at any time.
+When the project's E2E runner can select tests, suggest a "Running a subset"
+section saying how to rerun only named pieces, so a red verify reruns just
+the failed pieces after a fix.
 
 ### `.omc/skills/review`
 What do this project's reviews actually check — CONTRIBUTING.md, CI lint

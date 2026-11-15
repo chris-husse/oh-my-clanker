@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 
 import pytest
@@ -611,33 +612,69 @@ def _assert_child_event(provider, events):
         ), "implementation did not dispatch a real Claude child"
 
 
-def _assert_finish_stage_order(markers):
+# Finish's red stages fix forward: fix → check → restart from build (a red
+# verify first reruns its failed pieces when the project documents a subset,
+# then build and the full verify; without one, build and the full verify).
+# Every repair group therefore ends in "build verify". After the last review
+# only the final verify and its repair loop may follow, then any trailing
+# checks (a check carries no build or verify risk).
+_REPAIRED_VERIFY = r"verify( check( verify)? build verify)*"
+_VERIFY_AFTER_BUILD = re.compile(_REPAIRED_VERIFY)
+_FINAL_VERIFY_TAIL = re.compile(rf"({_REPAIRED_VERIFY})?")
+
+
+def _stage_steps(markers: str) -> list[str]:
+    """The marker lines with adjacent duplicates collapsed: retries of one stage
+    leave adjacent markers but do not change stage order."""
     seen = markers.splitlines()
-    required = ("check", "build", "verify", "review")
-    assert all(stage in seen for stage in required), markers
-    # Retries of one stage leave adjacent markers, but do not change stage
-    # order. Earlier implementation checks/reviews cannot stand in for finish.
-    steps = [stage for i, stage in enumerate(seen) if i == 0 or stage != seen[i - 1]]
-    assert any(
-        tuple(steps[i : i + len(required)]) == required
-        for i in range(len(steps) - len(required) + 1)
-    ), markers
+    return [stage for i, stage in enumerate(seen) if i == 0 or stage != seen[i - 1]]
 
 
-def _assert_implement_stage_order(markers: str) -> None:
-    """Require an implementation check before adjacent build and verify markers."""
-    seen = markers.splitlines()
-    assert any(
-        stage == "build" and i + 1 < len(seen) and seen[i + 1] == "verify" and "check" in seen[:i]
-        for i, stage in enumerate(seen)
-    ), f"implementation milestone lacks check → build → verify: {markers}"
+def _last(steps: list[str], stage: str) -> int:
+    return len(steps) - 1 - steps[::-1].index(stage)
 
 
-def _assert_audit_verify_count(markers: str, *, drift_repair: bool) -> None:
-    if drift_repair:
-        assert markers.splitlines().count("verify") >= 3, (
-            f"drift repair requires implementation, audit, and finish verification: {markers}"
-        )
+def _assert_implement_check_only(markers: str) -> None:
+    """Implement gates on check only: its markers hold a check and no build or
+    verify at all (provider selection per step stops it before audit/finish)."""
+    steps = _stage_steps(markers)
+    assert "check" in steps, f"implementation ran no check: {markers!r}"
+    assert "build" not in steps and "verify" not in steps, (
+        f"implementation ran build or verify: {markers!r}"
+    )
+
+
+def _assert_check_only_before_finish(markers: str) -> None:
+    """No verify before the first build: implement and audit gate on check only.
+    The cumulative marker file cannot tell an earlier build from a red finish
+    build that restarted, so the first build is where finish may begin."""
+    steps = _stage_steps(markers)
+    first_build = steps.index("build") if "build" in steps else len(steps)
+    assert "verify" not in steps[:first_build], (
+        f"verify ran before finish's first build: {markers!r}"
+    )
+
+
+def _assert_finish_stage_order(markers: str) -> None:
+    """Finish, modelled from the last review: a check, then the last build
+    followed only by verify and its repair reruns, then review; after review
+    only the final verify and its repair loop, then trailing checks. Earlier
+    implementation checks/reviews cannot stand in for finish."""
+    steps = _stage_steps(markers)
+    assert "review" in steps, f"finish never ran review: {markers!r}"
+    review = _last(steps, "review")
+    before, after = steps[:review], steps[review + 1 :]
+    assert "build" in before, f"no build before finish's review: {markers!r}"
+    build = _last(before, "build")
+    assert "check" in before[:build], f"no check before finish's build: {markers!r}"
+    assert _VERIFY_AFTER_BUILD.fullmatch(" ".join(before[build + 1 :])), (
+        f"finish's build is not followed by verify before review: {markers!r}"
+    )
+    while after and after[-1] == "check":
+        after.pop()
+    assert _FINAL_VERIFY_TAIL.fullmatch(" ".join(after)), (
+        f"only the final verify, its repair loop and checks may follow review: {markers!r}"
+    )
 
 
 def _assert_successful_implementation(
@@ -652,9 +689,7 @@ def _assert_successful_implementation(
     return recorded
 
 
-def _assert_audited_artifacts(
-    container, repo, worktree, branch, evidence, implemented, *, drift_repair=False
-):
+def _assert_audited_artifacts(container, repo, worktree, branch, evidence, implemented):
     final = evidence["turns"][-1]["snapshot"]
     records = [key for key in implemented["spec_plan"] if "/specs/" in key]
     assert len(records) == 1, f"expected one design record: {records}"
@@ -671,7 +706,7 @@ def _assert_audited_artifacts(
     rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
     assert rc == 0, "project stages never executed"
     _assert_finish_stage_order(markers)
-    _assert_audit_verify_count(markers, drift_repair=drift_repair)
+    _assert_check_only_before_finish(markers)
     _assert_published_fix(
         container,
         repo,
@@ -701,4 +736,4 @@ def _assert_implemented_artifacts(container, repo, worktree, branch, evidence, r
     assert rc == 0 and int(commits.strip()) >= 1, f"implementation left no task commits: {commits}"
     rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
     assert rc == 0, "implementation project stages never executed"
-    _assert_implement_stage_order(markers)
+    _assert_implement_check_only(markers)

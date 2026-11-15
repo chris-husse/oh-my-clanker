@@ -19,7 +19,7 @@ CLI authority: a worktree's copied `.venv` may render help from the primary.
 |---|---|
 | Install, Update, Configure | `src/omc/cli/__init__.py`, `src/omc/config/schema.py`, `src/omc/installer.py`, `src/omc/reconcile.py`; frozen help for configure/install/update/uninstall |
 | Keep knowledge fresh with `omc watch` | The watch parser, module docstring and tick/hook behavior in `src/omc/watch.py`, `.config/wt.toml`; frozen watch help |
-| Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/write-plan/SKILL.md`, `skills/finish/SKILL.md`, `skills/review/SKILL.md` for authority and stage semantics |
+| Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/write-plan/SKILL.md`, `skills/implement/SKILL.md`, `skills/audit/SKILL.md`, `skills/finish/SKILL.md`, `skills/verify/SKILL.md`, `skills/review/SKILL.md` for authority and stage semantics |
 | How omc is put together | `src/omc/distribution/AGENTS.md`, `src/omc/toolctx.py`, `src/omc/gitnexus.py` (embeddings: ensure_embeddings, the sync backfill), `src/omc/providers/base.py`, `src/omc/internal.py`; `skills/gitnexus-explain/SKILL.md` for query routing; verdict contracts in the relevant skills |
 | Development | `.omc/config.yaml`, `.config/wt.toml`, `.omc/config/AGENTS.md`, every `.omc/skills/*/SKILL.md`, `.gitignore` |
 | Prerequisites, Other commands, Notifications, Security note, License | Existing README; parser/help; `src/omc/notify.py`, `src/omc/slug.py`, `src/omc/providers/claude.py`, `src/omc/providers/codex.py`, `LICENSE` |
@@ -208,12 +208,15 @@ Three command subsections:
 - Implement: committed record gate, run in worktree, provider handoff, fresh
   `<slug>-implement` Claude session or `/omc:implement` in design session;
   plan (via `/omc:write-plan`, or the plan it already committed)/subagent
-  build, clean committed unpublished handoff; with Provider Selection Per Step
+  build, `/omc:check` after every task, the last green `/omc:check` is the
+  final gate (no build or verify before handoff), clean committed
+  unpublished handoff; with Provider Selection Per Step
   off it continues into audit without a typed command; on, it states the
   continuations and waits. With it off, `omc implement` (also with `--headless`)
   continues through audit and the push too.
 - Review: committed record gate, fresh `<slug>-audit` Claude session or
-  `/omc:audit`; conformance review, fixes, record amendments, finish/publication.
+  `/omc:audit`; conformance review, fixes, record amendments, a post-fix
+  gate of `/omc:check`, finish/publication.
   With Provider Selection Per Step off, implement invokes `/omc:audit` itself.
 Shared flags table: provider overrides (`--claude`/`--codex`, no saved change),
 `--dry-run` (no session/worktree; design still probes/calls slug/ensures guidance;
@@ -229,12 +232,22 @@ comments that survive reconciliation unattended with an automated-review footer,
 and keep the full review trail on disk).
 The rebase-main row and finish prose say only `.omc/docs/` is mirrored, while
 explain queries the primary graph.
-Explain optional check/build/verify/review semantics, order, standalone forms,
+Explain optional check/build/verify/review semantics (check is the frequent
+unit gate, build builds the world without tests, "verify is full E2E, run by
+agents only inside finish" — the user or the project may run it any time —
+and review judges the diff), order, standalone forms,
 no-op unconfigured project stages, always-on grug and human-review lenses,
 and Important fix/waiver into Deliberate complexity. Finish squashes, rebases/mirrors (a
 conflict with the base stops the rebase at most once; the session resolves that
 conflict itself, as `/omc:rebase-main` does, before the stage gates, rather than
-handing it back), describes with MR description, gates before force-with-lease; user opens MR. Preserve finish
+handing it back), describes with MR description, then runs **check → build →
+verify → review → final verify** (the final verify skipped when the tree is
+unchanged since verify passed) before force-with-lease, repairing red stages
+within the stage-gate rule's two-fix bound (a red verify first reruns only
+its failed pieces, then build and one full verify, when the project's verify
+skill has a "Running a subset" section; otherwise fix → check → build → one
+full verify); an agent starts
+verify only inside finish; user opens MR. Preserve finish
 without audit and close-worktree/review-comments/discuss continuations.
 
 #### `## How omc is put together` — target 60 lines
@@ -302,7 +315,7 @@ agents run just recipes. Table with all ten surfaces and what each ensures:
 `.omc/skills/check` (unit gate);
 `.omc/skills/build` (format/lint/package, no tests); `.omc/skills/verify`
 (Docker golden then parallel variations/smoke, 300 s, Codex when changed,
-gitignored .env tokens); `.omc/skills/review` (project rules + grug +
+gitignored .env tokens, node-id "Running a subset" reruns); `.omc/skills/review` (project rules + grug +
 human-review);
 `.omc/skills/explain-context` (truth order); `.gitignore` (primary-only graph
 and worktree docs, both uncommitted);

@@ -32,7 +32,7 @@ def test_failing_build_blocks_publication(stage_session):
         f"failing build never executed; audit answer: {turn['text']}"
     )
     rc, stage = run_in(container, ["cat", f"{m['worktree']}/.omc/stage-scripts/build.sh"])
-    assert rc == 0 and stage == original_stage, "audit changed external build gate"
+    assert rc == 0 and stage == original_stage, "audit or finish changed external build gate"
     rc, _ = run_in(container, ["sh", ".omc/stage-scripts/build.sh"], cwd=m["worktree"])
     assert rc != 0, "build stage no longer fails under external condition"
     after = session.snapshot(m["worktree"])
@@ -137,5 +137,4 @@ def test_audit_repairs_committed_greeting_drift(stage_session):
         m["branch"],
         evidence,
         drifted,
-        drift_repair=True,
     )

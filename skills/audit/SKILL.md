@@ -88,19 +88,16 @@ without making them a gate.
 
 ## Phase 2a — post-fix gate
 
-After the disposition pass, always invoke `/omc:check`, then `/omc:build`,
-whether or not a conformance fix changed files. If disposition step 1 fixed
-code in tracked product files, also invoke `/omc:verify`; otherwise the gate
-ends after build. Before invoking verify, announce on its own line that the
-project's `verify` stage is starting. Read each single-line `OMC_STAGE`
-verdict: only `"passed": true` permits progression, including an unconfigured
-stage with `"configured": false`. A missing verdict is a failure.
+After the disposition pass, always invoke `/omc:check`, whether or not a
+conformance fix changed files. Read its single-line `OMC_STAGE` verdict: only
+`"passed": true` permits progression, including an unconfigured stage with
+`"configured": false`. A missing verdict is a failure.
 
-For any red stage, follow the behavior layer's stage-gate rule: bounded fix-forward, then a CRITICAL stop. Fold an unresolved gate into the existing
-batched CRITICAL question. Do not invoke `finish` while the gate is red. If a
-gate repair itself changes tracked product files, run verify too. A required
-answer resumes this gate and the remaining phases under the same `/omc:audit`
-authorization.
+A red check follows the behavior layer's stage-gate rule:
+bounded fix-forward, then a CRITICAL stop. Fold an unresolved gate into the
+existing batched CRITICAL question. Do not invoke `finish` while the check is
+red. A required answer resumes this gate and the remaining phases under the
+same `/omc:audit` authorization.
 
 Reuse the `OMC_MODELS` verdict from Phase 1 for audit fix workers.
 The auditor labels each fix worker `Complexity: simple | medium | high` using
@@ -146,9 +143,11 @@ stage and someone later invokes `/omc:audit` again.
 ## Phase 3 — publish
 
 Invoke `finish` (`/omc:finish`) and follow its full flow: squash, rebase,
-check, build, verify, review, describe, push, ticket sync and follow-ups. Its
-failing-stage behavior and conflict resolution apply unchanged. Do not stop at
-the audit commit; `finish` is the publication route.
+check, build, verify, review, final verify, describe, push, ticket sync and
+follow-ups. Its failing-stage behavior (the stage-gate rule's fix-forward) and
+conflict resolution apply unchanged. Audit's post-fix check and the `finish` it
+invokes are two conductor runs, each with its own two-cycle bound. Do not stop
+at the audit commit; `finish` is the publication route.
 
 ## Completion contract
 

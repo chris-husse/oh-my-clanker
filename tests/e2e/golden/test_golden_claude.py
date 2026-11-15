@@ -202,8 +202,10 @@ def test_stage_recorded(flow):
     flow.done("recorded")
 
 
-# Implement took 57.5–141.4 s with the milestone gate (two passing runs on
-# 2026-10-06), below the 240 s actor budget. The CLI handoff on Claude
+# Implement took 57.5–141.4 s (two passing runs on 2026-10-06), measured with
+# the since-removed build → verify milestone gate at implement's end; implement
+# now ends on check only, so these figures are an upper bound until the next
+# measured run. Both sit below the 240 s actor budget. The CLI handoff on Claude
 # exercises the shared launch path; the in-session path is covered by
 # variations/test_from_recorded.py.
 def test_stage_implemented(flow):
@@ -266,6 +268,5 @@ def test_stage_audited(flow):
         flow.branch,
         flow.evidence,
         drifted,
-        drift_repair=True,
     )
     flow.done("audited")
