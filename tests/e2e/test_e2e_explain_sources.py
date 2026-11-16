@@ -115,7 +115,11 @@ def _assert_source_statuses(answer: str) -> None:
     assert "not registered" in statuses[1], statuses
 
 
+@pytest.mark.expensive
+@pytest.mark.timeout(900)
 def test_global_sources_feed_explain_and_fail_independently(container):
+    """Expensive tier: the always-on embedding (spec 2026-11-16 §8) makes the
+    index step of /repo slow, past the 300 s ceiling."""
     require_token("claude")
     configure_omc(container, "claude")
     _write_global_sources(container)

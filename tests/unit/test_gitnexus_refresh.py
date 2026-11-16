@@ -7,7 +7,7 @@ import stat
 
 import pytest
 
-from omc.config.schema import Config, GitNexusConfig
+from omc.config.schema import Config
 from omc.gitnexus import refresh_knowledge
 from omc.toolctx import ToolContext
 
@@ -488,16 +488,6 @@ def _embedding_fixture(
     return ctx, calls
 
 
-def _on_cfg():
-    return Config(gitnexus=GitNexusConfig(embeddings=True))
-
-
-def _run_on(ctx, repo, **kw):
-    said = []
-    v = refresh_knowledge(ctx, _on_cfg(), str(repo), "main", say=said.append, reset=False, **kw)
-    return v, said
-
-
 def _rows(calls):
     import shlex
 
@@ -515,32 +505,24 @@ SKIP_BACKFILL = (
 EMBED = [*PLAIN, "--embeddings"]
 
 
-def test_off_keeps_todays_argv_and_never_mentions_embeddings(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
-    _stale_index(repo)
-    ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", runtime_ready=False)
-    v, said = _run(ctx, repo, reset=False)  # Config(): off
-    assert v.fresh
-    assert _rows(calls) == [("unset", PLAIN)]
-    assert not any("embedding" in s for s in said)
-
-
-def test_on_and_ready_embeds_with_extension_install_auto(tmp_path):
+@pytest.mark.real_embeddings
+def test_default_refresh_with_a_ready_runtime_embeds(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     assert _rows(calls) == [("auto", EMBED)]
     assert "→ refreshing GitNexus index (incremental)" in said and "✓ index refreshed" in said
     assert json.loads((repo / ".gitnexus/meta.json").read_text())["stats"]["embeddings"] == 3
 
 
-def test_on_and_missing_runtime_installs_then_embeds(tmp_path):
+@pytest.mark.real_embeddings
+def test_default_refresh_installs_a_missing_runtime_then_embeds(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", runtime_ready=False)
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     assert _rows(calls) == [("unset", ["embeddings", "install"]), ("auto", EMBED)]
     assert said.index("✓ GitNexus embedding runtime installed") < said.index(
@@ -548,21 +530,23 @@ def test_on_and_missing_runtime_installs_then_embeds(tmp_path):
     )
 
 
-def test_on_with_failing_install_indexes_keyword_only(tmp_path):
+@pytest.mark.real_embeddings
+def test_failing_runtime_install_indexes_keyword_only(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", runtime_ready=False, install_rc=1)
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     assert _rows(calls) == [("unset", ["embeddings", "install"]), ("unset", PLAIN)]
     assert any(s.startswith("✗ embedding runtime install failed (exit 1)") for s in said)
 
 
+@pytest.mark.real_embeddings
 def test_embedding_analyze_failure_retries_once_keyword_only_before_any_clean(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", analyze_embed_rc=5)
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     # no backfill sync after a keyword-only fallback in the same run
     assert _rows(calls) == [("auto", EMBED), ("unset", PLAIN)]
@@ -574,12 +558,13 @@ def test_embedding_analyze_failure_retries_once_keyword_only_before_any_clean(tm
     assert "✓ index refreshed" in said  # the retry's rc is what the existing narration judges
 
 
+@pytest.mark.real_embeddings
 def test_embedding_retry_that_stays_stale_escalates_and_rebuild_also_embeds(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     _foreign_stamping_stub(tmp_path)  # every analyze stamps a foreign repoPath: stale forever
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     rows = _rows(calls)
     assert rows[0] == ("auto", EMBED)
     assert ("unset", ["clean", "--force"]) in rows
@@ -588,13 +573,14 @@ def test_embedding_retry_that_stays_stale_escalates_and_rebuild_also_embeds(tmp_
     assert not v.fresh
 
 
+@pytest.mark.real_embeddings
 def test_rebuild_path_embedding_failure_retries_keyword_only(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     (repo / ".gitnexus" / "meta.json").write_text(
         json.dumps({"branch": "feature/x", "lastCommit": "old"})
     )
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", analyze_embed_rc=5)
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     assert _rows(calls) == [("unset", ["clean", "--force"]), ("auto", EMBED), ("unset", PLAIN)]
     assert said.count(SKIP_BACKFILL) == 1  # the rebuild path's fallback also skips the sync
@@ -604,6 +590,7 @@ def test_rebuild_path_embedding_failure_retries_keyword_only(tmp_path):
 PLAIN_ARM = '"analyze --skip-agents-md --skip-skills --branch main") '
 
 
+@pytest.mark.real_embeddings
 def test_rebuild_after_an_embedding_fallback_runs_keyword_only(tmp_path):
     """Embedding already failed this run: the escalation's rebuild must not
     retry --embeddings (another stall budget under the busy lock). The plain
@@ -626,7 +613,7 @@ def test_rebuild_after_an_embedding_fallback_runs_keyword_only(tmp_path):
             "exit 0; fi; ",
         )
     )
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     assert _rows(calls) == [
         ("auto", EMBED),
@@ -639,11 +626,12 @@ def test_rebuild_after_an_embedding_fallback_runs_keyword_only(tmp_path):
     assert said.count(SKIP_BACKFILL) == 1
 
 
+@pytest.mark.real_embeddings
 def test_embedding_analyze_phase_lines_are_narrated_once_without_pino(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, _ = _embedding_fixture(tmp_path, tmp_path / "home", phase_lines=True)
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     assert said.count("· Generating embeddings") == 1
     assert not any("pino" in s for s in said)
@@ -664,6 +652,7 @@ def _silent_arm(tmp_path, arm, shell):
     node.write_text(text.replace(arm, arm + shell))
 
 
+@pytest.mark.real_embeddings
 @pytest.mark.parametrize("touches_store", [True, False])
 def test_silent_embedding_analyze_lives_on_store_writes_and_dies_on_the_embed_budget(
     tmp_path, monkeypatch, touches_store
@@ -689,7 +678,7 @@ def test_silent_embedding_analyze_lives_on_store_writes_and_dies_on_the_embed_bu
         _silent_arm(tmp_path, EMBED_ARM, f"{beats}; ")
     else:
         _silent_arm(tmp_path, EMBED_ARM, f"{shlex.quote(host_bin('sleep'))} 5; ")
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     if touches_store:
         assert _rows(calls) == [("auto", EMBED)]
@@ -704,6 +693,7 @@ def test_silent_embedding_analyze_lives_on_store_writes_and_dies_on_the_embed_bu
         assert "✓ index refreshed" in said
 
 
+@pytest.mark.real_embeddings
 def test_embed_stall_budget_is_thirty_minutes():
     import omc.gitnexus as gn
 
@@ -719,12 +709,13 @@ def _with_nodes(repo, nodes=5):
     meta.write_text(json.dumps({**json.loads(meta.read_text()), "stats": {"nodes": nodes}}))
 
 
+@pytest.mark.real_embeddings
 def test_fresh_index_without_vectors_is_backfilled_once(tmp_path):
     _, repo = _repo_with_origin(tmp_path)  # fresh index, nodes but no vectors
     _with_nodes(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     head = _git_out(repo, "rev-parse", "HEAD")
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     assert _rows(calls) == [("auto", ["embeddings", "sync", str(repo)])]
     meta = json.loads((repo / ".gitnexus/meta.json").read_text())
@@ -732,24 +723,26 @@ def test_fresh_index_without_vectors_is_backfilled_once(tmp_path):
     assert "→ embedding the existing index (one-time)…" in said
     assert "✓ index embedded (7 vectors)" in said
     assert "✓ knowledge is current" not in said  # a minutes-long pass is work
-    again, said2 = _run_on(ctx, repo)
+    again, said2 = _run(ctx, repo, reset=False)
     assert again.fresh and len(_rows(calls)) == 1  # one JSON read, no second sync
     assert "✓ knowledge is current" in said2
 
 
+@pytest.mark.real_embeddings
 def test_zero_count_also_backfills_but_positive_count_does_not(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     meta = repo / ".gitnexus/meta.json"
     data = json.loads(meta.read_text())
     meta.write_text(json.dumps({**data, "stats": {"nodes": 5, "embeddings": 0}}))
-    v, _ = _run_on(ctx, repo)
+    v, _ = _run(ctx, repo, reset=False)
     assert v.fresh and len(_rows(calls)) == 1
     meta.write_text(json.dumps({**data, "stats": {"nodes": 5, "embeddings": 7}}))
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh and len(_rows(calls)) == 1 and "✓ knowledge is current" in said
 
 
+@pytest.mark.real_embeddings
 def test_index_with_no_embeddable_nodes_is_never_synced(tmp_path):
     """sync over a zero-node index exits 0 with 0 embeddings: re-running it every
     refresh would print ✗ forever and suppress ✓ knowledge is current."""
@@ -759,43 +752,57 @@ def test_index_with_no_embeddable_nodes_is_never_synced(tmp_path):
     data = json.loads(meta.read_text())
     for stats in ({"nodes": 0, "embeddings": 0}, {"nodes": "5"}, {}):
         meta.write_text(json.dumps({**data, "stats": stats}))
-        v, said = _run_on(ctx, repo)
+        v, said = _run(ctx, repo, reset=False)
         assert v.fresh and not calls.exists(), stats
         assert "✓ knowledge is current" in said, stats
     meta.write_text(json.dumps({**data, "stats": {"nodes": 5, "embeddings": 0}}))
-    v, _ = _run_on(ctx, repo)
+    v, _ = _run(ctx, repo, reset=False)
     assert v.fresh and _rows(calls) == [("auto", ["embeddings", "sync", str(repo)])]
 
 
+@pytest.mark.real_embeddings
+def test_index_over_the_gitnexus_node_cap_is_never_backfilled(tmp_path):
+    """analyze applies GitNexus's 50 000-node cap and skips embedding over it;
+    `embeddings sync` never checks it. The backfill mirrors the cap (spec
+    2026-11-16 §5.2: over the cap the index stays keyword-only)."""
+    _, repo = _repo_with_origin(tmp_path)
+    ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
+    _with_nodes(repo, nodes=50_001)
+    v, said = _run(ctx, repo, reset=False)
+    assert v.fresh and not calls.exists()
+    assert "· index over GitNexus's 50000-node embedding cap — staying keyword-only" in said
+    assert ".gitnexusignore" not in said
+    assert "✓ knowledge is current" in said
+    _with_nodes(repo, nodes=50_000)  # at the cap GitNexus still embeds
+    v, _ = _run(ctx, repo, reset=False)
+    assert v.fresh and _rows(calls) == [("auto", ["embeddings", "sync", str(repo)])]
+
+
+@pytest.mark.real_embeddings
 def test_backfill_after_a_stale_index_heals_runs_once_after_the_clean_verdict(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
-    v, _ = _run_on(ctx, repo)
+    v, _ = _run(ctx, repo, reset=False)
     assert v.fresh
     # the incremental analyze already wrote stats.embeddings = 3 → no sync
     assert _rows(calls) == [("auto", EMBED)]
 
 
+@pytest.mark.real_embeddings
 def test_backfill_failure_is_narrated_and_leaves_the_verdict_alone(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _with_nodes(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", sync_rc=4)
     before = (repo / ".gitnexus/meta.json").read_bytes()
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh and (repo / ".gitnexus/meta.json").read_bytes() == before
     assert _rows(calls) == [("auto", ["embeddings", "sync", str(repo)])]
     assert any(s.startswith("✗ embeddings sync failed (exit 4): ") for s in said)
     assert "✓ knowledge is current" not in said
 
 
-def test_off_never_backfills(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, reset=False)
-    assert v.fresh and not calls.exists() and "✓ knowledge is current" in said
-
-
+@pytest.mark.real_embeddings
 def test_embedding_count_reads_whichever_metadata_file_wins(tmp_path):
     import omc.gitnexus as gn
 
@@ -810,6 +817,7 @@ def test_embedding_count_reads_whichever_metadata_file_wins(tmp_path):
     assert gn._embedding_count(root) == 2  # gitnexus.json wins, meta.json ignored
 
 
+@pytest.mark.real_embeddings
 @pytest.mark.parametrize("touches_store", [True, False])
 def test_silent_embeddings_sync_lives_on_store_writes_and_dies_on_the_embed_budget(
     tmp_path, monkeypatch, touches_store
@@ -835,7 +843,7 @@ def test_silent_embeddings_sync_lives_on_store_writes_and_dies_on_the_embed_budg
         _silent_arm(tmp_path, SYNC_ARM, f"{beats}; ")
     else:
         _silent_arm(tmp_path, SYNC_ARM, f"{shlex.quote(host_bin('sleep'))} 5; ")
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     assert _rows(calls) == [("auto", ["embeddings", "sync", str(repo)])]
     assert "✓ knowledge is current" not in said  # a sync is work, stalled or not
@@ -850,6 +858,7 @@ def test_silent_embeddings_sync_lives_on_store_writes_and_dies_on_the_embed_budg
         ]
 
 
+@pytest.mark.real_embeddings
 def test_embedding_fallback_skips_the_backfill_this_run_and_the_next_run_retries(tmp_path):
     """Embedding is demonstrably unavailable in a run whose embedding analyze
     fell back keyword-only: a sync would fail the same way (or hold the busy
@@ -858,12 +867,12 @@ def test_embedding_fallback_skips_the_backfill_this_run_and_the_next_run_retries
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", analyze_embed_rc=5)
-    v, said = _run_on(ctx, repo)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     assert _rows(calls) == [("auto", EMBED), ("unset", PLAIN)]
     assert said.count(SKIP_BACKFILL) == 1
     assert "→ embedding the existing index (one-time)…" not in said
-    again, said2 = _run_on(ctx, repo)
+    again, said2 = _run(ctx, repo, reset=False)
     assert again.fresh
     assert _rows(calls)[2:] == [("auto", ["embeddings", "sync", str(repo)])]
     assert SKIP_BACKFILL not in said2 and "✓ index embedded (7 vectors)" in said2

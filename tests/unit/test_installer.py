@@ -63,6 +63,41 @@ def test_update_calls_uv_upgrade(tmp_path):
     assert run_update(ctx) == 0
 
 
+def test_install_and_update_pin_the_required_python(monkeypatch, tmp_path):
+    """uv keeps a tool's old interpreter on `install --reinstall` and `upgrade`, so an
+    omc tool venv on Python 3.12 can never take an omc that requires 3.14 unless the
+    request names the interpreter; uv downloads a managed one when the host lacks it."""
+    import tomllib
+
+    from omc import installer
+
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    requires = tomllib.loads(pyproject.read_text())["project"]["requires-python"]
+    assert installer.REQUIRED_PYTHON == requires == ">=3.14"
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "home")})
+    seen = []
+    monkeypatch.setattr(installer, "_uv", lambda ctx, *a: seen.append(a) or 1)
+    checkout = _checkout(tmp_path)
+    assert installer.run_install(ctx, str(checkout)) == 1
+    assert installer.run_update(ctx) == 1
+    assert seen == [
+        ("tool", "install", "--reinstall", "--python", ">=3.14", str(checkout.resolve())),
+        ("tool", "upgrade", "--python", ">=3.14", "omc"),
+    ]
+
+
+def test_just_install_recipe_requests_the_required_python():
+    """`just install` reinstalls a contributor's existing tool venv, which uv keeps on
+    its old interpreter unless the recipe names REQUIRED_PYTHON like run_install does."""
+    from omc import installer
+
+    justfile = (Path(__file__).resolve().parents[2] / "justfile").read_text()
+    recipe = justfile.split("\ninstall:\n", 1)[1].split("\n\n", 1)[0]
+    assert [line.strip() for line in recipe.splitlines()] == [
+        f"uv tool install --reinstall --python '{installer.REQUIRED_PYTHON}' ."
+    ]
+
+
 def test_run_update_combines_uv_and_dependency_refresh(monkeypatch, tmp_path):
     from omc import installer
     from omc.toolctx import ToolContext
@@ -74,7 +109,7 @@ def test_run_update_combines_uv_and_dependency_refresh(monkeypatch, tmp_path):
         "omc.gitnexus.update_gitnexus", lambda ctx, **kw: seen.append(("dep",)) or 0
     )
     assert installer.run_update(ctx) == 0
-    assert ("uv", ("tool", "upgrade", "omc")) in seen and ("dep",) in seen
+    assert ("uv", ("tool", "upgrade", "--python", ">=3.14", "omc")) in seen and ("dep",) in seen
 
 
 def test_run_update_fails_if_dependency_refresh_fails(monkeypatch, tmp_path):
@@ -143,7 +178,7 @@ def _update_ctx(tmp_path, *, plugins=HEALTHY_PLUGINS, install_rc=0):
 def test_update_upgrades_then_updates_each_providers_plugin(tmp_path, capsys):
     ctx, uv_calls, claude_calls, codex_calls = _update_ctx(tmp_path)
     assert run_update(ctx) == 0
-    assert "tool upgrade omc" in uv_calls.read_text()
+    assert "tool upgrade --python >=3.14 omc" in uv_calls.read_text()
     assert "plugin marketplace update oh-my-clanker" in claude_calls.read_text()
     assert "plugin update omc@oh-my-clanker" in claude_calls.read_text()
     assert "plugin marketplace list --json" in codex_calls.read_text()
@@ -473,7 +508,7 @@ def test_update_runs_fresh_cli_reconcile_between_uv_and_gates(tmp_path, monkeypa
 
     ctx, calls, exe = _fresh_ctx(tmp_path, monkeypatch)
     assert installer.run_update(ctx) == 0
-    assert calls[0] == ("uv", ("tool", "upgrade", "omc"))
+    assert calls[0] == ("uv", ("tool", "upgrade", "--python", ">=3.14", "omc"))
     assert calls[1] == ("run", ["uv", "tool", "dir", "--bin"])
     assert calls[2] == ("run", [str(exe), "--version"])
     assert calls[3] == ("bounded", [str(exe), "shell-integration", "fish", "reconcile"], 30)
@@ -833,24 +868,215 @@ def test_uninstall_cleans_sections_without_valid_config(tmp_path, monkeypatch, c
     assert calls == [("tool", "uninstall", "omc")]
 
 
-def test_run_update_passes_the_global_config_to_the_gitnexus_step(monkeypatch, tmp_path):
+def test_run_update_calls_the_gitnexus_step_without_config(monkeypatch, tmp_path):
     from omc import installer
-    from omc.config import store
-    from omc.config.schema import GlobalConfig
-    from omc.toolctx import ToolContext
 
-    home = tmp_path / "home"
-    gcfg = GlobalConfig()
-    gcfg.gitnexus.embeddings = True
-    store.save_global(home, gcfg)
-    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": ""})
+    env = {"HOME": str(tmp_path), "OMC_HOME": str(tmp_path / "home"), "PATH": ""}
+    ctx = ToolContext.from_env(env)
     seen = []
     monkeypatch.setattr(installer, "_uv", lambda ctx, *a: 0)
-    monkeypatch.setattr(installer, "require_tools", lambda ctx, cfg: None)
-    monkeypatch.setattr(installer, "_fresh_cli", lambda ctx: None)
-    monkeypatch.setattr(installer, "ensure_plugin", lambda ctx, name, **kw: "ok")
-    monkeypatch.setattr(
-        "omc.gitnexus.update_gitnexus", lambda ctx, **kw: seen.append(kw.get("cfg")) or 0
-    )
+    monkeypatch.setattr("omc.gitnexus.update_gitnexus", lambda ctx, **kw: seen.append(kw) or 0)
     assert installer.run_update(ctx) == 0
-    assert len(seen) == 1 and seen[0].gitnexus.embeddings is True
+    assert seen == [{}]
+
+
+_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _cache_home(tmp_path):
+    """An omc home holding the retired dependency subsystem's leftovers next to
+    omc's own managed tools and config (record §7.2)."""
+    home = tmp_path / "omc-home"
+    deps = home / "dependencies"
+    (home / "dependencies.json").parent.mkdir(parents=True)
+    (home / "dependencies.json").write_text("{}")
+    (home / "dependencies.json.lock").write_text("")
+    checkout = deps / "github.com" / "foo" / "bar" / _SHA
+    checkout.mkdir(parents=True)
+    (checkout / "x.py").write_bytes(b"x" * 2048)
+    (deps / "gitnexus").mkdir()
+    (deps / "gitnexus" / "keep.txt").write_text("keep")
+    (deps / "gitnexus-embeddings" / "runtime").mkdir(parents=True)
+    (deps / "gitnexus-embeddings" / "runtime" / "keep.txt").write_text("keep")
+    docs = home / "gitnexus" / "github.com" / "foo" / "bar" / _SHA / "docs"
+    docs.mkdir(parents=True)
+    (docs / "index.md").write_bytes(b"d" * 1024)
+    (home / "config.yaml").write_text("llm: {}\n")
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(home)})
+    return ctx, home
+
+
+def test_retired_dependency_cache_is_removed_and_omc_tools_survive(tmp_path, capsys):
+    from omc.installer import remove_retired_dependency_cache
+
+    ctx, home = _cache_home(tmp_path)
+    assert remove_retired_dependency_cache(ctx) is None
+    assert not (home / "dependencies.json").exists()
+    assert not (home / "dependencies.json.lock").exists()
+    assert not (home / "dependencies" / "github.com").exists()
+    assert not (home / "gitnexus").exists()
+    assert (home / "dependencies" / "gitnexus" / "keep.txt").read_text() == "keep"
+    keep = home / "dependencies" / "gitnexus-embeddings" / "runtime" / "keep.txt"
+    assert keep.read_text() == "keep"
+    assert (home / "config.yaml").exists()
+    # 2 (manifest) + 0 (lock) + 2048 (checkout) + 1024 (mirrored docs) bytes removed
+    assert capsys.readouterr().err.splitlines() == ["· removed retired dependency cache (3.0 KiB)"]
+
+
+def test_retired_cache_cleanup_is_silent_when_nothing_is_left(tmp_path, capsys):
+    from omc.installer import remove_retired_dependency_cache
+
+    ctx, home = _cache_home(tmp_path)
+    remove_retired_dependency_cache(ctx)
+    capsys.readouterr()
+    remove_retired_dependency_cache(ctx)
+    assert capsys.readouterr().err == ""
+    assert (home / "dependencies" / "gitnexus" / "keep.txt").exists()
+
+
+def test_retired_cache_failed_delete_narrates_and_continues(tmp_path, monkeypatch, capsys):
+    import shutil
+
+    from omc.installer import remove_retired_dependency_cache
+
+    ctx, home = _cache_home(tmp_path)
+    blocked = home / "dependencies" / "github.com"
+    real_rmtree = shutil.rmtree
+
+    def rmtree(path, *a, **kw):
+        if Path(path) == blocked:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_rmtree(path, *a, **kw)
+
+    monkeypatch.setattr("omc.installer.shutil.rmtree", rmtree)
+    assert remove_retired_dependency_cache(ctx) is None
+    err = capsys.readouterr().err.splitlines()
+    assert blocked.exists()
+    assert not (home / "gitnexus").exists()
+    assert not (home / "dependencies.json").exists()
+    assert len(err) == 2
+    assert err[0].startswith(f"✗ could not remove retired dependency cache {blocked}: ")
+    assert "Permission denied" in err[0] and err[0].endswith(" — continuing")
+    # only what was removed counts: 2 (manifest) + 0 (lock) + 1024 (mirrored docs)
+    assert err[1] == "· removed retired dependency cache (1.0 KiB)"
+
+
+def test_retired_cache_cleanup_unlinks_symlinks_without_following(tmp_path):
+    from omc.installer import remove_retired_dependency_cache
+
+    home = tmp_path / "omc-home"
+    (home / "dependencies").mkdir(parents=True)
+    precious = tmp_path / "precious"
+    precious.mkdir()
+    (precious / "data.txt").write_text("precious")
+    precious2 = tmp_path / "precious2"
+    precious2.mkdir()
+    (precious2 / "data.txt").write_text("precious2")
+    (home / "dependencies" / "linked").symlink_to(precious, target_is_directory=True)
+    (home / "gitnexus").symlink_to(precious2, target_is_directory=True)
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(home)})
+    remove_retired_dependency_cache(ctx)
+    assert not os.path.lexists(home / "dependencies" / "linked")
+    assert not os.path.lexists(home / "gitnexus")
+    assert (precious / "data.txt").read_text() == "precious"
+    assert (precious2 / "data.txt").read_text() == "precious2"
+
+
+def test_retired_cache_cleanup_matches_keep_names_exactly(tmp_path):
+    """A prefix of a kept name is not kept: gitnexus-old goes, gitnexus stays."""
+    from omc.installer import remove_retired_dependency_cache
+
+    home = tmp_path / "omc-home"
+    deps = home / "dependencies"
+    (deps / "gitnexus-old").mkdir(parents=True)
+    (deps / "gitnexus-old" / "x.txt").write_text("old")
+    (deps / "gitnexus").mkdir()
+    (deps / "gitnexus" / "keep.txt").write_text("keep")
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(home)})
+    remove_retired_dependency_cache(ctx)
+    assert not os.path.lexists(deps / "gitnexus-old")
+    assert (deps / "gitnexus" / "keep.txt").read_text() == "keep"
+
+
+def test_retired_cache_cleanup_leaves_a_symlinked_dependencies_dir_alone(tmp_path):
+    from omc.installer import remove_retired_dependency_cache
+
+    home = tmp_path / "omc-home"
+    home.mkdir()
+    target = tmp_path / "elsewhere"
+    (target / "github.com").mkdir(parents=True)
+    (target / "github.com" / "data.txt").write_text("precious")
+    (home / "dependencies").symlink_to(target, target_is_directory=True)
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(home)})
+    remove_retired_dependency_cache(ctx)
+    assert (home / "dependencies").is_symlink()
+    assert (target / "github.com" / "data.txt").read_text() == "precious"
+
+
+def test_retired_cache_cleanup_keeps_a_symlinked_keep_entry_and_unlinks_file_links(tmp_path):
+    from omc.installer import remove_retired_dependency_cache
+
+    home = tmp_path / "omc-home"
+    deps = home / "dependencies"
+    deps.mkdir(parents=True)
+    clone = tmp_path / "gitnexus-clone"
+    clone.mkdir()
+    (clone / "keep.txt").write_text("keep")
+    (deps / "gitnexus").symlink_to(clone, target_is_directory=True)
+    precious = tmp_path / "precious.txt"
+    precious.write_text("precious")
+    (deps / "linked.txt").symlink_to(precious)
+    ctx = ToolContext.from_env({"HOME": str(tmp_path), "OMC_HOME": str(home)})
+    remove_retired_dependency_cache(ctx)
+    assert (deps / "gitnexus").is_symlink()
+    assert (deps / "gitnexus" / "keep.txt").read_text() == "keep"
+    assert not os.path.lexists(deps / "linked.txt")
+    assert precious.read_text() == "precious"
+
+
+def test_retired_cache_cleanup_never_runs_in_an_unsafe_home(tmp_path, capsys):
+    from omc.installer import remove_retired_dependency_cache
+
+    (tmp_path / "gitnexus").mkdir()
+    (tmp_path / "gitnexus" / "x.md").write_text("x")
+    (tmp_path / "dependencies.json").write_text("{}")
+    ctx = ToolContext(home=tmp_path, env={"HOME": str(tmp_path)})
+    remove_retired_dependency_cache(ctx)
+    assert (tmp_path / "gitnexus" / "x.md").exists()
+    assert (tmp_path / "dependencies.json").exists()
+    assert capsys.readouterr().err == ""
+
+
+def test_human_size_formats_binary_units():
+    from omc.installer import _human_size
+
+    assert [_human_size(n) for n in (0, 512, 1536, 5 * 1024**2, 3 * 1024**3)] == [
+        "0 B",
+        "512 B",
+        "1.5 KiB",
+        "5.0 MiB",
+        "3.0 GiB",
+    ]
+
+
+def test_run_update_removes_the_retired_cache_without_config(monkeypatch, tmp_path):
+    from omc import installer
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "dependencies.json").write_text("{}")
+    env = {"HOME": str(tmp_path), "OMC_HOME": str(home), "PATH": ""}
+    ctx = ToolContext.from_env(env)
+    monkeypatch.setattr(installer, "_uv", lambda ctx, *a: 0)
+    assert store.load_global(ctx.home) is None
+    assert installer.run_update(ctx) == 0
+    assert not (home / "dependencies.json").exists()
+
+    (home / "gitnexus" / "docs").mkdir(parents=True)
+
+    def rmtree(path, *a, **kw):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("omc.installer.shutil.rmtree", rmtree)
+    assert installer.run_update(ctx) == 0
+    assert (home / "gitnexus" / "docs").is_dir()

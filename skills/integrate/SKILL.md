@@ -55,7 +55,45 @@ the remaining slots. The interactive session is where files get written.
      `.omc/hooks/post_rebase/SKILL.md` · `.omc/hooks/pre_push/SKILL.md`
    - `.omc/hooks/post-watch.sh` — optional CLI-side hook `omc watch` runs
      after action ticks (sync / forced refresh)
-2. **Mechanical fixes** via the existing machinery (with the user's go-ahead):
+   - `.omc/skills/gitnexus-ignore-context` and `.gitnexusignore` — what
+     stays out of the GitNexus index
+2. **Index scope.** This comes before any index, so the first one is
+   already trimmed. Investigate how the project generates code and stores
+   data: build scripts, generator configs (protoc, OpenAPI, ORM, codegen
+   steps), `.gitattributes` (`linguist-generated` / `linguist-vendored`),
+   CI jobs that generate or download, and where bulk data and recorded
+   fixtures live. Propose the context skill `.omc/skills/gitnexus-ignore-context/SKILL.md`
+   from the template below, filled from that evidence, and write it on
+   explicit approval (in review mode, show it beside the existing one; never
+   silently replace it). Then invoke the internal skill as
+   `gitnexus-ignore survey`: it surveys the whole
+   tree, writes nothing, and returns the proposed `.gitnexusignore` text
+   followed by a `gitnexus-ignore: proposed …` line. Show that file (in
+   review mode as a diff against the existing one) and write it at the repo
+   root on explicit approval. GitNexus reads `.gitnexusignore` from the
+   working tree, so in the primary checkout the index offered next honors it
+   before anything is committed; from a worktree it takes effect after merge
+   (`/omc:index` indexes the primary checkout). **Headless:** propose both; nothing is written. The survey is
+   read-only, not indexing, so it runs headless too.
+
+   ```markdown
+   ---
+   name: gitnexus-ignore-context
+   description: What this project generates, where bulk data and recorded fixtures live, and which look-alike folders are hand-written — read by omc's gitnexus-ignore flow.
+   ---
+
+   # gitnexus-ignore-context (this repo)
+
+   ## Generators
+   - <tool> writes <dir>/ (marker: <header line or file suffix>)
+
+   ## Bulk data and recorded fixtures
+   - <dir>/: <what it holds>
+
+   ## Keep (looks generated or like data, but is hand-written)
+   - <dir>/: <why it stays indexed>
+   ```
+3. **Mechanical fixes** via the existing machinery (with the user's go-ahead):
    - Global omc section missing/stale → re-run `omc configure`: read the CURRENT default
      from `~/.omc/config.yaml` and re-set it
      (`omc configure --set llm.default=<current>`) — **never `--defaults`,
@@ -224,7 +262,9 @@ surface left unchanged. The drafts are ready for a later interactive review.
 
 **Interactive:**
 
-1. The after-table: created / updated / left alone, per surface.
+1. The after-table: created / updated / left alone, per surface — including
+   `.omc/skills/gitnexus-ignore-context` and `.gitnexusignore`, which are
+   committed with the rest.
 2. What's now active: `/omc:audit` and `/omc:finish` run the stage gates
    you just designed; the MR gate asks your hooks; `/omc:explain` uses the
    context map; `omc watch` keeps the graph fresh (suggest the cadence);

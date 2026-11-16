@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from omc.installer import REQUIRED_PYTHON
+
 from ._fishpty import drive_fish
 from ._stubs import host_bin
 
@@ -110,7 +112,8 @@ def installed(tmp_path_factory, wheel):
         assert path.is_relative_to(tmp_path), f"refusing a non-disposable {name}: {path}"
         path.mkdir(parents=True, exist_ok=True)
     env = {**_base_env(), **{name: str(path) for name, path in private.items()}}
-    _run([uv, "tool", "install", "--reinstall", str(wheel)], env)
+    # the product's own install argv (installer.run_install), Docker and justfile alike
+    _run([uv, "tool", "install", "--reinstall", "--python", REQUIRED_PYTHON, str(wheel)], env)
     omc = private["UV_TOOL_BIN_DIR"] / "omc"
     assert omc.is_file(), f"uv did not link {omc}"
     _run([str(omc), "shell-integration", "fish", "reconcile"], env)

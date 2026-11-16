@@ -76,7 +76,7 @@ def _session(ctx: ToolContext) -> str:
 
 
 def _write_atomic(path: Path, text: str) -> None:
-    """Temp sibling + os.replace, as dependency.py and awscreds.py do."""
+    """Temp sibling + os.replace, as awscreds.py does."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:

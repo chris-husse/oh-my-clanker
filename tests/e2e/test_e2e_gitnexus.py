@@ -36,7 +36,11 @@ def _claude_skill(container, prompt, *, cwd, timeout=900):
     )
 
 
+@pytest.mark.expensive
+@pytest.mark.timeout(900)
 def test_index_then_explain_on_real_repo(container):
+    """Expensive tier: the always-on embedding (spec 2026-11-16 §8) makes the
+    index step of /repo slow, past the 300 s ceiling."""
     require_token("claude")
     configure_omc(container, "claude")
 
@@ -193,7 +197,11 @@ def test_index_then_explain_on_real_repo(container):
     assert verdict["passed"], verdict["reasons"]
 
 
+@pytest.mark.expensive
+@pytest.mark.timeout(900)
 def test_explain_the_tool_architecture_judged(container):
+    """Expensive tier: the always-on embedding (spec 2026-11-16 §8) makes the
+    index step of /repo slow, past the 300 s ceiling."""
     require_token("claude")
     configure_omc(container, "claude")
 
@@ -244,7 +252,7 @@ def _knowledge_reason_codes(out: str) -> set[str]:
     return codes
 
 
-def test_embeddings_opt_in_refresh_embeds_the_real_repo(container):
+def test_default_refresh_embeds_the_real_repo(container):
     """Real GitNexus, real local embedding runtime, no LLM (spec 2026-10-27 §9).
     The runtime, model and VECTOR extension are pre-baked into the image
     (Dockerfile.e2e), so this needs no network for them. Artifacts, not
@@ -252,8 +260,8 @@ def test_embeddings_opt_in_refresh_embeds_the_real_repo(container):
     no longer carries GitNexus's keyword-only warning.
 
     Runs under the mechanical 300 s pytest-timeout ceiling: every run_in
-    carries an explicit budget and they sum to 295 s — 2 x 10 (configure) +
-    7 x 5 (cat/git/python3/test) + 205 (first refresh) + 25 (query) + 10
+    carries an explicit budget and they sum to 295 s — 1 x 10 (configure) +
+    7 x 5 (cat/git/python3/test) + 215 (first refresh) + 25 (query) + 10
     (second refresh) — so no hung step can outlive the ceiling deep inside
     docker-py's socket read. Measured alone (2026-11-02): first refresh
     112.5 s, query 1.0 s, second refresh 0.2 s. The first refresh gets the
@@ -264,19 +272,15 @@ def test_embeddings_opt_in_refresh_embeds_the_real_repo(container):
     # the configured state `omc internal gitnexus refresh` gates on.
     rc, out = run_in(container, ["omc", "configure", "--set", "llm.default=claude"], timeout=10)
     assert rc == 0, out
-    rc, out = run_in(
-        container, ["omc", "configure", "--set", "gitnexus.embeddings=true"], timeout=10
-    )
-    assert rc == 0, out
     rc, cfg_text = run_in(container, ["cat", "/root/.omc/config.yaml"], timeout=5)
-    assert rc == 0 and "gitnexus:\n  embeddings: true" in cfg_text, cfg_text
+    assert rc == 0 and "gitnexus" not in cfg_text, cfg_text  # embedding needs no option
     rc, head = run_in(container, ["git", "-C", "/repo", "rev-parse", "HEAD"], timeout=5)
     assert rc == 0, head
 
-    # First index of /repo with the option on: embeds every node once (about a
-    # minute or two of CPU on the pre-baked model; 205 s is the budget, see docstring).
+    # First index of /repo: a default refresh embeds every node once (about a
+    # minute or two of CPU on the pre-baked model; 215 s is the budget, see docstring).
     rc, out = run_in(
-        container, ["omc", "internal", "gitnexus", "refresh"], cwd="/repo", timeout=205
+        container, ["omc", "internal", "gitnexus", "refresh"], cwd="/repo", timeout=215
     )
     assert rc == 0, out
     assert "retrying keyword-only" not in out, out  # the embedding analyze itself succeeded

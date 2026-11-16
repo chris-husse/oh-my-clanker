@@ -22,7 +22,7 @@ if TYPE_CHECKING:  # annotation-only; ToolContext stays the subprocess boundary
     import subprocess
     from collections.abc import Callable
 
-    from .config.schema import Config, GlobalConfig
+    from .config.schema import Config
 
 # The ONLY source ever updated — mirrors the gitnexus-ensure skill's rule.
 GITNEXUS_ORIGIN = "https://github.com/chris-husse/GitNexus.git"
@@ -137,10 +137,17 @@ def _embedding_count(root: Path) -> int:
     return _index_stat(root, "embeddings")
 
 
+# GitNexus's default embedding node cap: DEFAULT_EMBEDDING_NODE_LIMIT in the fork's
+# src/core/embedding-mode.ts, applied by deriveEmbeddingCap in core/run-analyze.ts
+# (skip when nodes > cap; omc's bare `--embeddings` keeps the default). Only analyze
+# checks it — cli/embeddings-sync.ts never does — so the backfill mirrors it.
+GITNEXUS_EMBEDDING_NODE_CAP = 50_000
+
+
 def _backfill_embeddings(ctx: ToolContext, root: Path, say) -> None:
     """GitNexus's analyze short-circuits "Already up to date" whatever flags it
-    carries, so an index that turns the option on would gain vectors one commit
-    at a time, forever. `embeddings sync` adds the missing vectors to a healthy
+    carries, so an index built before embeddings were always on would gain
+    vectors one commit at a time, forever. `embeddings sync` adds the missing vectors to a healthy
     index, checkpoints for resume, writes stats.embeddings and never touches
     lastCommit (verified, see the Embeddings comment below) — it cannot move the
     freshness verdict either way. It may print nothing for long stretches while
@@ -170,7 +177,7 @@ def _backfill_embeddings(ctx: ToolContext, root: Path, say) -> None:
 
 # ─── Embeddings (spec 2026-10-27-enable-embeddings-for-gitnexus) ───────────
 # Verified against the managed fork CLI (gitnexus 1.6.12 @ 20c559d, 2026-10-27); the
-# E2E test_embeddings_opt_in_refresh_embeds_the_real_repo re-confirmed the flat-slot
+# E2E test_default_refresh_embeds_the_real_repo re-confirmed the flat-slot
 # stats.embeddings > 0, lastCommit == HEAD, runtime under ~/.omc and an exiting query
 # at the Dockerfile.e2e pin d8683be6 (2026-10-28):
 # - `embeddings install` honours GITNEXUS_EMBEDDING_RUNTIME_DIR and lands
@@ -307,23 +314,14 @@ def _embeddings_ready(ctx: ToolContext) -> bool:
     )
 
 
-def ensure_embeddings(
-    ctx: ToolContext,
-    cfg: Config | GlobalConfig | None,
-    *,
-    reinstall: bool = False,
-    say=_say,
-) -> bool:
-    """Is the local embedding runtime ready to be spent? The ONLY reader of
-    `gitnexus.embeddings` (spec §3/§5). Off (or no config) → False, silently:
-    the hot path for everyone who never opts in. On → install under the §4
-    runtime dir when the probe fails or `reinstall` asks (the clone's pins may
-    have moved). GitNexus's CPU install is `npm install --prefix <runtime>
-    --ignore-scripts` of its pinned stack; re-running it moves the packages to
-    the current pins, so `--force` is never passed. Never raises, never returns
-    an exit code: a failed install degrades to keyword-only (Decision 5)."""
-    if cfg is None or not cfg.gitnexus.embeddings:
-        return False
+def ensure_embeddings(ctx: ToolContext, *, reinstall: bool = False, say=_say) -> bool:
+    """Is the local embedding runtime ready to be spent? Embedding is always on
+    (spec 2026-11-16 §5): always probe, and install under the runtime dir when
+    the probe fails or `reinstall` asks (the clone's pins may have moved).
+    GitNexus's CPU install is `npm install --prefix <runtime> --ignore-scripts`
+    of its pinned stack; re-running it moves the packages to the current pins,
+    so `--force` is never passed. Never raises, never returns an exit code: a
+    failed install degrades to keyword-only (record §5.2)."""
     if _embeddings_ready(ctx) and not reinstall:
         return True
     say("→ installing GitNexus embedding runtime…")
@@ -629,9 +627,9 @@ def refresh_knowledge(
         if not _destroy(ctx, rootp, say):
             return finish(verdict())
 
-    # Decided once per run; true only when the option is on AND the runtime is
-    # ready after any install attempt. Off emits nothing and changes no argv.
-    embed = ensure_embeddings(ctx, cfg, say=say)
+    # Decided once per run; true only when the runtime is ready after any
+    # install attempt. False keeps the keyword-only argv.
+    embed = ensure_embeddings(ctx, say=say)
     # Set when an embedding analyze fell back keyword-only this run; read at
     # each later call site so a rebuild does not retry --embeddings (another
     # stall budget under the busy lock) and the backfill is skipped.
@@ -695,15 +693,23 @@ def refresh_knowledge(
             elif excerpt:
                 say(f"· {excerpt}")
 
-    if embed and _embedding_count(rootp) == 0 and _index_stat(rootp, "nodes") > 0:
-        # Clean index verdict (every stale path above returned), option on, no
-        # vectors yet: the one-time backfill (spec §6). Once stats.embeddings is
-        # positive this is a single JSON read. An index with no nodes has
-        # nothing to embed: sync would exit 0 with 0 vectors on every refresh.
-        # Not after a fallback this run: embedding is unavailable (offline,
-        # broken model download) and a stalled sync would hold the busy lock for
-        # the whole budget for nothing.
-        if embed_failed:
+    nodes = _index_stat(rootp, "nodes")
+    if embed and _embedding_count(rootp) == 0 and nodes > 0:
+        # Clean index verdict (every stale path above returned), embedding
+        # available, no vectors yet: the one-time backfill (spec §6). Once
+        # stats.embeddings is positive this is a single JSON read. An index with
+        # no nodes has nothing to embed: sync would exit 0 with 0 vectors on
+        # every refresh. Over GitNexus's node cap analyze skipped embedding on
+        # purpose and sync would ignore the cap: the index stays keyword-only
+        # (record 2026-11-16 §5.2). Not after a fallback this run: embedding is
+        # unavailable (offline, broken model download) and a stalled sync would
+        # hold the busy lock for the whole budget for nothing.
+        if nodes > GITNEXUS_EMBEDDING_NODE_CAP:
+            say(
+                f"· index over GitNexus's {GITNEXUS_EMBEDDING_NODE_CAP}-node embedding cap — "
+                "staying keyword-only"
+            )
+        elif embed_failed:
             say(
                 "· skipping the one-time embedding backfill — embedding failed this run; "
                 "the next refresh retries"
@@ -838,14 +844,13 @@ def update_gitnexus(
     ctx: ToolContext,
     *,
     approved_origin: str = GITNEXUS_ORIGIN,
-    cfg: Config | GlobalConfig | None = None,
 ) -> int:
     """Deterministic install-or-update of the managed GitNexus clone
     (`omc update`). Installs when missing, else forces main and rebuilds.
 
-    With the embeddings option on, a rebuilt clone re-pins the embedding runtime
-    (its package.json gitnexusEmbeddingStack may have moved); an up-to-date clone
-    only probes. Neither outcome touches the rc (Decision 5)."""
+    A rebuilt clone re-pins the embedding runtime (its package.json
+    gitnexusEmbeddingStack may have moved); an up-to-date clone only probes.
+    Neither outcome touches the rc (record 2026-11-16 §5.2)."""
     root = gitnexus_root(ctx)
     # A fresh install must always build: an origin that carries a prebuilt
     # tree would otherwise land at origin/main with a working CLI and falsely
@@ -870,7 +875,7 @@ def update_gitnexus(
         and not freshly_cloned
     ):
         print(f"✓ GitNexus up to date{f' ({old})' if old else ''}", file=sys.stderr)
-        ensure_embeddings(ctx, cfg)
+        ensure_embeddings(ctx)
         return 0
     verb = "installing" if freshly_cloned else "updating"
     print(f"→ {verb} GitNexus…", file=sys.stderr)
@@ -899,5 +904,5 @@ def update_gitnexus(
             f"✓ GitNexus updated{f': {old} → {new}' if old and old != new else f' ({new})'}",
             file=sys.stderr,
         )
-    ensure_embeddings(ctx, cfg, reinstall=True)
+    ensure_embeddings(ctx, reinstall=True)
     return 0

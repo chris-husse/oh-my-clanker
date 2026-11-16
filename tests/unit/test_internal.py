@@ -663,119 +663,14 @@ def test_internal_build_progress_usage_and_dispatch(tmp_path, capsys):
     assert out == ""  # internal stdout stays machine-clean; bar goes to stderr
 
 
-def test_dependency_usage_errors(capsys):
-    assert run_internal(["dependency"]) == 2
-    assert run_internal(["dependency", "nope"]) == 2
-    assert run_internal(["dependency", "ensure"]) == 2  # --git is required
-    assert run_internal(["dependency", "document"]) == 2
-    assert "usage:" in capsys.readouterr().err
-    # documentation is gone: `document` is an unknown verb like any other
-    assert run_internal(["dependency", "document", "--git", "github.com/foo/bar"]) == 2
-    assert "dependency <ensure|list>" in capsys.readouterr().err
+def test_dependency_verbs_and_git_scope_are_usage_errors(capsys):
+    from omc.internal import _USAGE
 
-
-def test_dependency_list_dispatches(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("OMC_HOME", str(tmp_path / "home"))
-    assert run_internal(["dependency", "list"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"version": 1, "dependencies": {}}
-
-
-def _seed_dep(home, commit="c" * 40):
-    """Manifest entry + checkout dir as `dependency ensure` leaves them."""
-    from omc.dependency import load_manifest, save_manifest
-
-    dest = home / "dependencies" / "github.com" / "foo" / "bar" / commit
-    (dest / ".git").mkdir(parents=True)
-    m = load_manifest(home)
-    m["dependencies"]["github.com/foo/bar"] = {
-        "url": "https://github.com/foo/bar.git",
-        "commits": {
-            commit: {
-                "checkout": str(dest),
-                "indexed": True,
-                "created": "2026-07-22T00:00:00+00:00",
-            }
-        },
-    }
-    save_manifest(home, m)
-    return dest
-
-
-def test_gitnexus_proxy_git_scopes_to_dependency(tmp_path, monkeypatch):
-    repo, wt, calls, env = _gitnexus_env(tmp_path)
-    dest = _seed_dep(tmp_path / "omc-home")
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    old = _chdir(wt)
-    try:
-        rc = run_internal(["gitnexus", "--git", "github.com/foo/bar", "query", "how"])
-    finally:
-        os.chdir(old)
-    assert rc == 0
-    logged = calls.read_text()
-    assert f"--repo {dest}" in logged
-    assert "--branch omc-pin" in logged
-    assert "--branch main" not in logged  # project scoping must NOT leak in
-    assert logged.splitlines()[-1] == str(dest)  # ran FROM the checkout
-
-
-def test_gitnexus_proxy_git_unknown_ref_hints_ensure(tmp_path, capsys, monkeypatch):
-    repo, wt, calls, env = _gitnexus_env(tmp_path)
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    old = _chdir(repo)
-    try:
-        rc = run_internal(["gitnexus", "--git", "github.com/no/pe", "query", "x"])
-    finally:
-        os.chdir(old)
-    assert rc == 1
-    assert "omc internal dependency ensure --git" in capsys.readouterr().err
-    assert not calls.exists() or calls.read_text() == ""  # nothing was run
-
-
-def test_gitnexus_proxy_git_empty_checkout_hints_ensure(tmp_path, capsys, monkeypatch):
-    # A corrupted entry (indexed:true, checkout:"") must be treated as not-indexed
-    # BEFORE building a Path — Path("")/".git" == "./.git" would spuriously pass
-    # the guard whenever cwd is a git repo and answer against the WRONG repo.
-    from omc.dependency import load_manifest, save_manifest
-
-    repo, wt, calls, env = _gitnexus_env(tmp_path)
-    home = tmp_path / "omc-home"
-    m = load_manifest(home)
-    m["dependencies"]["github.com/foo/bar"] = {
-        "url": "https://github.com/foo/bar.git",
-        "commits": {
-            "c" * 40: {
-                "checkout": "",
-                "indexed": True,
-                "created": "2026-07-22T00:00:00+00:00",
-            }
-        },
-    }
-    save_manifest(home, m)
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    old = _chdir(repo)  # cwd IS a real git repo
-    try:
-        rc = run_internal(["gitnexus", "--git", "github.com/foo/bar", "query", "x"])
-    finally:
-        os.chdir(old)
-    assert rc == 1
-    assert "omc internal dependency ensure --git" in capsys.readouterr().err
-    assert not calls.exists() or calls.read_text() == ""  # the CLI was never invoked
-
-
-def test_gitnexus_proxy_git_still_rejects_bad_verbs(tmp_path, capsys, monkeypatch):
-    repo, wt, calls, env = _gitnexus_env(tmp_path)
-    _seed_dep(tmp_path / "omc-home")
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    old = _chdir(repo)
-    try:
-        assert run_internal(["gitnexus", "--git", "github.com/foo/bar", "analyze"]) == 2
-        assert run_internal(["gitnexus", "--git"]) == 2
-    finally:
-        os.chdir(old)
+    assert run_internal(["dependency", "list"]) == 2
+    assert run_internal(["dependency", "ensure", "--git", "github.com/foo/bar"]) == 2
+    assert run_internal(["gitnexus", "--git", "github.com/foo/bar", "query", "x"]) == 2
+    assert "dependency" not in _USAGE and "--git" not in _USAGE
+    assert "gitnexus <ensure|status|refresh|query|context|impact|cypher>" in _USAGE
 
 
 def _seed_fresh_index(repo):
@@ -997,19 +892,6 @@ def test_proxy_prints_stale_verdict_on_stderr_only_when_stale(tmp_path, capsys, 
         assert "OMC_KNOWLEDGE" not in capsys.readouterr().err
     finally:
         os.chdir(old)
-
-
-def test_proxy_git_path_never_prints_verdict(tmp_path, capsys, monkeypatch):
-    repo, wt, calls, env = _gitnexus_env(tmp_path)
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    _seed_dep(tmp_path / "omc-home")
-    old = _chdir(repo)
-    try:
-        run_internal(["gitnexus", "--git", "github.com/foo/bar", "query", "x"])
-    finally:
-        os.chdir(old)
-    assert "OMC_KNOWLEDGE" not in capsys.readouterr().err
 
 
 def test_rebase_main_payload_carries_knowledge_in_all_shapes(tmp_path, capsys):

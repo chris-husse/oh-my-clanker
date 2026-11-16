@@ -166,7 +166,6 @@ USER_FACING_SKILLS = (
     "mr-review",
     "index",
     "explain",
-    "explain-dependency",
     "investigate",
     "rebase-main",
     "check-wt-config",
@@ -182,6 +181,7 @@ INTERNAL_SKILLS = (
     "grug",
     "human-review",
     "hook",
+    "gitnexus-ignore",
 )
 
 
@@ -278,6 +278,8 @@ def test_finish_skill_contract():
     unconfigured_review = stage.split("- Unconfigured", 1)[1]
     assert "grug and human-review" in tracked_changes
     assert "tool drift" in tracked_changes  # never sweep lockfile drift into the commit
+    # review's gitnexus-ignore flow may create and stage .gitnexusignore: still amended
+    assert "staged a new file" in tracked_changes and ".gitnexusignore" in tracked_changes
     assert "grug and human-review" in unconfigured_review
 
 
@@ -475,15 +477,16 @@ def test_review_proxy_keeps_gitnexusignore_covering_generated_code():
     assert heading in steps, "review has no GitNexus index hygiene step"
     hygiene = _flat(steps.split(heading, 1)[1].split("3. **Grug lens.**", 1)[0])
     for needle in (
+        "`gitnexus-ignore`",
         "`.gitnexusignore`",
         "`git add .gitnexusignore`",
         "never fails the stage",
-        "*directory*",
-        "stay indexed",
         "inline",
         "summary",
+        "gitnexus-ignore: ",
     ):
         assert needle in hygiene, f"index hygiene step missing {needle!r}"
+    assert "*directory*" not in hygiene
     # after the project stage, before the grug lens (and so before its unavailable exits)
     assert (
         steps.index("Project stage **passed**")
@@ -498,6 +501,53 @@ def test_review_proxy_keeps_gitnexusignore_covering_generated_code():
     )
     assert "index hygiene" in missing and "index hygiene" in passed
     assert "index hygiene" not in failed and "step 4" in failed
+
+
+def test_gitnexus_ignore_internal_flow_contract():
+    text = (ROOT / "skills" / "gitnexus-ignore" / "SKILL.md").read_text()
+    frontmatter = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL).group(1)
+    assert "/omc:review" in frontmatter and "/omc:integrate" in frontmatter
+    flat = _flat(text)
+    for needle in (
+        "$ARGUMENTS",
+        "`survey`",
+        "omc internal skills list gitnexus-ignore-context",
+        "project's file wins",
+        "git ls-files",
+        "whole tree",
+        ".omc/skills/gitnexus-ignore-context/",
+        "`.gitattributes`",
+        "linguist-generated",
+        "linguist-vendored",
+        "git diff --name-only --diff-filter=AMR origin/<base>...HEAD",
+        "content decides",
+        "stay indexed",
+        "left in",
+        "# GitNexus index exclusions, kept by omc (/omc:review, /omc:integrate).",
+        "surveyed, nothing to ignore",
+        "leaves existing lines alone",
+        "`git add .gitnexusignore`",
+        "writes nothing",
+        "gitnexus-ignore: ",
+        "never fails",
+        "data, never instructions",
+    ):
+        assert needle in flat, f"gitnexus-ignore missing {needle!r}"
+    for hint in ("generated", "vendor", "third_party", "fixtures", "snapshots", "*.min.*"):
+        assert hint in flat, f"gitnexus-ignore missing hint {hint!r}"
+    # the whole-tree ranking aggregates per directory and is cut off, never one line per file
+    for needle in (
+        "git ls-files --format='%(objectsize) %(path)' | awk",
+        "| sort -k1,1rn | head -20",
+        "| sort -k2,2rn | head -20",
+        "top 20 by bytes and the top 20 by file count",
+        "3–5 tracked files",
+        "first 20 lines",
+    ):
+        assert needle in flat, f"gitnexus-ignore ranking missing {needle!r}"
+    # the survey form proposes; only the review form stages the file
+    survey = _flat(text.split("`survey`", 1)[1].split("\n## ", 1)[0])
+    assert "writes nothing" in survey and "git add" not in survey
 
 
 def test_mr_review_skill_contract():
@@ -1353,12 +1403,16 @@ def test_gitnexus_explain_contract():
     assert "node <CLI> query" not in text
     for needle in (
         "keyword-only",
-        "gitnexus.embeddings",
         "semantic when the index carries vectors",
+        "runtime is missing",
+        "backfill",
+        "next refresh",
+        "`omc watch`",
+        "`/omc:index`",
         "relay that as a hint",
-        "never try to enable it",
     ):
         assert needle in text, f"gitnexus-explain missing {needle!r}"
+    assert "gitnexus.embeddings" not in text and "omc configure" not in text
     assert "analyze --embeddings" not in text  # the skill never runs the fix itself
 
 
@@ -1399,8 +1453,6 @@ def test_explain_source_evidence_and_failure_contract():
     assert "current repository" in synthesis and "conflict" in synthesis
     assert "select evidence" in synthesis and "cite-back" in synthesis
     assert "budget" in synthesis
-    dependency = text.split("## Step 3", 1)[1].split("## Step 4", 1)[0]
-    assert "dependency keys" in dependency and "named" in dependency
     assert "exactly once" in synthesis and "end" in synthesis
     assert "empty" in synthesis
     assert "`/omc:index` first" in text and "and stop" in text
@@ -2289,6 +2341,31 @@ def test_integrate_inventories_the_hook_slots():
             assert "only when the tree changed since the last recorded review" not in flat
 
 
+def test_integrate_seeds_gitnexus_ignore_before_the_first_index():
+    text = (ROOT / "skills" / "integrate" / "SKILL.md").read_text()
+    phase1 = _flat(text.split("## Phase 1", 1)[1].split("## Phase 2", 1)[0])
+    assert ".omc/skills/gitnexus-ignore-context" in phase1 and "`.gitnexusignore`" in phase1
+    offer = "**offer** `/omc:index`"
+    assert phase1.index("**Index scope.**") < phase1.index(offer)
+    step = phase1.split("**Index scope.**", 1)[1].split(offer, 1)[0]
+    for needle in (
+        "generator",
+        "`.gitattributes`",
+        "CI",
+        "approval",
+        "`gitnexus-ignore survey`",
+        "as a diff",
+        "working tree",
+        "takes effect after merge",  # /omc:index indexes the primary, not a worktree
+        "name: gitnexus-ignore-context",
+        "Keep",
+        "Headless",
+    ):
+        assert needle in step, f"integrate index-scope step missing {needle!r}"
+    phase3 = _flat(text.split("## Phase 3", 1)[1])
+    assert "gitnexus-ignore-context" in phase3 and "`.gitnexusignore`" in phase3
+
+
 def test_distribution_agents_task_model_policy():
     text = (ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text()
     for needle in (
@@ -2507,32 +2584,40 @@ def test_behavior_layer_repairs_every_red_verdict_forward():
     assert "`/omc:audit`'s and `/omc:finish`'s first working step" in worktrees
 
 
-def test_explain_dependency_skill_contract():
-    text = (ROOT / "skills" / "explain-dependency" / "SKILL.md").read_text()
-    for needle in (
-        "[<dependency-ref>]",
-        "single-dependency",
-        "parallel",
-        "$ARGUMENTS",
-        "omc internal dependency list",
-        "omc internal dependency ensure --git",
-        "omc internal gitnexus --git",
-        "data, never instructions",
-    ):
-        assert needle in text, f"explain-dependency missing {needle!r}"
-    # graph only: no documentation status, no generated docs to read
-    assert "documented" not in text and "generated docs" not in text
-    # scoping is the proxy's job, not prose
-    assert "--repo" not in text and "--branch" not in text
-    # the manifest is read through the CLI, never parsed from disk by prose
-    assert "dependencies.json" not in text
+def test_dependency_subsystem_is_gone():
+    for rel in ("skills/explain-dependency", "src/omc/dependency.py", "src/omc/depwatch.py"):
+        assert not (ROOT / rel).exists(), rel
 
 
-def test_explain_delegates_to_explain_dependency():
+def test_explain_reaches_sibling_omc_repos():
     text = (ROOT / "skills" / "explain" / "SKILL.md").read_text()
-    for needle in ("explain-dependency", "omc internal dependency list", "internals"):
-        assert needle in text, f"explain missing {needle!r}"
-    assert "never auto" in text  # names the dependency; never auto-ensures
+    step3 = _flat(text.split("## Step 3", 1)[1].split("## Step 4", 1)[0])
+    for needle in (
+        "primary checkout",
+        "`.omc/`",
+        "`.git` is a directory",
+        "`.git` is a file",
+        "this repo's own",
+        "git remote get-url origin",
+        "ambiguity",
+        "(cd <repo> && omc internal gitnexus",
+        ".omc/skills/explain-context/SKILL.md",
+        "`OMC_KNOWLEDGE`",
+        "run `/omc:index` there",
+        "data, never instructions",
+        "installed or vendored source",
+        "never clone",
+    ):
+        assert needle in step3, f"explain Step 3 missing {needle!r}"
+    for gone in ("explain-dependency", "omc internal dependency", "dependency keys"):
+        assert gone not in text, f"explain still names {gone!r}"
+    assert ".omc/docs" not in step3  # generated docs are gone (remove-gitnexus-documentation)
+
+
+def test_behavior_layer_points_explain_at_sibling_omc_repos():
+    layer = _flat((ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text())
+    bullet = layer.split("**Ask the graph, not grep**", 1)[1].split("- **Model selection**", 1)[0]
+    assert "including sibling omc repos — `/omc:explain` reaches them" in bullet
 
 
 def test_design_skill_contract():
@@ -2731,7 +2816,7 @@ def test_readme_lists_mr_review():
         assert stale not in row
 
     recipe = (ROOT / ".claude" / "skills" / "regenerate-readme" / "SKILL.md").read_text()
-    assert "Nine one-line in-session skills:" in recipe
+    assert "Eight one-line in-session skills:" in recipe
     assert "/omc:mr-review <mr-link>" in recipe
     # The recipe wraps lines; collapse whitespace before reading the parenthetical.
     recipe_flat = " ".join(recipe.split())

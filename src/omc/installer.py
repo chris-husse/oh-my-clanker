@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -18,6 +19,12 @@ from .toolctx import ToolContext, tool_version
 _UV_MISSING = (
     "error: uv not found; install it first: curl -LsSf https://astral.sh/uv/install.sh | sh"
 )
+
+# pyproject.toml's requires-python (a unit test pins the two together). uv keeps a
+# tool venv's interpreter on `install --reinstall` and `upgrade`, so a venv built on
+# an older Python could never take this omc; naming the interpreter moves it, and
+# uv downloads a managed one when the host has no match.
+REQUIRED_PYTHON = ">=3.14"
 
 _PLUGIN_REMOVAL = """\
 The omc plugin (if installed) is removed per harness:
@@ -119,7 +126,7 @@ def run_install(ctx: ToolContext, path: str) -> int:
     if err is not None:
         print(err, file=sys.stderr)
         return 1
-    rc = _uv(ctx, "tool", "install", "--reinstall", abspath)
+    rc = _uv(ctx, "tool", "install", "--reinstall", "--python", REQUIRED_PYTHON, abspath)
     if rc != 0:
         return rc
     post = post_install(ctx)
@@ -137,12 +144,16 @@ def _finish_update(post: PostInstall, dep_rc: int) -> int:
 
 def run_update(ctx: ToolContext) -> int:
     print("Updating omc via uv…", file=sys.stderr)
-    rc = _uv(ctx, "tool", "upgrade", "omc")
+    rc = _uv(ctx, "tool", "upgrade", "--python", REQUIRED_PYTHON, "omc")
     if rc != 0:
         return rc
     # Runs the FRESH on-disk CLI; a fish failure is recorded, never raised, so the
     # gates below still run and _finish_update reports both outcomes.
     post = post_install(ctx)
+    # Before the config gate, so unconfigured machines are cleaned too. `omc update`
+    # continues in the pre-upgrade process, so this first runs one update after the
+    # one that delivers it (record §7.2).
+    remove_retired_dependency_cache(ctx)
     # Load config up front. When configured, the tool probe is a FATAL gate
     # (git/wt/provider) that runs BEFORE the GitNexus install — a machine
     # without `wt` aborts the update before anything is cloned/built.
@@ -151,12 +162,10 @@ def run_update(ctx: ToolContext) -> int:
         require_tools(ctx, cfg)  # git/wt/provider — raises OmcError on a miss
     # Managed dependencies (GitNexus). Module-attribute import so tests can
     # monkeypatch omc.gitnexus.update_gitnexus; a failure here must fail the
-    # command (unlike the best-effort plugin loop below). cfg (possibly None:
-    # unconfigured machine) lets the step decide about the embedding runtime;
-    # None means off.
+    # command (unlike the best-effort plugin loop below).
     from . import gitnexus
 
-    dep_rc = gitnexus.update_gitnexus(ctx, cfg=cfg)
+    dep_rc = gitnexus.update_gitnexus(ctx)
     if cfg is None:
         print("· no config — skipping plugin updates (run `omc configure`)", file=sys.stderr)
         return _finish_update(post, dep_rc)
@@ -238,6 +247,74 @@ def run_update(ctx: ToolContext) -> int:
         if ok:
             print(f"✓ {name}: plugin updated", file=sys.stderr)
     return _finish_update(post, dep_rc)
+
+
+# omc's own managed tools under <home>/dependencies; everything else there is the
+# retired dependency subsystem's cache (record §7.2).
+_RETIRED_KEEP = ("gitnexus", "gitnexus-embeddings")
+
+
+def _human_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    value = float(n)
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        value /= 1024
+        if value < 1024 or unit == "TiB":
+            break
+    return f"{value:.1f} {unit}"
+
+
+def _remove_path(path: Path) -> int:
+    """Delete one path and return the bytes it held. A symlink or file is unlinked
+    (never followed); a real directory is removed whole."""
+    if path.is_symlink() or not path.is_dir():
+        size = path.lstat().st_size
+        path.unlink()
+        return size
+    size = sum(
+        os.lstat(os.path.join(root, name)).st_size
+        for root, _dirs, files in os.walk(path, followlinks=False)
+        for name in files
+    )
+    shutil.rmtree(path)
+    return size
+
+
+def remove_retired_dependency_cache(ctx: ToolContext) -> None:
+    """Remove what the retired dependency subsystem left under omc's home: its
+    manifest and lock, its checkouts/indexes under dependencies/ (omc's own tools
+    stay), and its mirrored docs under gitnexus/ (D6, D12). No marker: silent when
+    nothing is left. A failed delete is narrated and never raised."""
+    if _is_unsafe_home(ctx.home, ctx.env):
+        return
+    home = ctx.home
+    targets = [home / "dependencies.json", home / "dependencies.json.lock"]
+    deps = home / "dependencies"
+    try:
+        if deps.is_dir() and not deps.is_symlink():
+            targets += [p for p in sorted(deps.iterdir()) if p.name not in _RETIRED_KEEP]
+    except OSError as exc:
+        print(
+            f"✗ could not remove retired dependency cache {deps}: {exc} — continuing",
+            file=sys.stderr,
+        )
+    targets.append(home / "gitnexus")
+    removed = 0
+    any_removed = False
+    for path in targets:
+        if not os.path.lexists(path):
+            continue
+        try:
+            removed += _remove_path(path)
+            any_removed = True
+        except OSError as exc:
+            print(
+                f"✗ could not remove retired dependency cache {path}: {exc} — continuing",
+                file=sys.stderr,
+            )
+    if any_removed:
+        print(f"· removed retired dependency cache ({_human_size(removed)})", file=sys.stderr)
 
 
 def _is_unsafe_home(home: Path, env) -> bool:

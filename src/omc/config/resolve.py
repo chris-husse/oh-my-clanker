@@ -26,4 +26,4 @@ def load_effective(ctx: ToolContext) -> Config | None:
     gcfg = store.load_global(ctx.home)
     if gcfg is None:
         return None
-    return Config(llm=gcfg.llm, gitnexus=gcfg.gitnexus, worktree=project_config(ctx).worktree)
+    return Config(llm=gcfg.llm, worktree=project_config(ctx).worktree)

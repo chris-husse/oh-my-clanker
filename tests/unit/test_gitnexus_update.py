@@ -5,7 +5,6 @@ import subprocess
 
 import pytest
 
-from omc.config.schema import Config, GitNexusConfig, GlobalConfig
 from omc.gitnexus import embedding_runtime_dir, ensure_embeddings, ensure_gitnexus, update_gitnexus
 from omc.toolctx import ToolContext
 
@@ -405,26 +404,12 @@ def _embedding_stub(tmp_path, calls, *, install_rc=0):
     )
 
 
-def _on():
-    return Config(gitnexus=GitNexusConfig(embeddings=True))
-
-
 def _install_calls(calls):
     text = calls.read_text() if calls.exists() else ""
     return [ln for ln in text.splitlines() if ln.endswith(" embeddings install")]
 
 
-def test_ensure_embeddings_off_runs_nothing_and_says_nothing(tmp_path):
-    home = tmp_path / "home"
-    ctx, calls = _make_ctx(tmp_path, home)
-    _embedding_stub(tmp_path, calls)
-    said = []
-    for cfg in (Config(), GlobalConfig(), None):
-        assert ensure_embeddings(ctx, cfg, say=said.append) is False
-    assert said == [] and not calls.exists()
-
-
-def test_ensure_embeddings_on_and_ready_probes_only(tmp_path):
+def test_ensure_embeddings_with_a_ready_runtime_probes_only(tmp_path):
     home = tmp_path / "home"
     ctx, calls = _make_ctx(tmp_path, home)
     _embedding_stub(tmp_path, calls)
@@ -434,7 +419,7 @@ def test_ensure_embeddings_on_and_ready_probes_only(tmp_path):
         (rt / "node_modules" / pkg).mkdir(parents=True)
         (rt / "node_modules" / pkg / "package.json").write_text("{}")
     said = []
-    assert ensure_embeddings(ctx, _on(), say=said.append) is True
+    assert ensure_embeddings(ctx, say=said.append) is True
     assert said == [] and not calls.exists()
 
 
@@ -447,7 +432,7 @@ def test_ensure_embeddings_installs_once_into_the_omc_runtime_dir(tmp_path):
     (rt / "node_modules" / "@huggingface" / "transformers").mkdir(parents=True)
     (rt / "node_modules" / "@huggingface" / "transformers" / "package.json").write_text("{}")
     said = []
-    assert ensure_embeddings(ctx, _on(), say=said.append) is True
+    assert ensure_embeddings(ctx, say=said.append) is True
     cli = home / "dependencies" / "gitnexus" / "gitnexus" / "dist" / "cli" / "index.js"
     assert _install_calls(calls) == [
         f"node RT={rt} HF={home / 'dependencies/gitnexus-embeddings/hf'} LBUG=unset "
@@ -461,7 +446,7 @@ def test_ensure_embeddings_installs_once_into_the_omc_runtime_dir(tmp_path):
     ]
     assert (rt / "node_modules" / "onnxruntime-node" / "package.json").is_file()
     # second call: the probe answers, no node call
-    assert ensure_embeddings(ctx, _on(), say=said.append) is True
+    assert ensure_embeddings(ctx, say=said.append) is True
     assert len(_install_calls(calls)) == 1
 
 
@@ -471,7 +456,7 @@ def test_ensure_embeddings_failed_install_narrates_and_returns_false(tmp_path):
     ctx, calls = _make_ctx(tmp_path, home)
     _embedding_stub(tmp_path, calls, install_rc=1)
     said = []
-    assert ensure_embeddings(ctx, _on(), say=said.append) is False
+    assert ensure_embeddings(ctx, say=said.append) is False
     assert len(_install_calls(calls)) == 1
     failed = [s for s in said if s.startswith("✗ embedding runtime install failed (exit 1): ")]
     assert len(failed) == 1 and failed[0].endswith(" — indexing keyword-only")
@@ -484,8 +469,8 @@ def test_ensure_embeddings_reinstall_runs_even_when_ready(tmp_path):
     home.mkdir()  # see above: install runs with cwd=home
     ctx, calls = _make_ctx(tmp_path, home)
     _embedding_stub(tmp_path, calls)
-    assert ensure_embeddings(ctx, _on(), say=lambda s: None) is True  # installs
-    assert ensure_embeddings(ctx, _on(), reinstall=True, say=lambda s: None) is True
+    assert ensure_embeddings(ctx, say=lambda s: None) is True  # installs
+    assert ensure_embeddings(ctx, reinstall=True, say=lambda s: None) is True
     assert len(_install_calls(calls)) == 2
 
 
@@ -501,7 +486,7 @@ def test_ensure_embeddings_missing_node_is_a_narrated_miss(tmp_path, monkeypatch
 
     monkeypatch.setattr(ToolContext, "run_supervised", no_node)
     said = []
-    assert ensure_embeddings(ctx, _on(), say=said.append) is False
+    assert ensure_embeddings(ctx, say=said.append) is False
     assert any(
         s.startswith("✗ embedding runtime install failed: ")
         and s.endswith(" — indexing keyword-only")
@@ -509,18 +494,15 @@ def test_ensure_embeddings_missing_node_is_a_narrated_miss(tmp_path, monkeypatch
     )
 
 
-def _global_on():
-    return GlobalConfig(gitnexus=GitNexusConfig(embeddings=True))
-
-
-def test_update_rebuild_with_option_on_reinstalls_runtime_even_when_ready(tmp_path, capsys):
+@pytest.mark.real_embeddings
+def test_update_rebuild_reinstalls_runtime_even_when_ready(tmp_path, capsys):
     home = tmp_path / "home"
     ctx, calls = _make_ctx(tmp_path, home)
     origin, seed, _ = _seed_clone(tmp_path, home)
     _advance_origin(seed)
     _embedding_stub(tmp_path, calls)
-    assert ensure_embeddings(ctx, _on(), say=lambda s: None) is True  # ready beforehand
-    assert update_gitnexus(ctx, approved_origin=str(origin), cfg=_global_on()) == 0
+    assert ensure_embeddings(ctx, say=lambda s: None) is True  # ready beforehand
+    assert update_gitnexus(ctx, approved_origin=str(origin)) == 0
     assert len(_install_calls(calls)) == 2  # the rebuild re-pins the runtime
     err = capsys.readouterr().err
     assert "✓ GitNexus embedding runtime installed" in err
@@ -529,48 +511,38 @@ def test_update_rebuild_with_option_on_reinstalls_runtime_even_when_ready(tmp_pa
     assert recorded.index("npm run build") < recorded.rindex("embeddings install")
 
 
-def test_update_up_to_date_with_option_on_probes_only(tmp_path, capsys):
+@pytest.mark.real_embeddings
+def test_update_up_to_date_probes_only(tmp_path, capsys):
     home = tmp_path / "home"
     ctx, calls = _make_ctx(tmp_path, home)
     origin, _, _ = _seed_clone(tmp_path, home)
     _embedding_stub(tmp_path, calls)
-    assert ensure_embeddings(ctx, _on(), say=lambda s: None) is True
-    assert update_gitnexus(ctx, approved_origin=str(origin), cfg=_global_on()) == 0
+    assert ensure_embeddings(ctx, say=lambda s: None) is True
+    assert update_gitnexus(ctx, approved_origin=str(origin)) == 0
     assert len(_install_calls(calls)) == 1  # no second install on the short-circuit
     assert "up to date" in capsys.readouterr().err
 
 
-def test_update_up_to_date_with_missing_runtime_installs_it(tmp_path, capsys):
+@pytest.mark.real_embeddings
+def test_update_installs_a_missing_runtime_without_any_config(tmp_path, capsys):
     home = tmp_path / "home"
     ctx, calls = _make_ctx(tmp_path, home)
     origin, _, _ = _seed_clone(tmp_path, home)
     _embedding_stub(tmp_path, calls)
-    assert update_gitnexus(ctx, approved_origin=str(origin), cfg=_global_on()) == 0
+    assert update_gitnexus(ctx, approved_origin=str(origin)) == 0
     assert len(_install_calls(calls)) == 1
 
 
+@pytest.mark.real_embeddings
 def test_update_failed_runtime_install_does_not_fail_update(tmp_path, capsys):
     home = tmp_path / "home"
     ctx, calls = _make_ctx(tmp_path, home)
     origin, seed, _ = _seed_clone(tmp_path, home)
     _advance_origin(seed)
     _embedding_stub(tmp_path, calls, install_rc=1)
-    assert update_gitnexus(ctx, approved_origin=str(origin), cfg=_global_on()) == 0
+    assert update_gitnexus(ctx, approved_origin=str(origin)) == 0
     err = capsys.readouterr().err
     assert "✗ embedding runtime install failed (exit 1)" in err and "updated" in err
-
-
-@pytest.mark.parametrize("cfg", [None, GlobalConfig()])
-def test_update_with_option_off_or_unconfigured_never_touches_embeddings(tmp_path, cfg):
-    home = tmp_path / "home"
-    ctx, calls = _make_ctx(tmp_path, home)
-    origin, seed, _ = _seed_clone(tmp_path, home)
-    _advance_origin(seed)
-    _embedding_stub(tmp_path, calls)
-    assert update_gitnexus(ctx, approved_origin=str(origin), cfg=cfg) == 0
-    assert _install_calls(calls) == []
-    # the argv word, not the always-pinned gitnexus-embeddings env paths the stub records
-    assert " embeddings " not in calls.read_text()
 
 
 def _silent_install_stub(tmp_path, calls, *, shell):
@@ -616,7 +588,7 @@ def test_silent_install_lives_on_runtime_writes_and_dies_on_the_stall_budget(
     else:
         _silent_install_stub(tmp_path, calls, shell=f"{_bin('sleep')} 5; ")
     said = []
-    ready = ensure_embeddings(ctx, _on(), say=said.append)
+    ready = ensure_embeddings(ctx, say=said.append)
     assert len(_install_calls(calls)) == 1
     if writes_runtime:
         assert ready is True

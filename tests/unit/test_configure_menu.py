@@ -37,22 +37,6 @@ def _tags(section):
             yield value
 
 
-def test_gitnexus_embeddings_toggle_saves_only_the_global_file(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    session, (ctx, gcfg, _) = _menu(tmp_path, root=repo)
-    tag = session.root["GitNexus"]["Embeddings"]
-    assert tag.val is False
-    assert tag.update(True)
-    assert gcfg.gitnexus.embeddings is True  # in-memory copy-back, not only disk
-    assert store.load_global(ctx.home).gitnexus.embeddings is True
-    assert not store.project_config_path(repo).exists()
-    assert session.flags == (True, False)
-    assert tag.update(False)
-    assert gcfg.gitnexus.embeddings is False
-    assert store.load_global(ctx.home).gitnexus.embeddings is False
-
-
 def test_provider_selection_per_step_toggle_saves_only_the_global_file(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -75,10 +59,7 @@ def test_provider_selection_per_step_toggle_saves_only_the_global_file(tmp_path)
 
 def test_menu_groups_schema_fields_and_registry_providers(tmp_path):
     session, _ = _menu(tmp_path)
-    assert list(session.root) == ["LLM", "GitNexus"]
-    assert session.root["GitNexus"]["Embeddings"].description == (
-        "Generate local vector embeddings for semantic /omc:explain queries."
-    )
+    assert list(session.root) == ["LLM"]
     llm = session.root["LLM"]
     assert llm["Default provider"].description == "Provider for new sessions."
     assert set(llm) == {"Default provider", "Provider Selection Per Step", "claude", "codex"}
@@ -214,7 +195,6 @@ def test_schema_field_and_section_metadata_drive_menu(tmp_path, monkeypatch):
 
     original_fields = configure.fields
     monkeypatch.setattr(configure.ProviderConfig, "future_model_flag", "future", raising=False)
-    monkeypatch.setattr(type(GlobalConfig().gitnexus), "future_graph_flag", "future", raising=False)
 
     def extended_fields(obj):
         result = list(original_fields(obj))
@@ -225,18 +205,10 @@ def test_schema_field_and_section_metadata_drive_menu(tmp_path, monkeypatch):
                     metadata={"label": "Future model flag", "help": "Provider metadata."},
                 )
             )
-        elif isinstance(obj, type(GlobalConfig().gitnexus)):
-            result.append(
-                SimpleNamespace(
-                    name="future_graph_flag",
-                    metadata={"label": "Future graph flag", "help": "Graph metadata."},
-                )
-            )
         elif isinstance(obj, GlobalConfig):
-            labels = {"llm": "LLM settings", "gitnexus": "Graph settings"}
             result = [
-                SimpleNamespace(name=f.name, metadata={**f.metadata, "label": labels[f.name]})
-                if f.name in labels
+                SimpleNamespace(name=f.name, metadata={**f.metadata, "label": "LLM settings"})
+                if f.name == "llm"
                 else f
                 for f in result
             ]
@@ -245,11 +217,8 @@ def test_schema_field_and_section_metadata_drive_menu(tmp_path, monkeypatch):
     monkeypatch.setattr(configure, "fields", extended_fields)
     session, _ = _menu(tmp_path)
     assert "LLM settings" in session.root
-    assert "Graph settings" in session.root
     provider = session.root["LLM settings"]["claude"]
     assert provider["Future model flag"].description == "Provider metadata."
-    graph = session.root["Graph settings"]
-    assert graph["Future graph flag"].description == "Graph metadata."
 
 
 def test_select_update_persists_and_repeated_update_is_noop(tmp_path, monkeypatch):

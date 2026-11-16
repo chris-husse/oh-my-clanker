@@ -2,7 +2,7 @@
 name = "omc"
 version = "0.1.52"
 description = "Oh My Clanker! Turn a ticket into a prepared worktree with a seeded LLM session."
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = "MIT"
 dependencies = [
     "mininterface>=1.4,<1.5",
@@ -50,6 +50,7 @@ markers = [
     "codex_gate: Codex integration cases; serial on the account volume (just codex-gate)",
     "golden: ordered golden-path stage; run with -n 0 (scripts/e2e.sh phase 1)",
     "variation(stage): forks a container from a golden stage snapshot",
+    "real_embeddings: unit test runs the real gitnexus.ensure_embeddings (tests/unit/conftest.py seam)",
 ]
 # Every test has a 5-minute ceiling; only the `expensive` tier may override it
 # with @pytest.mark.timeout. SIGALRM interrupts subprocess.communicate cleanly;
@@ -62,6 +63,11 @@ timeout_func_only = true
 
 [tool.ruff]
 line-length = 100
+# Pinned below requires-python: inferred from it, ruff would emit 3.14-only syntax
+# (PEP 758 unparenthesized `except A, B:`) into files other interpreters run —
+# docker/conversation.py under the E2E image's bookworm python3, scripts/ under
+# the CI runner's python3.
+target-version = "py312"
 src = ["src", "tests"]
 # ruff 0.16 started formatting fenced code blocks inside markdown; the docs
 # tree holds dated design/plan RECORDS whose code snippets must stay verbatim.

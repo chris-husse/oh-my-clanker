@@ -111,16 +111,14 @@ one disposition and one verdict.
      - Project stage **passed** → continue to the index hygiene paragraph below.
 
    **GitNexus index hygiene.** Reached from either passing branch above;
-   run it inline in the main session, no worker. omc indexes this repo with
-   GitNexus, the code knowledge graph behind `/omc:explain`. Committed
-   generated code, build/output and vendored files bloat it. If the branch
-   diff adds or changes tracked files of that kind, make sure the repo-root
-   `.gitnexusignore` (gitignore syntax) covers their *directory* (e.g.
-   `src/**/generated/`; a `linguist-generated` line in `.gitattributes` is a
-   strong hint), then `git add .gitnexusignore` so finish's amend includes
-   it. Hand-written source, tests and docs stay indexed. This never fails
-   the stage; name any added patterns in the summary. Then continue to
-   step 3.
+   run it inline in the main session, no worker. Invoke the internal
+   `gitnexus-ignore` skill with no argument: it judges the branch diff's
+   tracked files by content and keeps the repo-root `.gitnexusignore`
+   covering generated, build/output and vendored code. The flow stages any
+   change with `git add .gitnexusignore`, which finish's amend needs. Its
+   result line begins `gitnexus-ignore: `; name the patterns it added in the
+   summary. This never fails the stage, whatever the line says. Then
+   continue to step 3.
 3. **Grug lens.** Resolve one base branch the way `finish` does
    (`worktree.base_branch` in `.omc/config.yaml`, else the remote's HEAD
    branch). Dispatch a grug judge worker for the complexity lens. Dispatch a
