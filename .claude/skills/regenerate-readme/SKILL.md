@@ -19,9 +19,9 @@ CLI authority: a worktree's copied `.venv` may render help from the primary.
 |---|---|
 | Install, Update, Configure | `src/omc/cli/__init__.py`, `src/omc/config/schema.py`, `src/omc/installer.py`, `src/omc/reconcile.py`, `src/omc/configure.py`, `src/omc/config/store.py` (`_hydrate`'s unknown-key notice); frozen help for configure/install/update/uninstall |
 | Keep knowledge fresh with `omc watch` | The watch parser, module docstring and tick/hook behavior in `src/omc/watch.py`, `.config/wt.toml`; frozen watch help |
-| Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/write-plan/SKILL.md`, `skills/implement/SKILL.md`, `skills/audit/SKILL.md`, `skills/finish/SKILL.md`, `skills/verify/SKILL.md`, `skills/review/SKILL.md` for authority and stage semantics |
-| How omc is put together | `src/omc/distribution/AGENTS.md`, `src/omc/toolctx.py`, `src/omc/gitnexus.py` (embeddings: ensure_embeddings, the sync backfill), `src/omc/providers/base.py`, `src/omc/internal.py`; `skills/gitnexus-explain/SKILL.md` for query routing; verdict contracts in the relevant skills |
-| Development | `.omc/config.yaml`, `.config/wt.toml`, `.omc/config/AGENTS.md`, every `.omc/skills/*/SKILL.md`, `.gitignore` |
+| Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/write-plan/SKILL.md`, `skills/implement/SKILL.md`, `skills/audit/SKILL.md`, `skills/finish/SKILL.md`, `skills/create-mr/SKILL.md`, `skills/hook/SKILL.md`, `skills/rebase-main/SKILL.md`, `skills/design/SKILL.md`, `skills/verify/SKILL.md`, `skills/review/SKILL.md` for authority, stage and hook semantics |
+| How omc is put together | `src/omc/distribution/AGENTS.md`, `src/omc/toolctx.py`, `src/omc/gate.py`, `src/omc/gitnexus.py` (embeddings: ensure_embeddings, the sync backfill), `src/omc/providers/base.py`, `src/omc/internal.py`; `skills/gitnexus-explain/SKILL.md` for query routing; verdict contracts in the relevant skills |
+| Development | `.omc/config.yaml`, `.config/wt.toml`, `.omc/config/AGENTS.md`, every `.omc/skills/*/SKILL.md`, every `.omc/hooks/*/SKILL.md`, `.gitignore` |
 | Prerequisites, Other commands, Notifications, Security note, License | Existing README; parser/help; `src/omc/notify.py`, `src/omc/slug.py`, `src/omc/providers/claude.py`, `src/omc/providers/codex.py`, `LICENSE` |
 | Links and retained details | `docs/shell-integration.md`, relevant marketplace/E2E sections of `docker/PLUGIN-NOTES.md`; config validation/store/UI and plugin code when checking their behavior |
 
@@ -80,7 +80,8 @@ Explain dry-run's stale/missing-plugin report without implying it changes the pl
 Superpowers is required: automatic for Claude Code, user-installed for Codex.
 Link the marketplace dependency pitfall in `docker/PLUGIN-NOTES.md` and
 `obra/superpowers`. Introduce `/omc:integrate`, including reruns after updates,
-for check/build/verify/review/explain-context/investigation-context integration.
+for check/build/verify/review/explain-context/investigation-context integration
+and the five optional project hooks.
 One sentence links macOS fish/iTerm2 branch titles and the herdr sidebar's worktree folder and branch to `docs/shell-integration.md`.
 
 #### `## Update` — target 10 lines
@@ -187,7 +188,8 @@ the flowchart has an edge Record → write-plan → Build alongside Record → B
 and edges labelled Provider Selection Per Step off from Record straight on to Build
 and from Branch straight on to Audit (no typed word), beside the typed edges.
 Implement (plan/build, committed unpublished branch) → audit
-(conformance/fixes/finish) → squashed push → user opens MR. Name both
+(squash, rebase, build, check, review, verify, then finish) → squashed push
+through the MR gate → user opens MR. Name both
 in-session and fresh-session paths.
 Three command subsections:
 - Design: command block for ticket key, ticket URL, quoted description;
@@ -196,8 +198,9 @@ Three command subsections:
   is JSON data, never phase authority. Ticket tools supply tracker context.
   Start gathers parent/epic/docs (unavailable docs reported), refreshes base
   (a dirty tree stops; a conflicting rebase is resolved by the session through
-  `/omc:rebase-main`, which then runs `/omc:check`, never handed back — two
-  sentences, naming the skill `/omc:rebase-main`), builds primer via explain and prior records, asks for seed and material scope
+  `/omc:rebase-main`, which then runs the project's `post_rebase` hook and
+  `/omc:check`, never handed back — two sentences, naming the skill
+  `/omc:rebase-main`), builds primer via explain and prior records, asks for seed and material scope
   answers, discusses full design. Agreement is not authority. `/omc:design`
   alone writes/hardens/commits record; with Provider Selection Per Step on, leaves
   the session open ("With Provider Selection Per Step on, the session stays open
@@ -206,6 +209,8 @@ Three command subsections:
   here (plan here, build elsewhere), or `omc implement --claude|--codex` with
   Provider Selection Per Step on; with it off, `/omc:design` continues into
   implement without a typed command (one notice line).
+  After the commit `/omc:design` asks the project's `post_design` hook and,
+  on a no-go, hardens and commits again.
   Optional `/omc:write-plan` needs the committed record, pressure-tests the
   plan via explain, commits only the plan file and stops with the session
   open when Provider Selection Per Step is on (off, the default, continues
@@ -220,8 +225,10 @@ Three command subsections:
   continuations and waits. With it off, `omc implement` (also with `--headless`)
   continues through audit and the push too.
 - Review: committed record gate, fresh `<slug>-audit` Claude session or
-  `/omc:audit`; conformance review, fixes, record amendments, a post-fix
-  gate of `/omc:check`, finish/publication.
+  `/omc:audit`; squash and rebase, then build → check → the fixed review
+  (conformance first: fixes, record amendments, the Implementation review
+  trace) → the fixed verify, the only unconditional review and verify, then
+  finish/publication.
   With Provider Selection Per Step off, implement invokes `/omc:audit` itself.
 Shared flags table: provider overrides (`--claude`/`--codex`, no saved change),
 `--dry-run` (no session/worktree; design still probes/calls slug/ensures guidance;
@@ -236,24 +243,52 @@ colleague's GitLab MR or GitHub PR against the intent its author linked, post th
 comments that survive reconciliation unattended with an automated-review footer,
 and keep the full review trail on disk).
 The rebase-main row and finish prose say rebase-main rebases code only, while
-explain queries the primary graph.
+explain queries the primary graph; the row says audit and finish run it with
+`--squash` and that it runs the project's `post_rebase` hook when the base moved.
 Explain optional check/build/verify/review semantics (check is the frequent
 unit gate, build builds the world without tests, "verify is full E2E, run by
-agents only inside finish" — the user or the project may run it any time —
-and review judges the diff), order, standalone forms,
-no-op unconfigured project stages, always-on grug and human-review lenses,
-and Important fix/waiver into Deliberate complexity. Finish squashes, rebases (a
+agents only in audit and in the MR gate" — the user or the project may run it
+any time — and review judges the diff), order (build before check wherever
+both run), standalone forms, no-op unconfigured project stages, always-on grug
+and human-review lenses, and Important fix/waiver into Deliberate complexity.
+Audit squashes and rebases (rebase-main `--squash`), then runs **build →
+check → review → verify**: the review runs conformance first against the
+record, then the project stage and both lenses, and is recorded; verify runs
+after it and is recorded on green (a tree the review's fixes changed is built
+and checked again before the verify, in audit and in the MR gate alike);
+verify findings and fixes never trigger a review. Then audit invokes finish. Finish squashes, rebases (a
 conflict with the base stops the rebase at most once; the session resolves that
 conflict itself, as `/omc:rebase-main` does, before the stage gates, rather than
-handing it back), describes with MR description, then runs **check → build →
-verify → review → final verify** (the final verify skipped when the tree is
-unchanged since verify passed) before force-with-lease, repairing red stages
-within the stage-gate rule's two-fix bound (a red verify first reruns only
-its failed pieces, then build and one full verify, when the project's verify
-skill has a "Running a subset" section; otherwise fix → check → build → one
-full verify); an agent starts
-verify only inside finish; user opens MR. Preserve finish
-without audit and close-worktree/review-comments/discuss continuations.
+handing it back), then runs build → check (both skipped when the tree is the
+one the last green verify saw), then the MR gate, describe and push: the
+review question (outside audit a review runs only when the tree changed since
+the last recorded review, or since the merge-base when none is recorded, and the project's `needs_review` hook asks), the verify
+question (no verify on the verified tree; a changed tree runs verify unless
+the project's `needs_verify` hook says no), the describe amend, the project's
+`pre_push` hook, then force-with-lease. Both questions come from
+`omc internal gate review|verify`, one `OMC_GATE` line each, and every push
+passes through the gate, review-comment re-pushes included; a `pre_push` fix
+resumes at the verify question, never the review question. Red stages and a
+red `post_rebase` or `pre_push` are repaired forward under the stage-gate
+rule: up to ten fix cycles per conductor run, each bringing progress or a new
+idea and stated in one line (fix → build → check → rerun; a red verify first
+reruns only its failed pieces after build and check, then one full verify,
+when the project's verify skill has a "Running a subset" section; otherwise
+fix → build → check → one full verify); a cycle with neither, or a red tenth,
+is one CRITICAL question, and nothing is pushed; an agent starts verify only
+in audit and in the MR gate; user opens MR. Preserve finish without audit (a
+direct finish gets the MR gate and no review unless `needs_review` asks) and
+close-worktree/review-comments/discuss continuations.
+Then one paragraph on project hooks: `.omc/hooks/<name>/SKILL.md`, run as a
+black box by omc's internal hook proxy, which relays one `OMC_HOOK` line —
+`needs_review` and `needs_verify` (MR gate, asked only on a changed tree; with no
+recorded review, `needs_review` compares against the merge-base, so a never-reviewed
+branch is always asked),
+`post_design` (go/no-go after the record commit), `post_rebase` (after a
+rebase moved the base; `before_implementation` skips the post-conflict check),
+`pre_push` (after the describe amend, before the push). Absence is the correct
+default: no review outside audit, verify on a changed tree, nothing else. A fix
+never edits a hook's own file.
 
 #### `## How omc is put together` — target 60 lines
 
@@ -277,7 +312,9 @@ Exactly three Mermaid diagrams, each with a short explanatory paragraph:
 3. Sequence for a real internal contract (e.g. design-record): skill → internal
    command → single prefixed JSON verdict → caller continues. List exactly
    OMC_KNOWLEDGE, OMC_DESIGN_RECORD, OMC_STAGE, OMC_REBASE_MAIN,
-   OMC_SLUG, OMC_MODELS (`omc internal models`, resolved task choices and the provider-selection-per-step flag); include OMC_TICKET from behavior layer. Distinguish CLI verdicts
+   OMC_SLUG, OMC_MODELS (`omc internal models`, resolved task choices and the provider-selection-per-step flag),
+   OMC_GATE (`omc internal gate review|verify`, a CLI verdict) and OMC_HOOK (skill-emitted, the hook proxy's verdict);
+   include OMC_TICKET from behavior layer. Distinguish CLI verdicts
    from skill-emitted contracts. The finish squash count travels in the CLI's
    rebase-main verdict (`squashed`); no skill emits a squash verdict.
    Exit codes 0 ok / 1 error / 2 refusal or usage /
@@ -312,7 +349,7 @@ notifications ignored and removed next save.
 #### `## Development` — target 35 lines
 
 omc develops itself: watch in primary, `omc design "<change>"`, lifecycle
-agents run just recipes. Table with all ten surfaces and what each ensures:
+agents run just recipes. Table with all eleven surfaces and what each ensures:
 `.omc/config.yaml` (feature/ + main); `.config/wt.toml` (ignored files except
 `.gitnexus/` and `target/`, submodules, direnv); `.omc/config/AGENTS.md`
 (red/green, no skips, ToolContext, no unasked installs, generated README);
@@ -321,7 +358,8 @@ agents run just recipes. Table with all ten surfaces and what each ensures:
 (Docker golden then parallel variations/smoke, 300 s, Codex when changed,
 gitignored .env tokens, node-id "Running a subset" reruns); `.omc/skills/review` (project rules + grug +
 human-review);
-`.omc/skills/explain-context` (truth order); `.gitignore` (the primary graph
+`.omc/skills/explain-context` (truth order); `.omc/hooks/needs_verify` (docs-only
+changes, under `docs/` or `README.md`, need no verify); `.gitignore` (the primary graph
 stays uncommitted; a leftover `.omc/docs/` stays ignored);
 `docs/superpowers/specs/`, `docs/superpowers/plans/` (dated records/plans).
 State this repo has no post-watch hook; link PLUGIN-NOTES for E2E/auth evidence.

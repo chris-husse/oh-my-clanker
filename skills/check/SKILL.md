@@ -11,7 +11,7 @@ check stage, if the project defines one.
 Intended semantics: check is the fast "am I on the right track" gate —
 build only what the unit tests need, then run them. Call it constantly
 during development; the world-build belongs to `build` and full E2E to
-`verify` (finish only).
+`verify` (audit and the MR gate only).
 
 ## Steps
 

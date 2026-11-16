@@ -1,14 +1,15 @@
 """Stage placement within the full session's cumulative marker history:
-implement runs check only; finish, modelled from the last review, runs
-check → build → verify → review and may add a final verify, and its bounded
-repair loops (fix → check → restart) may repeat stages; trailing checks after
-finish are tolerated."""
+implement runs check only; audit, modelled from the last review, runs
+build → check → review → verify, and its repair loops (fix → build → check →
+rerun) may repeat stages; a review whose amend changed the tree is followed by
+build → check before the verify; a verify fix never returns to review. Finish on the
+audited, unchanged tree adds no stage; trailing checks are tolerated."""
 
 import pytest
 
 from tests.e2e.lifecycle_helpers import (
-    _assert_check_only_before_finish,
-    _assert_finish_stage_order,
+    _assert_audit_stage_order,
+    _assert_check_only_before_audit,
     _assert_implement_check_only,
     _assert_recorded,
     _assert_reviewed_record,
@@ -37,14 +38,14 @@ def test_implement_markers_accept_checks_only(markers):
         "review\n",
         "check\nbuild\n",
         "check\nverify\n",
-        "check\nbuild\nverify\nreview\n",
+        "check\nbuild\ncheck\nreview\nverify\n",
     ],
     ids=[
         "empty",
         "no-check",
         "build",
         "verify",
-        "finish-block",
+        "audit-block",
     ],
 )
 def test_implement_markers_reject_missing_check_build_or_verify(markers):
@@ -52,124 +53,111 @@ def test_implement_markers_reject_missing_check_build_or_verify(markers):
         _assert_implement_check_only(markers)
 
 
+_AUDIT = "check\nbuild\ncheck\nreview\nverify\n"
+
+
 @pytest.mark.parametrize(
     "markers",
     [
-        "check\ncheck\nbuild\nverify\nreview\n",
-        "check\nreview\ncheck\nbuild\nverify\nreview\nverify\n",
-        "check\nbuild\ncheck\nbuild\nverify\nreview\nverify\n",
-        "check\nbuild\nverify\ncheck\nverify\nbuild\nverify\nreview\nverify\n",
+        "check\ncheck\nbuild\ncheck\nreview\nverify\n",
+        "check\nreview\ncheck\nbuild\ncheck\nreview\nverify\n",
+        "check\nbuild\ncheck\nbuild\ncheck\nreview\nverify\n",
+        "check\nbuild\ncheck\nreview\nverify\nbuild\ncheck\nverify\n",
     ],
     ids=[
-        "checks-then-finish",
-        "review-then-finish-final-verify",
-        "red-build-restart",
+        "checks-then-audit",
+        "implementation-review-then-audit",
+        "red-check-restart",
         "red-verify-repair",
     ],
 )
-def test_no_verify_before_the_first_build_accepts_finish_repairs(markers):
-    _assert_check_only_before_finish(markers)
+def test_no_verify_before_the_first_build_accepts_audit_repairs(markers):
+    _assert_check_only_before_audit(markers)
 
 
 @pytest.mark.parametrize(
     "markers",
     [
-        "check\nverify\ncheck\nbuild\nverify\nreview\n",
-        "verify\ncheck\nbuild\nverify\nreview\n",
+        "check\nverify\ncheck\nbuild\ncheck\nreview\nverify\n",
+        "verify\ncheck\nbuild\ncheck\nreview\nverify\n",
     ],
     ids=[
-        "audit-verify-before-finish",
+        "implement-verify-before-audit",
         "verify-first",
     ],
 )
 def test_no_verify_before_the_first_build_rejects_early_verify(markers):
     with pytest.raises(AssertionError):
-        _assert_check_only_before_finish(markers)
+        _assert_check_only_before_audit(markers)
 
 
 @pytest.mark.parametrize(
     "markers",
     [
-        "check\nbuild\nverify\nreview\n",
-        "check\ncheck\nreview\ncheck\nbuild\nverify\nreview\n",
-        "check\nbuild\ncheck\nreview\nverify\ncheck\ncheck\ncheck\nbuild\nbuild\nverify\nverify\nreview\nreview\n",
-        "check\nbuild\nverify\nreview\nverify\n",
-        "check\nbuild\nverify\nverify\nreview\nverify\nverify\n",
-        "check\nbuild\nverify\ncheck\nverify\nbuild\nverify\nreview\nverify\n",
-        "check\nbuild\nverify\nreview\nverify\ncheck\nverify\nbuild\nverify\n",
-        "check\nbuild\ncheck\nbuild\nverify\nreview\nverify\n",
-        "check\nbuild\nverify\nreview\ncheck\nbuild\nverify\nreview\nverify\n",
-        "check\nbuild\nverify\nreview\ncheck\n",
-        "check\nbuild\nverify\nreview\nverify\ncheck\n",
-        "check\nbuild\nverify\ncheck\nbuild\nverify\nreview\n",
-        "check\nbuild\nverify\nreview\nverify\ncheck\nbuild\nverify\n",
-        "check\nbuild\nverify\nreview\nverify\ncheck\nbuild\nverify\ncheck\nbuild\nverify\n",
-        "check\nbuild\ncheck\nbuild\nverify\nreview\n",
-        "check\nbuild\nverify\nreview\ncheck\nbuild\nverify\nreview\n",
+        _AUDIT,
+        "check\ncheck\nreview\ncheck\nbuild\ncheck\nreview\nverify\n",
+        "check\nbuild\ncheck\nbuild\ncheck\nreview\nverify\n",
+        "check\nbuild\ncheck\nreview\nbuild\ncheck\nreview\nverify\n",
+        _AUDIT + "build\ncheck\nverify\n",
+        _AUDIT + "build\ncheck\nverify\nbuild\ncheck\nverify\n",
+        _AUDIT + "verify\n",
+        _AUDIT + "check\n",
+        _AUDIT.replace("review\nverify", "review\ncheck\nverify"),
+        _AUDIT.replace("review\nverify", "review\nbuild\ncheck\nverify"),
+        _AUDIT.replace("review\nverify", "review\ncheck\nbuild\ncheck\nverify"),
+        _AUDIT.replace("review\nverify", "review\nbuild\ncheck\nbuild\ncheck\nverify"),
     ],
     ids=[
-        "finish",
-        "implementation-review-before-finish",
-        "observed-repeated-finish-stages",
-        "final-verify",
-        "retried-final-verify",
-        "red-pre-review-verify-repaired",
-        "red-final-verify-repaired",
-        "red-build-repaired",
+        "audit",
+        "implementation-review-before-audit",
+        "red-check-repaired",
         "red-review-repaired",
-        "supplemental-check-after-finish",
-        "final-verify-then-supplemental-check",
-        "red-pre-review-verify-no-subset",
-        "red-final-verify-no-subset",
-        "red-final-verify-no-subset-twice",
-        "red-build-repaired-no-final-verify",
-        "red-review-repaired-no-final-verify",
+        "red-verify-repaired",
+        "red-verify-repaired-twice",
+        "retried-verify-collapses",
+        "trailing-check",
+        "lens-fix-check-before-verify",
+        "review-changed-tree-build-check-before-verify",
+        "lens-fix-check-then-build-check-before-verify",
+        "red-post-review-build-repaired",
     ],
 )
-def test_finish_stages_accept_final_verify_and_repair_loops(markers):
-    _assert_finish_stage_order(markers)
+def test_audit_stages_accept_the_fixed_order_and_repair_loops(markers):
+    _assert_audit_stage_order(markers)
 
 
 @pytest.mark.parametrize(
     "markers",
     [
         "",
-        "build\nverify\nreview\n",
-        "check\nreview\ncheck\nbuild\nverify\n",
-        "check\nreview\ncheck\nverify\nbuild\nreview\n",
+        "check\nbuild\nverify\nreview\n",
         "check\nbuild\nreview\nverify\n",
-        "check\nbuild\nreview\nverify\nreview\n",
-        "check\nbuild\ncheck\nverify\nreview\n",
-        "check\ncheck\nbuild\nbuild\nreview\nreview\nverify\nverify\n",
-        "check\ncheck\nbuild\nbuild\ncheck\ncheck\nverify\nverify\nreview\nreview\n",
-        "check\nbuild\nverify\nreview\nverify\nreview\n",
-        "check\nbuild\nverify\nreview\nverify\nbuild\nverify\n",
-        "check\nbuild\nverify\nreview\nverify\ncheck\nbuild\n",
-        "check\nbuild\nverify\nreview\ncheck\nreview\n",
-        "check\nbuild\nverify\ncheck\nverify\nreview\n",
-        "check\nbuild\nverify\nreview\nverify\ncheck\nverify\n",
+        "check\nreview\nverify\n",
+        "check\nbuild\ncheck\nreview\n",
+        _AUDIT + "review\n",
+        _AUDIT + "check\nverify\n",
+        _AUDIT + "build\nverify\n",
+        _AUDIT + "build\ncheck\n",
+        _AUDIT.replace("review\nverify", "review\nbuild\nverify"),
+        _AUDIT.replace("review\nverify", "review\ncheck\nbuild\nverify"),
     ],
     ids=[
-        "no-stages",
-        "missing-check",
-        "early-review-cannot-replace-finish-review",
-        "build-after-verify",
-        "review-before-verify",
-        "interleaved-review",
-        "interleaved-check",
-        "duplicated-out-of-order",
-        "duplicated-interleaved-check",
-        "review-after-final-verify",
-        "build-after-final-verify-without-fix-check",
-        "trailing-build-after-check",
-        "trailing-review-after-check",
-        "pre-review-targeted-rerun-without-build-and-full-verify",
-        "final-targeted-rerun-without-build-and-full-verify",
+        "empty",
+        "old-finish-order",
+        "no-check-after-build",
+        "check-before-build-only",
+        "no-verify",
+        "review-after-verify",
+        "verify-repair-without-build",
+        "verify-repair-without-check",
+        "trailing-build",
+        "post-review-build-without-check",
+        "lens-fix-check-then-build-without-check",
     ],
 )
-def test_finish_stages_reject_out_of_order_or_unrepaired_tails(markers):
+def test_audit_stages_reject_out_of_order_or_unrepaired_tails(markers):
     with pytest.raises(AssertionError):
-        _assert_finish_stage_order(markers)
+        _assert_audit_stage_order(markers)
 
 
 BEFORE = {

@@ -394,43 +394,81 @@ def test_readme_documents_optional_write_plan():
     assert "commits only the plan file and stops with the session open" in flat
 
 
-def test_readme_documents_verify_only_in_finish():
+def test_readme_documents_verify_after_audit_review_and_mr_gate():
     root = Path(__file__).resolve().parents[2]
     recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
     readme = (root / "README.md").read_text()
     recipe_lifecycle = recipe.split("#### `` ## The lifecycle:", 1)[1].split("\n#### ", 1)[0]
     flat_recipe_lifecycle = " ".join(recipe_lifecycle.split())
-    # a red verify reruns only its failed pieces only with a subset section,
-    # and even then build and one full verify close the repair
+    # spec 2026-11-16 D2: build before check in the verify repair too, and a
+    # red verify reruns only its failed pieces only with a subset section
     subset_repair = (
-        "a red verify first reruns only its failed pieces, then build and one full verify, "
-        'when the project\'s verify skill has a "Running a subset" section; '
-        "otherwise fix → check → build → one full verify"
+        "a red verify first reruns only its failed pieces after build and check, "
+        'then one full verify, when the project\'s verify skill has a "Running a subset" '
+        "section; otherwise fix → build → check → one full verify"
     )
-    for needle in ("final verify", "only inside finish", subset_repair):
+    for needle in (
+        "build → check → review → verify",
+        "MR gate",
+        "`needs_review`",
+        "`needs_verify`",
+        "`pre_push`",
+        "up to ten fix cycles",
+        "an agent starts verify only in audit and in the MR gate",
+        subset_repair,
+        # a tree the review's fixes changed is built and checked before any verify
+        "a tree the review's fixes changed is built and checked again before the verify",
+    ):
         assert needle in flat_recipe_lifecycle, f"recipe lifecycle slot missing {needle!r}"
     # the recipe reads the skill bodies, not only their frontmatter, for stage placement
     sources_row = next(
         (line for line in recipe.splitlines() if line.startswith("| Lifecycle |")), ""
     )
-    for source in ("skills/implement/SKILL.md", "skills/audit/SKILL.md", "skills/verify/SKILL.md"):
+    for source in (
+        "skills/implement/SKILL.md",
+        "skills/audit/SKILL.md",
+        "skills/verify/SKILL.md",
+        "skills/create-mr/SKILL.md",
+        "skills/hook/SKILL.md",
+        "skills/rebase-main/SKILL.md",
+    ):
         assert source in sources_row, f"recipe Lifecycle sources missing {source!r}"
+    architecture_row = next(
+        (line for line in recipe.splitlines() if line.startswith("| How omc is put together |")),
+        "",
+    )
+    assert "src/omc/gate.py" in architecture_row, architecture_row
     lifecycle = readme.split("## The lifecycle", 1)[1].split("\n## ", 1)[0]
     flat = " ".join(lifecycle.split())
-    assert "check → build → verify → review → final verify" in flat
-    assert "skipped when the tree is unchanged" in flat
+    for needle in (
+        "build → check → review → verify",
+        "MR gate",
+        "needs_verify",
+        "needs_review",
+        "pre_push",
+        "a tree the review's fixes changed is built and checked again before the verify",
+    ):
+        assert needle in flat, f"README lifecycle missing {needle!r}"
     assert subset_repair in flat, "README lifecycle missing the subset-dependent verify repair"
+    for contract in ("OMC_GATE", "OMC_HOOK"):
+        assert contract in readme, f"README does not name {contract}"
     for stale in (
+        "final verify",
+        "check → build → verify → review",
+        "two-fix bound",
+        "only inside finish",
         "`/omc:build` then `/omc:verify` before handoff",
         "major milestones",
-        "(a red verify first reruns only its failed pieces)",
-        "a red verify reruns only its failed pieces when",
     ):
         assert stale not in readme, f"README still says {stale!r}"
     verify_row = next(
         (line for line in readme.splitlines() if line.startswith("| `.omc/skills/verify`")), ""
     )
     assert "subset" in verify_row, verify_row
+    development = readme.split("## Development", 1)[1].split("\n## ", 1)[0]
+    assert any(
+        line.startswith("| `.omc/hooks/needs_verify`") for line in development.splitlines()
+    ), "README Development table has no .omc/hooks/needs_verify row"
 
 
 def test_readme_documents_squash_before_rebase():

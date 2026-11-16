@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -113,15 +115,23 @@ def _assert_skill_reads(events, expected_paths):
 
 _CLI = "/root/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js"
 
+# This repo's own needs_verify hook (spec 2026-11-16 D11), read on the host and
+# shipped verbatim in the lifecycle fixture so variations exercise the real hook.
+NEEDS_VERIFY_HOOK = Path(__file__).resolve().parents[2] / ".omc/hooks/needs_verify/SKILL.md"
+
 
 def _fixture(container, *, failing_stage: str | None = None, path="/work/lifecycle") -> str:
-    """A real, small Python repo with all four local stages and a bare origin."""
+    """A real, small Python repo with all four local stages, this repo's
+    needs_verify hook and a bare origin."""
     assert failing_stage in (None, "build", "verify")
     repo = make_work_repo(container, path)
     payload = r"""
 import sys
 from pathlib import Path
 root = Path(sys.argv[1])
+hook = root / ".omc" / "hooks" / "needs_verify" / "SKILL.md"
+hook.parent.mkdir(parents=True, exist_ok=True)
+hook.write_text(sys.argv[2], encoding="utf-8")
 (root / ".gitignore").write_text("__pycache__/\n.claude/settings.local.json\n")
 (root / "greeting.py").write_text("def greeting():\n    return 'Goodbye, world!'\n")
 (root / "test_greeting.py").write_text(
@@ -169,7 +179,8 @@ for stage in ("check", "build", "verify", "review"):
         "Report the actual exit status.\n"
     )
 """
-    rc, out = run_in(container, ["python3", "-c", payload, repo])
+    hook_text = NEEDS_VERIFY_HOOK.read_text(encoding="utf-8")
+    rc, out = run_in(container, ["python3", "-c", payload, repo, hook_text])
     assert rc == 0, out
     if failing_stage in ("build", "verify"):
         rc, out = run_in(container, ["touch", f"/tmp/omc-external-{failing_stage}-unavailable"])
@@ -612,15 +623,17 @@ def _assert_child_event(provider, events):
         ), "implementation did not dispatch a real Claude child"
 
 
-# Finish's red stages fix forward: fix → check → restart from build (a red
-# verify first reruns its failed pieces when the project documents a subset,
-# then build and the full verify; without one, build and the full verify).
-# Every repair group therefore ends in "build verify". After the last review
-# only the final verify and its repair loop may follow, then any trailing
-# checks (a check carries no build or verify risk).
-_REPAIRED_VERIFY = r"verify( check( verify)? build verify)*"
-_VERIFY_AFTER_BUILD = re.compile(_REPAIRED_VERIFY)
-_FINAL_VERIFY_TAIL = re.compile(rf"({_REPAIRED_VERIFY})?")
+# Audit runs build → check → review → verify (spec 2026-11-16 D1, D2). A red
+# stage fixes forward: fix → build → check → rerun, and a red verify never
+# returns to review (D3); its repair ends in "build check verify" (a targeted
+# rerun of the failed pieces, when the project documents a subset, collapses
+# into the full verify's marker). After the last review only the checks after
+# its lens fixes (review's step 3 runs /omc:check after each fix), the build →
+# check audit runs when the review's amend changed the tree (repeated when one
+# of them is red and repaired), the verify and its repair loop may follow, then
+# any trailing checks: the golden finish on the audited, unchanged tree adds no
+# build, check, review or verify.
+_AUDIT_VERIFY_TAIL = re.compile(r"(check )*(build check )*verify( build check verify)*")
 
 
 def _stage_steps(markers: str) -> list[str]:
@@ -644,36 +657,64 @@ def _assert_implement_check_only(markers: str) -> None:
     )
 
 
-def _assert_check_only_before_finish(markers: str) -> None:
-    """No verify before the first build: implement and audit gate on check only.
-    The cumulative marker file cannot tell an earlier build from a red finish
-    build that restarted, so the first build is where finish may begin."""
+def _assert_check_only_before_audit(markers: str) -> None:
+    """No verify before the first build: implement gates on check only, and
+    audit's fixed sequence opens with build. The cumulative marker file cannot
+    tell an earlier build from a red audit build that restarted, so the first
+    build is where audit may begin."""
     steps = _stage_steps(markers)
     first_build = steps.index("build") if "build" in steps else len(steps)
     assert "verify" not in steps[:first_build], (
-        f"verify ran before finish's first build: {markers!r}"
+        f"verify ran before audit's first build: {markers!r}"
     )
 
 
-def _assert_finish_stage_order(markers: str) -> None:
-    """Finish, modelled from the last review: a check, then the last build
-    followed only by verify and its repair reruns, then review; after review
-    only the final verify and its repair loop, then trailing checks. Earlier
-    implementation checks/reviews cannot stand in for finish."""
+def _assert_audit_stage_order(markers: str) -> None:
+    """Audit, modelled from the last review: the last build before it is
+    followed by exactly a check, then the review; after the review only the
+    lens-fix checks, the build → check of a tree the review changed, the verify
+    and its repair loop, then trailing checks. Earlier implementation
+    checks and reviews cannot stand in for audit's."""
     steps = _stage_steps(markers)
-    assert "review" in steps, f"finish never ran review: {markers!r}"
+    assert "review" in steps, f"audit never ran review: {markers!r}"
     review = _last(steps, "review")
     before, after = steps[:review], steps[review + 1 :]
-    assert "build" in before, f"no build before finish's review: {markers!r}"
+    assert "build" in before, f"no build before audit's review: {markers!r}"
     build = _last(before, "build")
-    assert "check" in before[:build], f"no check before finish's build: {markers!r}"
-    assert _VERIFY_AFTER_BUILD.fullmatch(" ".join(before[build + 1 :])), (
-        f"finish's build is not followed by verify before review: {markers!r}"
+    assert before[build + 1 :] == ["check"], (
+        f"audit's last build is not followed by exactly a check before review: {markers!r}"
     )
     while after and after[-1] == "check":
         after.pop()
-    assert _FINAL_VERIFY_TAIL.fullmatch(" ".join(after)), (
-        f"only the final verify, its repair loop and checks may follow review: {markers!r}"
+    assert _AUDIT_VERIFY_TAIL.fullmatch(" ".join(after)), (
+        "only lens-fix checks, build → check, the verify, its repair loop and checks "
+        f"may follow review: {markers!r}"
+    )
+
+
+def _assert_gate_state(container, worktree) -> None:
+    """The gate's own evidence: audit recorded a review, and the verified tree
+    is the tree pushed (finish's gate then answers `unchanged`)."""
+
+    def state_file(name):
+        rc, path = run_in(
+            container,
+            ["git", "-C", worktree, "rev-parse", "--git-path", f"omc/{name}"],
+            stdout_only=True,
+        )
+        assert rc == 0 and path.strip(), f"no git path for omc/{name}: {path!r}"
+        return posixpath.join(worktree, path.strip())
+
+    rc, _ = run_in(container, ["test", "-f", state_file("reviewed-tree")])
+    assert rc == 0, "audit recorded no review (omc/reviewed-tree is missing)"
+    rc, verified = run_in(container, ["cat", state_file("verified-tree")], stdout_only=True)
+    assert rc == 0, "audit recorded no green verify (omc/verified-tree is missing)"
+    rc, tree = run_in(
+        container, ["git", "-C", worktree, "rev-parse", "HEAD^{tree}"], stdout_only=True
+    )
+    assert rc == 0, tree
+    assert verified.strip() == tree.strip(), (
+        f"the verified tree {verified.strip()} is not HEAD's tree {tree.strip()}"
     )
 
 
@@ -705,8 +746,9 @@ def _assert_audited_artifacts(container, repo, worktree, branch, evidence, imple
     assert rc == 0 and commits.strip() == "1", f"audit left {commits.strip()} commits"
     rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
     assert rc == 0, "project stages never executed"
-    _assert_finish_stage_order(markers)
-    _assert_check_only_before_finish(markers)
+    _assert_audit_stage_order(markers)
+    _assert_check_only_before_audit(markers)
+    _assert_gate_state(container, worktree)
     _assert_published_fix(
         container,
         repo,

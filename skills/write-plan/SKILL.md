@@ -93,8 +93,14 @@ this directive to writing-plans verbatim: "Every implementation task in
 the plan carries a `Complexity: simple | medium | high` line, choosing one
 value. Label multi-file, architecturally tricky or ambiguous coding work
 `high`; choose `simple` for narrow routine work and `medium` otherwise.
-The plan stores complexity, never model ids." Every task therefore carries
-its `Complexity:` line; the build reads it.
+The plan stores complexity, never model ids. Write about five to seven
+tasks, each a coherent chunk of the work; a small change may need fewer, and
+a plan is never padded to reach five. Inside a task, independent edits
+(different files) fan out to parallel edit-only agents that run no build and
+no test, followed by one build-and-fix pass; never one task per file or per
+page. The project's testing policy still governs the order inside a task."
+Every task therefore carries its `Complexity:` line; the build reads it, and
+runs each task's fan-out and build-and-fix pass as the task describes them.
 
 Then, for each MAJOR section of the plan, the worker invokes `/omc:explain`
 once to pressure-test the implementation choices — emphasis here is

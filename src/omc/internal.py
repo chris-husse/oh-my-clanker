@@ -38,7 +38,7 @@ from .wtconfig import (
 
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] [--squash] | wt-template | design-record"
-    " | models | global-instructions PROVIDER"
+    " | gate [record] review|verify | models | global-instructions PROVIDER"
     " | gitnexus [--git REF] <ensure|status|refresh|query|context|impact|cypher> [args…]"
     " | dependency <ensure|list> [args…]"
     " | skills list NAME"
@@ -503,6 +503,15 @@ def run_internal(argv: list[str]) -> int:
             print(_USAGE, file=sys.stderr)
             return 2
         return _design_record(ToolContext.from_env())
+    if cmd == "gate":
+        from .gate import GATES, question, record
+
+        if len(rest) == 1 and rest[0] in GATES:
+            return question(ToolContext.from_env(), rest[0])
+        if len(rest) == 2 and rest[0] == "record" and rest[1] in GATES:
+            return record(ToolContext.from_env(), rest[1])
+        print(_USAGE, file=sys.stderr)
+        return 2
     if cmd == "models":
         if rest:
             print(_USAGE, file=sys.stderr)

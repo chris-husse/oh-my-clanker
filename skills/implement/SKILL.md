@@ -89,13 +89,22 @@ cannot pin a worker model, use the orchestrator model and say so in one line;
 ignore effort if the worker harness has no effort control. The main session
 retains task sequencing, checkpoint reviews and the user-question dialog.
 
+A task runs in the shape the plan gives it. Its worker dispatches the task's
+edit-only agents in parallel at the task's Complexity tier (each owns
+different files and runs no build and no test), then runs one build-and-fix
+pass itself (the task's build and tests, fixed until green, in the order the
+project's testing policy sets), then commits. Where a worker cannot dispatch
+agents of its own (Claude Code subagents cannot), the main session runs the
+fan-out and the worker runs the build-and-fix pass. The task's reviews and
+the `/omc:check` after it stay as below.
+
 After EACH task's subagent completes (and its reviews pass), run
 `/omc:check` — the project-defined quick gate (build what the unit tests
 need, run them) — before dispatching the next task. A failing check blocks
 progression: fix forward until check passes. Never substitute ad-hoc test
 commands for the stage; an unconfigured check is a pass, so this costs
-nothing on projects without one. Full E2E never runs in implement; `finish`
-runs `verify` on the squashed commit.
+nothing on projects without one. Full E2E never runs in implement;
+`/omc:audit` runs the fixed `verify` after its review.
 
 The last task's green `/omc:check` is the final gate before the handoff. Read
 its single-line `OMC_STAGE` verdict: only `"passed": true` permits
@@ -145,7 +154,8 @@ On Codex the command is spelled `$omc:audit`.
 > audit and publish on this provider, type `/omc:audit` here (`$omc:audit`
 > on Codex). To have another provider audit it, exit this session and run
 > `omc review --claude` or `omc review --codex` in this worktree. To publish
-> without an audit, type `/omc:finish`.
+> without an audit, type `/omc:finish`: it runs the MR gate, with no review
+> unless the project's `needs_review` hook asks for one.
 
 ## Completion contract
 

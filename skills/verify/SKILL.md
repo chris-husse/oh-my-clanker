@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Run the project's verify stage if one is configured (.omc/skills/verify in the repo omc is invoked from); nothing to do otherwise. Proxy - the project defines what "verify" means. Intended semantics: full E2E verification - an agent runs it only within finish; the user or the project may run it at any time.
+description: Run the project's verify stage if one is configured (.omc/skills/verify in the repo omc is invoked from); nothing to do otherwise. Proxy - the project defines what "verify" means. Intended semantics: full E2E verification - an agent runs it after `/omc:audit`'s review and in the MR gate; the user or the project may run it at any time.
 ---
 
 # omc verify (project-stage proxy)
@@ -8,10 +8,10 @@ description: Run the project's verify stage if one is configured (.omc/skills/ve
 There is nothing omc-specific to do here: this skill runs the PROJECT's
 verify stage, if the project defines one.
 
-Intended semantics: verify is the heavyweight full-E2E tier. An agent runs
-it only within `finish` (before review, and last before the push); the user
-or the project may run it at any time. The routine dev-loop gate is
-`check`'s job.
+Intended semantics: verify is the heavyweight full-E2E tier. An agent
+starts it in two places only: `/omc:audit`'s fixed verify after its review,
+and the MR gate in `create-mr` when the gate says run; the user or the
+project may run it at any time. The routine dev-loop gate is `check`'s job.
 
 ## User Input
 

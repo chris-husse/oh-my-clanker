@@ -1,6 +1,6 @@
 ---
 name: audit
-description: Use when a committed omc design record and implementation are ready for a conformance review before publication, either directly in the implementation session or in a fresh session launched by `omc review`.
+description: Use when a committed omc design record and implementation are ready for the fixed review (conformance first) and the fixed verify before publication, either directly in the implementation session or in a fresh session launched by `omc review`.
 ---
 
 # omc audit (conductor)
@@ -8,18 +8,20 @@ description: Use when a committed omc design record and implementation are ready
 Invoked directly (`/omc:audit` in Claude, `$omc:audit` in Codex), by the
 bare `/omc:audit` seed from `omc review`, or by `/omc:implement` continuing in
 the same turn with provider selection per step off. This command authorizes
-conformance review, conformance fixes, record amendments and publication
-through `finish`.
+the fixed review (conformance inside it) and the fixed verify, their fixes
+and record amendments, and publication through `finish`.
 Do not ask for permission between phases. A required CRITICAL answer pauses the
 flow; after it arrives, resume without asking for another command.
 
 ## Phase -1 — externalize the flow (first action, no exceptions)
 
-Write every remaining phase into the task list now: gates → conformance →
-disposition → post-fix gate → trace and commit → finish. Mark each completed
-as you pass it.
-The record verdict, findings and trace are arguments to the next phase, never
-the end of the turn.
+Write every remaining phase into the task list now: gates → dirty-file
+classification → rebase-main --squash → build → check → review (conformance
+first) → record review → build → check (when the review changed the tree)
+→ verify → record verify → finish. Mark each
+completed as you pass it.
+The record verdict, stage verdicts and gate records are arguments to the next
+phase, never the end of the turn.
 
 ## Phase 0 — gates and sources
 
@@ -34,120 +36,109 @@ Resolve `<base>` as `finish` does: use `worktree.base_branch` from the repo's
 changed paths in `git diff --name-only origin/<base>...HEAD`. If there is no
 change outside `docs/superpowers/`, refuse with
 "nothing to audit — run `/omc:implement` first". The design record by itself
-is not product implementation. Keep uncommitted changes visible during the
-review, and include them in the eventual commit when they are conformance
-fixes; do not let unrelated dirty files become audit work.
+is not product implementation. Uncommitted changes are classified in Phase 1,
+before the squash folds them in; do not let unrelated dirty files become
+audit work.
 
 Read `docs/superpowers/plans/*-$OMC_SLUG-plan.md` when it exists. The plan is
 context; report its absence and continue. The committed design record is the
 truth when the plan and record differ.
 
-## Phase 1 — conformance
+## Phase 1 — dirty-file classification
 
-Run `omc internal models` once and read its `OMC_MODELS` verdict before the
-conformance pass. An `"ok": false` verdict blocks dispatch with its `message`.
-Dispatch a Review worker with `tasks.review.model` and, where supported,
-`tasks.review.effort` to walk the record and branch diff against
-`origin/<base>` together. Supply the worker the record, plan when present, diff
-and base branch. It checks promised behavior, decisions, exclusions and
-observable tests; `/omc:explain` is available when a code path needs locating.
-Dispatch this worker even when the implementation appears clean and no fix
-worker will be needed. Do not perform the conformance judgment inline in the
-main session. For Codex model overrides use a fresh or partial-history fork
-with the needed context. If the harness cannot pin a worker model, use the
-orchestrator model and say so in one line; apply effort only when supported.
-If a worker cannot be dispatched at all, the conformance pass has not run and
-the audit cannot proceed to disposition.
+Before the squash, read `git status --porcelain` and classify every path
+against the implementation and known stage/configuration work. Do not treat
+all dirt as unrelated. If a path is unrelated or undisposed user work,
+preserve its bytes and do not stage, stash, restore, delete, or publish it
+while authorization is unresolved. Stop and ask one batched CRITICAL
+question listing every such path. Phase 2's squash, like `finish`'s, uses
+`git add -A`, so it would publish unrelated work: leaving it unstaged is not
+a way to keep it out of publication. After the answer, re-read
+`git status --porcelain`. Proceed only when no unrelated residue remains or
+the user explicitly authorizes including it in the published change. An
+answer to leave it unchanged, left untouched and outside publication does
+not resolve the conflict while it remains in the worktree: explain that the
+squash would include it and stay paused. Do not promise to continue around
+it.
 
-The Review worker returns findings to the main session. Have it name each
-finding's kind: **code deviates from the record** (a promise is missing, a
-decision was implemented differently, or excluded work was added), or
-**record is stale** (the implementation is right but the record no longer
-describes it). It cites the record section and relevant `file:line`, and
-classifies each finding Important or Minor using the same severity scale as
-`grug`. Minor findings are listed and do not gate publication.
+## Phase 2 — squash and rebase
 
-## Phase 2 — disposition
+Invoke the **`rebase-main`** skill with `--squash` (`omc internal
+rebase-main --squash`): it folds the classified uncommitted changes,
+squashes the branch to one commit over its merge-base with `origin/<base>`,
+and rebases that commit onto `origin/<base>`. Read its outcome by the rules
+finish's Step 2 states for rc 1, rc 2 and rc 3, for the commit count after an
+`"ok": true` verdict carrying `"squashed"`, and for a `note` verdict; audit
+cites those rules and does not restate them. A failed audit leaves the
+branch squashed; the stderr `pre-squash tip … (undo: …)` line restores the
+original commits.
 
-For each Important finding, act in this order:
+## Phase 3 — build → check
 
-1. Fix code to match the record when that is the correct conformance repair.
-   Changes are **conformance only**: do not rewrite a working implementation
-   for taste or a new provider's preferences.
-2. For a **record is stale** finding, amend the record to describe the correct
-   implementation only when the amendment contradicts no row of its
-   `Decisions taken during brainstorm` table. Do not silently replace a
-   brainstorm decision.
-3. If neither disposition is justified, batch every unresolved issue into
-   one numbered list of CRITICAL questions at the end of the pass. Wait for
-   the required answers, then resume this phase. Assigned fix workers inherit
-   the `/omc:audit` authorization.
+Invoke the **`build`** skill, then the **`check`** skill, on the squashed,
+rebased commit: `build` → `check`. Every stage in Phases 3 to 5 runs by
+finish's stage-running rules (finish's Step 3), which say how tool drift is
+restored and how fixes, the files they created included, are amended into
+the squashed commit. Only `"passed": true` passes.
 
-Record a clear disposition for every Important finding. List Minor findings
-without making them a gate.
+Phases 2 to 5 are one conductor run with one fix-cycle budget under the
+behavior layer's **stage-gate rule — bounded fix-forward, then a CRITICAL stop**;
+the rule sets the bound, and a red `post_rebase` in Phase 2 spends that same
+budget. A red build or check falls under its general clause: the fix is
+amended and the sequence restarts at `build`. Do not invoke `finish` while
+any stage is red. The `finish` that Phase 6 invokes is
+a second conductor run with its own budget.
 
-## Phase 2a — post-fix gate
+## Phase 4 — the fixed review
 
-After the disposition pass, always invoke `/omc:check`, whether or not a
-conformance fix changed files. Read its single-line `OMC_STAGE` verdict: only
-`"passed": true` permits progression, including an unconfigured stage with
-`"configured": false`. A missing verdict is a failure.
+Before each review run, note the tree as finish's rule for a review that
+changed the tree says; Phase 5 applies that rule. Invoke the **`review`** skill
+(`/omc:review`): the fixed review, the only unconditional one. It runs
+conformance first against the committed record (its step 2a: the conformance worker, disposition, fix workers, the
+`## Implementation review` trace and its post-fix check), then the project
+stage and omc's grug and human-review lenses. When the stage returns,
+whatever its verdict, its changes (conformance and lens fixes with the
+files they created, record amendments, the trace, waivers) are amended into
+the squashed commit by those rules, once known tool drift is restored. That amend keeps the record committed, so a
+run that stops on a CRITICAL question leaves a clean record for the
+design-record gate when `/omc:audit` is invoked again.
 
-A red check follows the behavior layer's stage-gate rule:
-bounded fix-forward, then a CRITICAL stop. Fold an unresolved gate into the
-existing batched CRITICAL question. Do not invoke `finish` while the check is
-red. A required answer resumes this gate and the remaining phases under the
-same `/omc:audit` authorization.
+On a passing verdict run `omc internal gate record review`. A red review
+(`"passed": false`, or no verdict) falls under the stage-gate rule's
+general clause: fixed, amended, and the sequence restarts at `build`, then
+`check`, then the review again. Its own repair does not draw on the
+budget; a red build or check after it does. The review's batched CRITICAL
+questions pause the flow; their answers resume this phase.
 
-Reuse the `OMC_MODELS` verdict from Phase 1 for audit fix workers.
-The auditor labels each fix worker `Complexity: simple | medium | high` using
-the same coding judgment as the implementation plan (multi-file, tricky or
-ambiguous work is `high`; missing labels use `medium`). Dispatch that worker
-with the corresponding `tasks.simple`, `tasks.medium`, or `tasks.high`
-model and effort. The conformance pass already ran on Review in Phase 1.
-For Codex model overrides use fresh or partial-history forks and supply the
-needed record and finding context. If the harness cannot pin a worker model,
-use the orchestrator model and say so in one line; apply effort only when
-supported. Workers return CRITICAL questions to the main session, which
-batches and asks them before resuming disposition.
+## Phase 5 — the fixed verify
 
-Before invoking `finish`, read `git status --porcelain` and classify every
-remaining path against the implementation, known stage/configuration work, and
-conformance fixes. Do not treat all dirt as unrelated. If a path is unrelated
-or undisposed user work, preserve its bytes and do not stage, stash, restore,
-delete, or publish it while authorization is unresolved. Stop and ask one batched
-CRITICAL question listing every
-such path. `finish`'s squash uses `git add -A`, so leaving it unstaged is not a
-way to keep it out of publication. After the answer, re-read `git status --porcelain`.
-Proceed only when no unrelated residue remains or the user explicitly authorizes
-including it in the published change. An answer to leave it unchanged, left
-untouched and outside publication does not resolve the conflict while it remains
-in the worktree: explain that `finish` would include it and stay paused. Do not
-promise to continue `finish` around it. Relevant dirty work still has to pass
-`finish`'s rebase gate; do not bypass a failing gate.
+First apply finish's rule for a review that changed the tree (finish's
+Step 3): when the review's amend changed the tree Phase 3 built and checked,
+`build` → `check` run again on this run's budget before the verify, and a
+red one there never returns to review.
 
-## Phase 2b — trace and commit
+Say on its own line that the project's `verify` stage is starting: it can
+run for minutes, and a silent minute is a bug. Then invoke the **`verify`**
+skill (`/omc:verify`): the fixed verify, the only unconditional one. A red
+verify is repaired by the stage-gate rule's verify clause on this run's
+budget, and it never returns to review: verify findings and verify fixes
+never trigger a review. On green, restore known tool drift, amend the
+verify fixes into the squashed commit, and run
+`omc internal gate record verify`.
 
-In the design record, insert `## Implementation review` immediately before
-the terminal `## Deliberate complexity` section. Keep that complexity section
-last. Record the active auditor provider and date, followed by each finding's
-severity, kind, record section, `file:line`, and disposition; if there were no
-findings, write `conforms, no findings`. For a re-audit, append a new dated
-entry below the previous review entry rather than replacing its history.
+A `record` (here or in Phase 4) that does not exit 0 has decided nothing:
+nothing is published; report the error and stop.
 
-Commit the trace, record amendments and conformance fixes on this branch
-before publishing. Stage only files belonging to this audit. The committed,
-clean record is required by the design-record gate if `finish` fails at a
-stage and someone later invokes `/omc:audit` again.
-
-## Phase 3 — publish
+## Phase 6 — publish
 
 Invoke `finish` (`/omc:finish`) and follow its full flow: squash, rebase,
-check, build, verify, review, final verify, describe, push, ticket sync and
-follow-ups. Its failing-stage behavior (the stage-gate rule's fix-forward) and
-conflict resolution apply unchanged. Audit's post-fix check and the `finish` it
-invokes are two conductor runs, each with its own two-cycle bound. Do not stop
-at the audit commit; `finish` is the publication route.
+build → check (skipped when the tree is the one Phase 5 recorded), the MR
+gate, describe, push, ticket sync and follow-ups. `finish` repeats the
+squash and rebase audit just did: on a squashed branch that costs one fetch,
+keeps `finish` usable on its own, and picks up a base that moved in the
+meantime for the MR gate. Its failing-stage behavior (the stage-gate rule's
+fix-forward) and conflict resolution apply unchanged. Do not stop at the
+audit's amends; `finish` is the publication route.
 
 ## Completion contract
 

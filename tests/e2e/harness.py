@@ -274,6 +274,31 @@ def make_work_repo(container, path="/work/repo") -> str:
     return path
 
 
+def _write_skill(container, repo, kind, name, description, body):
+    script = (
+        f"mkdir -p {repo}/.omc/{kind}/{name} && "
+        f"cat > {repo}/.omc/{kind}/{name}/SKILL.md << 'SKILLEOF'\n"
+        "---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        "---\n\n"
+        f"{body}\n"
+        "SKILLEOF"
+    )
+    rc, out = run_in(container, ["bash", "-c", script])
+    assert rc == 0, out
+
+
+def add_stage(container, repo, stage, body):
+    """Write the project stage `.omc/skills/<stage>/SKILL.md` (uncommitted)."""
+    _write_skill(container, repo, "skills", stage, f"test project {stage} stage", body)
+
+
+def add_hook(container, repo, name, body):
+    """Write the project hook `.omc/hooks/<name>/SKILL.md` (uncommitted)."""
+    _write_skill(container, repo, "hooks", name, f"test project {name} hook", body)
+
+
 def wire_mcp(container, provider: str, mode: str) -> None:
     """Wire the stub Jira MCP into the harness's config. mode: ok|auth-error|absent."""
     if mode == "absent":

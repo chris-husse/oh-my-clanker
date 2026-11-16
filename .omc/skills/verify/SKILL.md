@@ -49,5 +49,4 @@ variations find no snapshots. A failed Codex-gate piece reruns on its own with
 `just codex-gate tests/e2e/<file>::<test>`.
 
 The old monolithic lifecycle run (`just lifecycle-full`, the `expensive`
-tier) is evidence-only and never a gate. Changes limited to documentation
-do not require repeating successful model calls; cite the last green run.
+tier) is evidence-only and never a gate.

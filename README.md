@@ -32,7 +32,7 @@ Claude Code users can skip step 3: `omc configure`, `omc update`, `omc design`, 
 
 [Superpowers](https://github.com/obra/superpowers) is required for brainstorming. omc installs it for Claude Code (manual equivalent: `/plugin install superpowers@claude-plugins-official`); Codex users install it themselves. The plugin manifest deliberately omits a dependency declaration because of the [cross-marketplace dependency pitfall](docker/PLUGIN-NOTES.md).
 
-Inside your project, run `/omc:integrate` in a session. It walks through check/build/verify/review, explain-context and investigation-context skills using your codebase; rerun it after updates or when the integration feels off.
+Inside your project, run `/omc:integrate` in a session. It walks through check/build/verify/review, explain-context and investigation-context skills and the five optional project hooks using your codebase; rerun it after updates or when the integration feels off.
 
 On macOS with fish and iTerm2, omc pins each tab's title to its branch, and inside herdr it keeps the sidebar's worktree folder and branch current; see [Shell integration](docs/shell-integration.md).
 
@@ -152,9 +152,9 @@ flowchart TD
     WritePlan --> Build
     Record -->|Provider Selection Per Step off| Build
     Build --> Branch["Committed unpublished branch"]
-    Branch --> Audit["/omc:audit or omc review: conformance, fixes, finish"]
+    Branch --> Audit["/omc:audit or omc review: build, check, review, verify, then finish"]
     Branch -->|Provider Selection Per Step off| Audit
-    Audit --> Push["Squashed commit pushed; you open the MR"]
+    Audit --> Push["Squashed commit pushed through the MR gate; you open the MR"]
 ```
 
 ### `omc design`
@@ -171,9 +171,9 @@ After the configure gate, real `--version` probes check git, wt and your provide
 
 The CLI fetches the base and creates or re-enters `{branch_prefix}{slug}` through Worktrunk. It sets the tab's branch title and launches a session seeded with `/omc:start`; context is encoded as JSON data and cannot authorize later phases. Typed cold, `/omc:start` redirects you to the shell command.
 
-The session gathers tracker context, parent/epic and linked docs, reporting anything it cannot fetch, and assigns the ticket to you and moves it to In Progress on a best-effort basis. It checks base freshness and rebases onto a moved base; a dirty tree stops. A conflicted rebase is resolved in the session through `/omc:rebase-main`, which then runs `/omc:check`; it is never handed back to you. The session then builds a primer with `/omc:explain` and prior design records. It waits for your seed and material scope answers before discussing the full design.
+The session gathers tracker context, parent/epic and linked docs, reporting anything it cannot fetch, and assigns the ticket to you and moves it to In Progress on a best-effort basis. It checks base freshness and rebases onto a moved base; a dirty tree stops. A conflicted rebase is resolved in the session through `/omc:rebase-main`, which then runs the project's `post_rebase` hook and `/omc:check`; it is never handed back to you. The session then builds a primer with `/omc:explain` and prior design records. It waits for your seed and material scope answers before discussing the full design.
 
-Type **`/omc:design`** to write, harden and commit the design record. Agreement or `ok` is not this command. With Provider Selection Per Step on, the session stays open after the commit and its closing names three continuations: `/omc:implement` here, the optional `/omc:write-plan` here (plan here, build elsewhere), or `omc implement --claude` or `omc implement --codex` from the worktree. With it off (the default), `/omc:design` continues into `/omc:implement` without a typed command, printing one notice line.
+Type **`/omc:design`** to write, harden and commit the design record. Agreement or `ok` is not this command. After the commit it asks the project's `post_design` hook and, on a no-go, hardens and commits again. With Provider Selection Per Step on, the session stays open after the commit and its closing names three continuations: `/omc:implement` here, the optional `/omc:write-plan` here (plan here, build elsewhere), or `omc implement --claude` or `omc implement --codex` from the worktree. With it off (the default), `/omc:design` continues into `/omc:implement` without a typed command, printing one notice line.
 
 The optional **`/omc:write-plan`** also requires the committed design record. It writes the implementation plan, pressure-tests it with `/omc:explain`, commits only the plan file and stops with the session open when Provider Selection Per Step is on (off, the default, continues into implement); a later `/omc:implement` or `omc implement` builds from that plan.
 
@@ -183,7 +183,7 @@ Type `/omc:implement` in the design session, or run `omc implement --claude` or 
 
 ### `omc review`
 
-Type `/omc:audit` in the implementation session, or run `omc review --claude` or `omc review --codex` from the worktree. The committed-record gate applies here too. Audit checks conformance, fixes drift, amends the record where needed, records an Implementation review trace in it, runs `/omc:check` as its post-fix gate, and publishes through `/omc:finish`; Claude's fresh session is `<slug>-audit`. With Provider Selection Per Step off, implement invokes `/omc:audit` itself.
+Type `/omc:audit` in the implementation session, or run `omc review --claude` or `omc review --codex` from the worktree. The committed-record gate applies here too. Audit squashes and rebases the branch, then runs build → check → the fixed review → the fixed verify, the only unconditional review and verify. The review checks conformance first: it fixes drift, amends the record where needed and records an Implementation review trace in it. Audit then publishes through `/omc:finish`; Claude's fresh session is `<slug>-audit`. With Provider Selection Per Step off, implement invokes `/omc:audit` itself.
 
 | Flag | Applies to / effect |
 |---|---|
@@ -203,7 +203,7 @@ Useful in-session skills:
 | `/omc:explain-dependency [<name>] <question>` | Explain a library/service at a pinned commit (default: its remote HEAD); first ask indexes it without LLM cost. |
 | `/omc:investigate <environment> <prompt>` | Run a read-only, environment-locked investigation with evidence and query workers; requires `.omc/skills/investigation-context`, whose `envs/<env>.md` briefings define the environments, and refuses without it. |
 | `/omc:mr-review <mr-link>` | Review a colleague's GitLab MR or GitHub PR against the intent its author linked, post the comments that survive reconciliation unattended with an automated-review footer, and keep the full review trail on disk. |
-| `/omc:rebase-main` | Rebase the worktree's code onto the latest base, and nothing else; standalone it keeps your commits, while finish runs it with `--squash`. The graph stays primary, where explain queries it. |
+| `/omc:rebase-main` | Rebase the worktree's code onto the latest base, and nothing else; standalone it keeps your commits, while audit and finish run it with `--squash`. When the base moved it runs the project's `post_rebase` hook. The graph stays primary, where explain queries it. |
 | `/omc:check-wt-config` | Review existing worktree config for faithful copies; `omc watch` seeds a starter when absent. |
 | `/omc:finish` | Publish the branch, also available without an audit. |
 | `/omc:integrate` | Set up or revisit the project's omc integration. |
@@ -222,19 +222,42 @@ evidence to the local answer, never the answer itself; each is optional and
 fails on its own, and `/omc:explain` ends with one status line per source
 while still answering from the local graph.
 
-Finish squashes the branch to one commit, folding in uncommitted changes, then rebases that single commit onto the latest base, so a conflict with the base stops the rebase at most once; the session resolves that conflict itself (as `/omc:rebase-main` does) before the stage gates, rather than handing it back. Any feature branch works: in a plain clone's primary checkout it squashes and rebases the same way. It then runs **check → build → verify → review → final verify** before pushing with `--force-with-lease`; the final verify is skipped when the tree is unchanged since verify passed. Tracked files a stage changes are amended into the commit. A red stage is repaired within the stage-gate rule's two-fix bound (a red verify first reruns only its failed pieces, then build and one full verify, when the project's verify skill has a "Running a subset" section; otherwise fix → check → build → one full verify); at the bound, finish asks one CRITICAL question and pushes nothing. Finish is the only place an agent starts verify. The commit message is the MR/PR description generated from the diff, a compare URL is printed, and **you open the MR/PR**. Finish then moves the ticket to In Review on a best-effort basis and offers to close the worktree (the unmerged branch survives), address review comments with amend/re-push, or discuss the change. Stacked branches are refused.
+Audit squashes the branch to one commit, folding in uncommitted changes, and rebases it through `/omc:rebase-main --squash`. It then runs **build → check → review → verify**. The review runs conformance first against the record, then the project stage and both lenses, and is recorded; verify runs after it and is recorded on green. In audit and in the MR gate alike, a tree the review's fixes changed is built and checked again before the verify. Verify findings and verify fixes never trigger another review. Audit then invokes finish.
 
-Project stages live in `.omc/skills/<stage>/SKILL.md`: check is the frequent unit gate, build builds the world without tests, verify is full E2E, run by agents only inside finish (you or the project may run it any time), and review judges the diff. Each can run as `/omc:<stage>`; unconfigured project stages are no-ops. Review always adds omc's grug complexity lens and human-review lens for human MR review rules. Important findings from either need a fix or a waiver in the design record's “Deliberate complexity” section; Minor findings are advisory. An unresolved finding, unavailable lens or failed gate stops publication.
+Finish squashes the branch to one commit, folding in uncommitted changes, then rebases that single commit onto the latest base, so a conflict with the base stops the rebase at most once; the session resolves that conflict itself (as `/omc:rebase-main` does) before the stage gates, rather than handing it back. Any feature branch works: in a plain clone's primary checkout it squashes and rebases the same way. It runs build → check, both skipped when the tree is the one the last green verify saw, then the **MR gate** before pushing with `--force-with-lease`:
+
+1. The review question. Outside audit a review runs only when the tree changed since the last recorded review (or, with none recorded, since the branch's merge-base) and the project's `needs_review` hook asks for one.
+2. The verify question. The verified tree gets no verify; a changed tree runs verify unless the project's `needs_verify` hook says it is not needed.
+3. The describe amend: the commit message becomes the MR/PR description generated from the diff.
+4. The project's `pre_push` hook, which judges the final commit.
+
+Both questions come from `omc internal gate review|verify`, one `OMC_GATE` line each. Every push passes through the gate, review-comment re-pushes included, and a `pre_push` fix resumes at the verify question, never the review question. Tracked files a stage changes are amended into the commit. A red stage, or a red `post_rebase` or `pre_push`, is repaired forward under the stage-gate rule: up to ten fix cycles per conductor run, each bringing progress or a new idea and stated in one line (fix → build → check → rerun; a red verify first reruns only its failed pieces after build and check, then one full verify, when the project's verify skill has a "Running a subset" section; otherwise fix → build → check → one full verify). A cycle that brings neither, or a tenth that ends red, is one CRITICAL question, and nothing is pushed. An agent starts verify only in audit and in the MR gate.
+
+A compare URL is printed, and **you open the MR/PR**. Finish then moves the ticket to In Review on a best-effort basis and offers to close the worktree (the unmerged branch survives), address review comments with amend/re-push, or discuss the change. Finish also works without an audit: a direct finish gets the MR gate and no review unless `needs_review` asks for one. Stacked branches are refused.
+
+Project stages live in `.omc/skills/<stage>/SKILL.md`: check is the frequent unit gate, build builds the world without tests, verify is full E2E, run by agents only in audit and in the MR gate (you or the project may run it any time), and review judges the diff. Build runs before check wherever both run. Each can run as `/omc:<stage>`; unconfigured project stages are no-ops. Review always adds omc's grug complexity lens and human-review lens for human MR review rules. Important findings from either need a fix or a waiver in the design record's “Deliberate complexity” section; Minor findings are advisory. An unresolved finding, unavailable lens or failed gate stops publication.
+
+Project hooks live in `.omc/hooks/<name>/SKILL.md`. omc's internal hook proxy runs each one as a black box and relays its one `OMC_HOOK` line:
+
+| Hook | When it is asked | What it answers |
+|---|---|---|
+| `needs_review` | MR gate, only when the tree changed since the last recorded review (with none recorded, since the merge-base) | Whether a review runs; absent, none runs outside audit. |
+| `needs_verify` | MR gate, only when the tree differs from the last green-verify tree | Whether verify runs; absent, it runs. |
+| `post_design` | After `/omc:design` commits the record | Go, or no-go with a reason to harden again. |
+| `post_rebase` | After a rebase moved the branch onto a new base | Ok or red; `before_implementation` skips the post-conflict check. |
+| `pre_push` | After the describe amend, before the push | Ok or red; nothing is pushed while it is red. |
+
+Absence is the correct default for every hook. A fix repairs the code, never a hook's own file.
 
 ## How omc is put together
 
-The CLI is a uv-installed Python tool. The harness installs skills straight from this repo, while omc installs fenced global behavior guidance; there is no separate skill-sync step. Each project supplies its own stage skills and optional hook under `.omc/`.
+The CLI is a uv-installed Python tool. The harness installs skills straight from this repo, while omc installs fenced global behavior guidance; there is no separate skill-sync step. Each project supplies its own stage skills and optional hooks under `.omc/`.
 
 ```mermaid
 flowchart LR
     Behavior["Global behavior layer"] --> Harness["Claude Code / Codex"]
     Harness --> Skills["omc skills plugin"]
-    Project["Project .omc/ skills and hook"] --> Skills
+    Project["Project .omc/ skills and hooks"] --> Skills
     Skills --> Internal["omc internal"]
     Internal --> CLI["Python CLI / uv tool"]
     CLI --> Tools["ToolContext"]
@@ -263,7 +286,7 @@ flowchart LR
 
 When `gitnexus.embeddings` is on, the embedding runtime and model cache live beside the clone under `~/.omc/dependencies/gitnexus-embeddings/{runtime,hf}` (`GITNEXUS_EMBEDDING_RUNTIME_DIR` and `HF_HOME`, set by `gitnexus_env` for every omc child alongside `GITNEXUS_SHARED_STORE=off`), so an update of the clone never touches them. `/omc:explain` queries then become semantic and the keyword-only warning disappears.
 
-Internal commands expose deterministic operations to skills: `rebase-main`, `wt-template`, `design-record`, `models`, `global-instructions`, `gitnexus` (ensure/status/refresh and the query verbs), `dependency`, `skills list` and `build-progress`. For example, the record gate returns a single prefixed JSON line, and the skill uses it to continue or refuse:
+Internal commands expose deterministic operations to skills: `rebase-main`, `wt-template`, `design-record`, `gate`, `models`, `global-instructions`, `gitnexus` (ensure/status/refresh and the query verbs), `dependency`, `skills list` and `build-progress`. For example, the record gate returns a single prefixed JSON line, and the skill uses it to continue or refuse:
 
 ```mermaid
 sequenceDiagram
@@ -274,7 +297,7 @@ sequenceDiagram
     Note over Skill: Continue on success or surface refusal
 ```
 
-The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_REBASE_MAIN`, `OMC_SLUG`, `OMC_MODELS` and `OMC_TICKET`. The CLI emits knowledge, design-record, rebase-main and models verdicts (`omc internal models` resolves every task's model and effort and carries the provider-selection-per-step flag); stage, slug and ticket-sync verdicts come from skills, and the behavior layer names all seven as sacred. Finish's squash count travels in the CLI's rebase-main verdict as `squashed`; no skill emits a squash verdict. A stage verdict reads `OMC_STAGE {"stage", "configured", "passed", "summary"}`. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
+The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_REBASE_MAIN`, `OMC_SLUG`, `OMC_MODELS`, `OMC_GATE`, `OMC_HOOK` and `OMC_TICKET`. The CLI emits knowledge, design-record, rebase-main, models and gate verdicts (`omc internal models` resolves every task's model and effort and carries the provider-selection-per-step flag; `omc internal gate review|verify` answers the MR gate's two questions); stage, slug, hook and ticket-sync verdicts come from skills (`OMC_HOOK` is the hook proxy's), and the behavior layer names all nine as sacred. Finish's squash count travels in the CLI's rebase-main verdict as `squashed`; no skill emits a squash verdict. A stage verdict reads `OMC_STAGE {"stage", "configured", "passed", "summary"}`. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
 
 The CLI handles mechanics and launches model work for slugging, auto-build and sessions. Skills supply judgment and may run git or project commands directly. `ToolContext` centralizes the Python CLI's subprocess and network calls; provider adapters supply each harness's argv and settings. See [Development](#development) for this repo's project integration.
 
@@ -327,10 +350,11 @@ omc is developed with omc: keep watch running in the primary checkout and start 
 | `.config/wt.toml` | Copies ignored files such as `.env`, `.venv` and local caches into worktrees, excluding `.gitnexus/` and `target/`; sets up submodules and direnv before landing. |
 | `.omc/config/AGENTS.md` | Red → green on every change, tests run or fail and never skip, ToolContext process boundary, no unasked installs, generated README. |
 | `.omc/skills/check` | Frequent quick gate: the unit suite. |
-| `.omc/skills/build` | World build during finish: format check, lint and package build, without tests. |
+| `.omc/skills/build` | World build in audit and finish, before check: format check, lint and package build, without tests. |
 | `.omc/skills/verify` | Docker golden lifecycle, then variations and smoke in parallel; 300 s per test. Codex gate when Codex code changed; tokens from gitignored `.env`, never public runners. Docker is required. Its "Running a subset" section reruns failed pieces by pytest node id (never `-k`), after the golden path reruns in full. |
 | `.omc/skills/review` | Branch diff checked against this repo's rules, plus omc's grug and human-review lenses. |
 | `.omc/skills/explain-context` | Where truth lives and the order sources take precedence. |
+| `.omc/hooks/needs_verify` | Docs-only changes need no verify: it answers no exactly when every changed path is under `docs/` or is `README.md` (`skills/` is product). |
 | `.gitignore` | The primary `.gitnexus/` graph stays uncommitted; a leftover `.omc/docs/` from the removed documentation generation stays ignored. |
 | `docs/superpowers/specs/`, `docs/superpowers/plans/` | Dated design records and implementation plans. |
 

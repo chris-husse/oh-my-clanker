@@ -1,4 +1,4 @@
-"""Run the lifecycle fixture's generated verify script without a model actor."""
+"""Run the lifecycle fixture's generated files without a model actor."""
 
 import os
 import subprocess
@@ -6,8 +6,11 @@ from pathlib import Path
 
 from tests.e2e import lifecycle_helpers
 
+ROOT = Path(__file__).resolve().parents[2]
 
-def test_verify_stage_sentinel_reports_unavailable_environment(tmp_path, monkeypatch):
+
+def _local_transport(monkeypatch):
+    """Run the fixture's python payload on the host; every other step is a no-op."""
     monkeypatch.setattr(lifecycle_helpers, "make_work_repo", lambda _container, path: path)
 
     def local_transport(_container, argv, **_kwargs):
@@ -17,6 +20,18 @@ def test_verify_stage_sentinel_reports_unavailable_environment(tmp_path, monkeyp
         return 0, ""
 
     monkeypatch.setattr(lifecycle_helpers, "run_in", local_transport)
+
+
+def test_fixture_ships_this_repos_needs_verify_hook(tmp_path, monkeypatch):
+    _local_transport(monkeypatch)
+    repo = Path(lifecycle_helpers._fixture(None, path=str(tmp_path)))
+    shipped = repo / ".omc/hooks/needs_verify/SKILL.md"
+    assert shipped.is_file(), "the lifecycle fixture ships no needs_verify hook"
+    assert shipped.read_bytes() == (ROOT / ".omc/hooks/needs_verify/SKILL.md").read_bytes()
+
+
+def test_verify_stage_sentinel_reports_unavailable_environment(tmp_path, monkeypatch):
+    _local_transport(monkeypatch)
     repo = Path(lifecycle_helpers._fixture(None, failing_stage="verify", path=str(tmp_path)))
     script = repo / ".omc/stage-scripts/verify.sh"
     sentinel = tmp_path / "verify-unavailable"

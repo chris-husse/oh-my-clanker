@@ -181,6 +181,7 @@ INTERNAL_SKILLS = (
     "ticket-sync",
     "grug",
     "human-review",
+    "hook",
 )
 
 
@@ -263,17 +264,13 @@ def test_finish_skill_contract():
     ):
         assert needle in text, f"finish skill missing {needle!r}"
     assert "gh pr create" not in text  # never creates the MR/PR
-    # rebase-main squashes and rebases, then Step 3 runs check -> build -> verify ->
-    # review -> final verify, then create-mr pushes
+    # rebase-main squashes and rebases, then Step 3 runs build -> check (D2), then
+    # create-mr runs the MR gate and pushes; review and verify left finish (D1)
     stage = text.split("## Step 3", 1)[1].split("## Step 4", 1)[0]
     body = stage.split("\n", 1)[1]  # skip the heading line
     assert text.index("`rebase-main`") < text.index("## Step 3")
-    review_at = body.index("`review`")
-    order = [body.index("`check`"), body.index("`build`"), body.index("`verify`")]
-    order += [review_at, body.index("final `verify`", review_at)]
-    assert order == sorted(order), (
-        "finish Step 3 must order check -> build -> verify -> review -> final verify"
-    )
+    assert body.index("`build`") < body.index("`check`"), "finish Step 3 must order build -> check"
+    assert "`review`" not in body, "finish Step 3 runs no review stage"
     assert text.index("`create-mr`") > text.index("## Step 3")
     tracked_changes = stage.split("- A stage that changed TRACKED files", 1)[1].split(
         "- Unconfigured", 1
@@ -293,21 +290,67 @@ def test_stage_proxy_contract():
         assert "nothing to do" in text
 
 
-def test_verify_proxy_runs_only_in_finish_and_reruns_subsets():
+def test_hook_proxy_contract():
+    text = (ROOT / "skills" / "hook" / "SKILL.md").read_text()
+    body = re.sub(r"\A---\n.*?\n---\n", "", text, count=1, flags=re.DOTALL)
+    assert body.index("## User Input") < body.index("## Steps")
+    flat = " ".join(body.split())
+    for needle in (
+        "$ARGUMENTS",
+        "git rev-parse --show-toplevel",
+        ".omc/hooks/<name>/SKILL.md",
+        'OMC_HOOK {"hook": "<name>", "configured": false}',
+        '"configured": true, "error": "<why>"',
+        "last `OMC_HOOK` line",
+        "JSON boolean",
+        "a `hook` field that is not `<name>`",
+        "the caller's rule",
+        "never edits",
+        "stripped of any markdown wrapping",
+    ):
+        assert needle in flat, f"hook proxy missing {needle!r}"
+    # the proxy validates the hook's line before relaying it; a failed one is never relayed
+    assert flat.index("The hook failed when") < flat.index("Relay only a valid line")
+    assert "Relay the hook's last `OMC_HOOK` line unchanged" not in flat
+    # one table: each hook name in a row beside its answer field
+    rows = [line for line in body.splitlines() if line.startswith("|")]
+    answers = {
+        "needs_review": "`run`",
+        "needs_verify": "`run`",
+        "post_design": "`go`",
+        "post_rebase": "`ok`",
+        "pre_push": "`ok`",
+    }
+    for name, field in answers.items():
+        row = [r for r in rows if f"`{name}`" in r]
+        assert len(row) == 1, f"hook proxy table needs one row for {name}"
+        assert field in row[0], f"hook proxy table: {name} answers {field}"
+    assert "before_implementation" in [r for r in rows if "`post_rebase`" in r][0]
+
+
+def test_verify_proxy_runs_after_audit_review_and_in_the_mr_gate():
     verify = (ROOT / "skills" / "verify" / "SKILL.md").read_text()
     check = (ROOT / "skills" / "check" / "SKILL.md").read_text()
     m = re.match(r"\A---\n(.*?)\n---\n", verify, re.DOTALL)
     assert m, "verify: missing frontmatter"
     description = m.group(1)
     body = " ".join(verify[m.end() :].split())
-    # an agent starts verify only within finish; the user or the project any time
-    assert "only within finish" in description
+    # an agent starts verify in two places: audit's fixed verify after its review,
+    # and the MR gate when it says run; the user or the project any time
+    assert "after `/omc:audit`'s review and in the MR gate" in description
     assert "the user or the project may run it at any time" in description
-    assert "only within `finish`" in body
-    assert "the user or the project may run it at any time" in body
+    for needle in (
+        "two places only",
+        "`/omc:audit`'s fixed verify after its review",
+        "the MR gate in `create-mr`",
+        "the user or the project may run it at any time",
+    ):
+        assert needle in body, f"verify proxy missing {needle!r}"
+    assert "only within" not in description
+    assert "only within" not in body
     assert "major milestones" not in verify
     assert "major milestones" not in check
-    assert "`verify` (finish only)" in " ".join(check.split())
+    assert "`verify` (audit and the MR gate only)" in " ".join(check.split())
     # the optional "rerun only: <pieces>" input, read like write-plan's
     assert "## User Input" in verify and "$ARGUMENTS" in verify
     assert verify.index("## User Input") < verify.index("## Steps")
@@ -1148,12 +1191,107 @@ def test_dogfood_verify_stage_gates_on_parallel_e2e_only():
     assert "node id" in text
     assert "never `-k`" in text  # it deselects the golden stages
     assert "just codex-gate tests/e2e/" in text
+    # the docs-only judgment moved to .omc/hooks/needs_verify (D11)
+    assert "Changes limited to documentation" not in text
+
+
+def test_dogfood_needs_verify_hook():
+    text = (ROOT / ".omc" / "hooks" / "needs_verify" / "SKILL.md").read_text()
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert m, "needs_verify hook: missing frontmatter"
+    assert "name: needs_verify" in m.group(1).splitlines()
+    flat = " ".join(text[m.end() :].split())
+    for needle in (
+        "previous=<sha> tree=<sha>",
+        "git diff --name-only <previous> <tree>",
+        "`docs/`",
+        "`README.md`",
+        'OMC_HOOK {"hook": "needs_verify", "run": false',
+        '"run": true',
+        "exactly one",
+    ):
+        assert needle in flat, f"needs_verify hook missing {needle!r}"
+    # skills/*.md is product in this repo, never documentation
+    assert "Everything else is product, `skills/` included" in flat
+    # a failing diff decides nothing: verify runs, the error is the reason
+    failing = next(s for s in flat.split(". ") if "fails" in s)
+    assert "error" in failing and '"run": true' in failing, failing
 
 
 def test_create_mr_skill_contract():
     text = (ROOT / "skills" / "create-mr" / "SKILL.md").read_text()
     for needle in ("get-mr-description", "--force-with-lease", "--amend"):
         assert needle in text, f"create-mr skill missing {needle!r}"
+    assert "Do not create the MR/PR" in text
+
+
+def _assert_mr_gate_description(description: str) -> None:
+    # D6/D7: the hooks ask on a changed tree; verify needs no hook to run, and runs
+    # without asking when no green verify is recorded
+    assert "review and verify only when the tree changed" not in description
+    assert "a review only when the tree changed and `needs_review` asks" in description
+    assert (
+        "a verify whenever the tree changed since the last green verify, unless "
+        "`needs_verify` says no"
+    ) in description
+
+
+def test_create_mr_runs_the_mr_gate():
+    # D5: the MR gate guards every push, finish's Step 5 re-push included. One pass:
+    # review question -> verify question -> describe (amend) -> pre_push -> push.
+    text = (ROOT / "skills" / "create-mr" / "SKILL.md").read_text()
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert m is not None
+    assert "not meant for direct invocation" in m.group(1)
+    _assert_mr_gate_description(m.group(1))
+    body = text[m.end() :]
+    assert body.index("## Step 0 — the MR gate") < body.index("## Step 1")
+    order = [
+        body.index(needle)
+        for needle in (
+            "omc internal gate review",
+            "needs_review",
+            # a review whose amend changed the tree: build -> check before verify (D2)
+            "finish's rule for a review that changed the tree",
+            "`/omc:build` → `/omc:check`",
+            "omc internal gate verify",
+            "needs_verify",
+            "get-mr-description",
+            "pre_push",  # D14: after the describe amend, before the push
+            "git push --force-with-lease",
+        )
+    ]
+    assert order == sorted(order), (
+        "create-mr must order review question -> verify question -> describe -> pre_push -> push"
+    )
+    flat = _flat(body)
+    for needle in (
+        "omc internal gate record review",
+        "omc internal gate record verify",
+        "OMC_GATE",
+        "the `hook` skill",
+        "an `error` verdict leaves `run` true",
+        # the one way back: a pre_push fix resumes at the verify question
+        "resumes at the verify question",
+        "never the review question",
+        "after the describe amend",
+        "finish's stage-running rules",
+        "staged by path",  # cited from finish: fix-created files reach the push
+        "Nothing is pushed while",
+        # a question or record that decided nothing pushes nothing
+        "no `OMC_GATE` line",
+        "does not exit 0",
+        "its own conductor run",  # the Step 5 re-push
+        "relay the gate's `message`",
+        "stage-gate rule",
+        # a review that changed the tree: stated once in finish, cited here (grug:locality)
+        "finish's rule for a review that changed the tree",
+    ):
+        assert needle in flat, f"create-mr MR gate missing {needle!r}"
+    assert "differs from the one noted before" not in flat
+    # the staging rule is stated once, in finish; create-mr cites it
+    assert "leave untracked artifacts alone" not in flat
+    assert "git add -u" not in flat
     assert "Do not create the MR/PR" in text
 
 
@@ -1172,6 +1310,17 @@ def test_start_skill_contract():
         assert needle in text, f"start skill missing {needle!r}"
     # start hands off to plan; plan owns the brainstorming handoff now
     assert "Invoke `superpowers:brainstorming`" not in text
+    # D13 (spec 2026-11-16 §5.8): one path rebases, so one place calls post_rebase.
+    # The not-an-ancestor branch goes through rebase-main from the outset, not on a
+    # conflict only; a dirty tree still stops start (rebase-main's rc 1).
+    step3 = _flat(text.split("## Step 3", 1)[1].split("## Step 4", 1)[0])
+    assert "not an ancestor → invoke the `rebase-main` skill with `--base <base>`" in step3
+    assert "git rebase origin/<base>" not in step3
+    assert "dirty tree → stop" in step3.lower()
+    assert "rc 1" in step3 and "`post_rebase`" in step3
+    step05 = _flat(text.split("## Step 0.5", 1)[1].split("## Step 1", 1)[0])
+    assert "through the `rebase-main` skill" in step05
+    assert "a conflict goes through the `rebase-main` skill" not in step05
 
 
 def test_gitnexus_ensure_contract():
@@ -1277,6 +1426,8 @@ def test_machine_contract_listings_include_knowledge_and_models():
         assert "OMC_KNOWLEDGE" in (ROOT / rel).read_text(), rel
         assert "OMC_DESIGN_RECORD" in (ROOT / rel).read_text(), rel
         assert "OMC_MODELS" in (ROOT / rel).read_text(), rel
+        assert "OMC_GATE" in (ROOT / rel).read_text(), rel
+        assert "OMC_HOOK" in (ROOT / rel).read_text(), rel
         assert "OMC_SQUASH" not in (ROOT / rel).read_text(), rel
 
 
@@ -1386,10 +1537,29 @@ def test_implement_skill_contract():
         assert needle not in text, f"implement skill must not mention {needle!r}"
     for needle in (
         "Full E2E never runs in implement",
-        "`finish` runs `verify`",
+        "`/omc:audit` runs the fixed `verify` after its review",
         "Three phases, strictly in order",
     ):
         assert needle in flat, f"implement skill missing {needle!r}"
+    assert "`finish` runs `verify`" not in flat  # verify moved into audit (D1)
+    # D18 (spec 2026-11-16 §5.11): the per-task fan-out, then one build-and-fix pass
+    phase2 = _flat(text.split("## Phase 2 — build", 1)[1].split("## Phase 3 — hand off", 1)[0])
+    for needle in (
+        "edit-only agents",
+        "in parallel at the task's Complexity tier",
+        "one build-and-fix pass",
+        "the main session runs the fan-out",
+    ):
+        assert needle in phase2, f"implement Phase 2 missing {needle!r}"
+    # the quoted continuation statement, its "> " prefixes dropped
+    handoff_text = text.split("## Phase 3 — hand off", 1)[1].split("## Completion contract", 1)[0]
+    quoted = [line[2:] for line in handoff_text.splitlines() if line.startswith("> ")]
+    statement = _flat(" ".join(quoted).split("not yet published.", 1)[1])
+    for needle in (
+        "To publish without an audit, type `/omc:finish`",
+        "no review unless the project's `needs_review` hook asks for one",
+    ):
+        assert needle in statement, f"implement continuation missing {needle!r}"
     phase_minus_1 = text.split("## Phase -1", 1)[1].split("## Phase 0", 1)[0]
     assert "plan → subagent build → handoff" in " ".join(phase_minus_1.split())
     # provider selection per step (spec 2026-11-12 §4.4, D9)
@@ -1474,6 +1644,16 @@ def test_write_plan_skill_contract():
         assert needle in text, f"write-plan skill missing {needle!r}"
     assert "subagent-driven-development" not in text  # it never builds
     assert "missing `Complexity:`" not in text  # the default belongs to the build
+    # D18 (spec 2026-11-16 §5.11): the directive also shapes the plan, verbatim, inside
+    # the one quoted directive right after its Complexity sentences.
+    assert (
+        "The plan stores complexity, never model ids. Write about five to seven tasks, each "
+        "a coherent chunk of the work; a small change may need fewer, and a plan is never "
+        "padded to reach five. Inside a task, independent edits (different files) fan out "
+        "to parallel edit-only agents that run no build and no test, followed by one "
+        "build-and-fix pass; never one task per file or per page. The project's testing "
+        'policy still governs the order inside a task." ' in _flat(text)
+    ), "write-plan directive missing the plan-shape sentences"
     assert (
         "> The plan is committed. To build on this provider, type `/omc:implement`\n"
         "> here (`$omc:implement` on Codex). To build on another provider, exit this\n"
@@ -1575,7 +1755,7 @@ def test_task_model_skill_routing_contract():
     assert "omc internal models" in implement
     assert "missing `Complexity:`" in implement and "medium" in implement
     assert "Review" in implement and "reasoning_effort" in implement
-    assert "Complexity:" in audit and "Review" in audit
+    assert "Complexity:" in review and "Review" in review  # audit's tiers moved (D4)
     assert "omc internal models" in review and "Review" in review
     assert "`Complexity:`" in plan and "model-tier" not in plan
     assert "Orchestrator" in behavior and "omc internal models" in behavior
@@ -1586,6 +1766,8 @@ def test_task_model_skill_routing_contract():
 
 
 def test_audit_skill_contract():
+    # D1: audit conducts the fixed sequence after its own squash and rebase:
+    # build -> check -> review (conformance first) -> verify -> finish.
     text = (ROOT / "skills" / "audit" / "SKILL.md").read_text()
     for needle in (
         "omc internal design-record",
@@ -1595,55 +1777,108 @@ def test_audit_skill_contract():
         "origin/<base>...HEAD",
         "docs/superpowers/",
         '"nothing to audit — run `/omc:implement` first"',
-        "Decisions taken during brainstorm",
-        "file:line",
-        "Important",
-        "Minor",
-        "code deviates from the record",
-        "record is stale",
         "CRITICAL",
-        "/omc:check",
         "stage-gate rule",
         "bounded fix-forward, then a CRITICAL stop",
-        "Implementation review",
-        "## Deliberate complexity",
-        "provider",
-        "date",
-        "re-audit",
-        "commit",
         "`finish`",
     ):
         assert needle in text, f"audit skill missing {needle!r}"
-    assert text.index("## Phase 0") < text.index("## Phase 1") < text.index("## Phase 3")
-    assert text.index("## Phase 2b") < text.index("## Phase 3")
-    gate = text[
-        text.index("## Phase 2 — disposition") : text.index("## Phase 2b — trace and commit")
+    headings = [
+        "## Phase 0 — gates and sources",
+        "## Phase 1 — dirty-file classification",
+        "## Phase 2 — squash and rebase",
+        "## Phase 3 — build → check",
+        "## Phase 4 — the fixed review",
+        "## Phase 5 — the fixed verify",
+        "## Phase 6 — publish",
     ]
-    assert "/omc:check" in gate
-    assert "/omc:build" not in gate
-    assert "/omc:verify" not in gate
-    assert "stage is starting" not in text
-    assert "run verify too" not in text
-    phase3 = text.split("## Phase 3 — publish", 1)[1].split("## Completion contract", 1)[0]
-    assert "check, build, verify, review, final verify, describe, push" in " ".join(phase3.split())
-    assert "fix-forward" in phase3
-    assert text.index("commit", text.index("## Phase 2b")) < text.index("Invoke `finish`")
-    prose = " ".join(text.split())
-    assert "immediately before the terminal `## Deliberate complexity`" in prose
-    assert "append a new dated entry below the previous review entry" in prose
+    at = [text.index(h) for h in headings]
+    assert at == sorted(at), "audit phases out of order"
+
+    def phase(i: int) -> str:
+        end = text.index("\n## ", at[i] + 1)
+        return text[at[i] : end].split("\n", 1)[1]  # body, heading skipped
+
+    prose = _flat(text)
+    flow = _flat(text.split("## Phase -1", 1)[1].split("## Phase 0", 1)[0])
+    assert (
+        "gates → dirty-file classification → rebase-main --squash → build → check → "
+        "review (conformance first) → record review → build → check (when the review "
+        "changed the tree) → verify → record verify → finish"
+    ) in flow
+    # Phase 1: the dirty-file rule, moved before the squash (its git add -A)
+    phase1 = _flat(phase(1))
+    assert "Before the squash" in phase1
+    assert "`git add -A`" in phase1
+    assert "Before invoking `finish`" not in text
+    assert "unrelated or undisposed" in phase1
+    assert "preserve" in phase1
+    assert "explicitly authorizes including" in phase1
+    assert "left untouched and outside publication" in phase1
+    assert "re-read `git status --porcelain`" in phase1
+    # Phase 2: rebase-main --squash, read by finish's Step 2 rules
+    phase2 = _flat(phase(2))
+    for needle in ("`rebase-main`", "--squash", "by the rules finish's Step 2 states"):
+        assert needle in phase2, f"audit Phase 2 missing {needle!r}"
+    assert "conflict resolution apply unchanged" in prose
+    # Phase 3: build before check (D2)
+    phase3 = phase(3)
+    assert phase3.index("`build`") < phase3.index("`check`")
+    # Phase 4: the fixed review; its changes amended whatever its verdict
+    phase4 = _flat(phase(4))
+    for needle in (
+        "`review`",
+        "whatever its verdict",
+        "amended into the squashed commit",
+        "omc internal gate record review",
+        # the tree before each review run, compared after its amend (D2, D10): finish's rule
+        "finish's rule for a review that changed the tree",
+    ):
+        assert needle in phase4, f"audit Phase 4 missing {needle!r}"
+    # Phase 5: the fixed verify, announced; never back to review (D3)
+    phase5 = _flat(phase(5))
+    for needle in (
+        "that the project's `verify` stage is starting",
+        "never returns to review",
+        "known tool drift",
+        "omc internal gate record verify",
+        # a tree the review's amend changed is built and checked before verify, so the
+        # tree verify records (and finish's D10 skip trusts) was built and checked
+        "finish's rule for a review that changed the tree",
+    ):
+        assert needle in phase5, f"audit Phase 5 missing {needle!r}"
+    assert phase5.index("known tool drift") < phase5.index("omc internal gate record verify")
+    assert phase5.index("finish's rule for a review that changed the tree") < phase5.index(
+        "that the project's `verify` stage is starting"
+    ), "audit Phase 5: the changed-tree rebuild runs before verify"
+    assert "differs from the one noted before" not in phase5
+    assert "finish's stage-running rules" in prose
+    # the staging rule is stated once, in finish; audit cites it
+    assert "leave untracked artifacts alone" not in prose
+    assert "git add -u" not in prose
+    assert "one fix-cycle budget" in prose
+    # a red post_rebase in Phase 2 spends the same budget as the stages after it
+    assert "Phases 2 to 5 are one conductor run" in prose
+    assert "Phases 3 to 5 are one conductor run" not in prose
+    for gone in (
+        "## Phase 1 — conformance",
+        "Phase 2a",
+        "Phase 2b",
+        "two-cycle",
+        "final verify",
+        "Dispatch a Review worker",  # conformance moved into the review stage (D4)
+        "run verify too",
+    ):
+        assert gone not in prose, f"audit still says {gone!r}"
     assert "plan" in text and "context" in text and "absence" in text
-    assert "conformance only" in text
-    assert "unrelated or undisposed" in prose
-    assert "Before invoking `finish`" in text
-    assert "preserve" in text and "CRITICAL" in text
-    assert "explicitly authorizes including" in prose
-    assert "left untouched and outside publication" in prose
-    assert "re-read `git status --porcelain`" in text
-    intro = " ".join(text.split("## Phase -1", 1)[0].split())
+    intro = _flat(text.split("## Phase -1", 1)[0])
     assert (
         "or by `/omc:implement` continuing in the same turn with provider selection per step off"
         in intro
     )
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert m is not None
+    assert "fixed review" in m.group(1)
 
 
 def test_index_delegates_to_gitnexus_index():
@@ -1726,6 +1961,60 @@ def test_rebase_main_skill_contract():
     assert '"synced"' not in text and '"shared"' not in text
 
 
+def test_rebase_main_runs_post_rebase_when_the_base_moved():
+    # D13 (spec 2026-11-16 §5.8): the project's post_rebase hook runs whenever the
+    # rebase moved the branch onto a different base commit, in every caller.
+    text = (ROOT / "skills" / "rebase-main" / "SKILL.md").read_text()
+    flat = _flat(text)
+    for needle in (
+        # moved-HEAD detection: the re-run after a conflict reports <tip>..<tip>,
+        # so the verdict's `rebased` field alone cannot tell
+        "before the first `omc internal rebase-main` run",
+        "git rev-parse HEAD",
+        "git merge-base <pre-run HEAD> origin/<base>",
+        "git rev-parse origin/<base>",
+        # a first run that returns rc 2 on a paused rebase (an interrupted finish or
+        # audit resuming) would note the mid-rebase HEAD, already on origin/<base>:
+        # the pre-run HEAD is then the paused rebase's original tip
+        "When the first run returns rc 2 with a rebase in progress",
+        'cat "$(git rev-parse --git-path rebase-merge/orig-head)"',
+        "rebase-apply/orig-head",
+        "a squash alone",  # rewrites the commit but moves nothing: no hook
+        "`post_rebase`",
+        "squash=true|false",
+        "amended into the squashed commit",
+        # tracked edits a post_rebase hook left uncommitted are folded too, and the
+        # amend runs only when there is something to fold
+        "stage the tracked edits it left (`git add -u`)",
+        "`git diff --cached --quiet <squashed commit>`",
+        "only when HEAD moved past the squashed commit or the index differs from it",
+        '"before_implementation": true',
+        "the check is skipped",
+        # D15: a red hook is fixed forward; before implementation, without build or check
+        "stage-gate rule",
+        "runs no build and no check either",
+        # the four callers
+        "standalone `/omc:rebase-main`",
+        "`/omc:start`'s freshness gate",
+        "`/omc:audit`'s squash",
+        "`/omc:finish`'s `--squash`",
+        "`--squash` is `/omc:audit`'s and `/omc:finish`'s flag",
+        "starts no review or verify",  # the MR gate catches up
+    ):
+        assert needle in flat, f"rebase-main skill missing {needle!r}"
+    assert "`--squash` is `/omc:finish`'s flag" not in flat
+    post_conflict = flat.split("When you resolved something", 1)[1].split("**rc 2**", 1)[0]
+    order = [
+        post_conflict.index("resolve"),
+        post_conflict.index("re-run"),
+        post_conflict.index("`post_rebase`"),
+        post_conflict.index("/omc:check"),
+    ]
+    assert order == sorted(order), "after a conflict: resolve -> re-run -> post_rebase -> check"
+    m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert m is not None and "/omc:audit" in m.group(1)
+
+
 def test_check_wt_config_skill_contract():
     text = (ROOT / "skills" / "check-wt-config" / "SKILL.md").read_text()
     for needle in ("omc internal wt-template", ".config/wt.toml", "never edit"):
@@ -1777,54 +2066,84 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-def test_finish_runs_verify_before_review_and_last():
-    # Finish is the only place an agent starts verify: once before review, and once
-    # last before the push unless the tree is byte-identical to the one verify passed.
+def test_finish_publishes_and_skips_a_verified_tree():
+    # finish keeps publication: build -> check, skipped on the tree the last green
+    # verify recorded (D10), then create-mr's MR gate decides review and verify (D5).
     # Every red stage follows the layer's stage-gate rule instead of stopping at once.
     text = (ROOT / "skills" / "finish" / "SKILL.md").read_text()
-    assert "## Step 3 — project stages: check → build → verify → review → final verify" in text
+    assert "## Step 3 — build → check (skipped on a verified tree)" in text
     flat = _flat(text)
     step0 = text.split("## Step 0 ", 1)[1].split("## Step 0.1", 1)[0]
     step3 = text.split("## Step 3", 1)[1].split("## Step 4", 1)[0]
     step5 = text.split("## Step 5", 1)[1].split("## Completion", 1)[0]
     flat3 = _flat(step3)
     for needle in (
-        "pre-review verify",
-        "final verify",
-        "git rev-parse HEAD^{tree}",
-        "task list",
-        "final verify skipped — tree unchanged since verify passed",
-        "that the project's `verify` stage is starting",
+        "omc internal gate verify",
+        '"reason": "unchanged"',
+        "build and check skipped — tree unchanged since the last green verify",
+        "stage-running rules",
+        "after each stage run",  # check and build run `uv run` / `uv build` too
         "known tool drift",
         "never discard unknown work",
+        "before its reruns",  # the recorded tree is the one verify actually tested
         "stage-gate rule",
         "bounded fix-forward, then a CRITICAL stop",
-        "without another `review`",
         "restarts from `build`",
         "nothing is pushed",
-        "after each stage run",  # check and build run `uv run` / `uv build` too
-        "before its reruns",  # the recorded tree is the one verify actually tested
+        # D5: a file a fix created is staged by path, or the pushed tree lacks it
+        "files a fix created are staged by path (`git add <new paths>`)",
+        "untracked artifacts a stage itself leaves behind",
     ):
         assert needle in flat3, f"finish Step 3 missing {needle!r}"
+    # the one statement of the changed-tree rebuild that audit and create-mr cite
+    rule = _flat(step3.split("**A review that changed the tree.**", 1)[1].split("\n- ", 1)[0])
+    order = [
+        rule.index(n)
+        for n in (
+            "note `git rev-parse HEAD^{tree}` before each review run",
+            "differs from the one noted before that review",
+            "invoke the **`build`** skill, then the **`check`** skill",
+            "before the verify",
+            "stage-gate rule's general clause",
+        )
+    ]
+    assert order == sorted(order), "finish: changed tree -> build -> check -> verify"
+    assert "never returns to review" in rule
+    assert "An unchanged tree goes straight to the verify" in rule
     # The CRITICAL stop at the bound waits for the user; it is not a failed run.
     contract = _flat(text.split("## Completion contract", 1)[1])
     assert "is a valid stop" in contract
     for gone in (
+        "pre-review verify",
+        "final verify",
+        "Record the verified tree",  # the verified tree lives in omc internal gate
         "stop at that stage",
         "so the user can fix and re-run",
         "the four project stages",
         "at most two",  # the bound lives in the behavior layer only
     ):
         assert gone not in flat, f"finish still says {gone!r}"
-    assert "final verify" in _flat(step0)
-    assert "skipped" in step5
+    flat0 = _flat(step0)
+    assert "rebase-main --squash → build → check" in flat0
+    assert "create-mr (MR gate, describe, push)" in flat0
+    flat5 = _flat(step5)
+    for needle in (
+        "whether a review ran and why",
+        "suppressed by `needs_verify`",
+        "skipped as unchanged",
+        "`pre_push`",
+    ):
+        assert needle in flat5, f"finish Step 5 report missing {needle!r}"
+    # Step 5's review-comments loop: the comments are work (cadence check), then
+    # the amend and create-mr, whose MR gate decides review and verify for the re-push.
+    address = _flat(step5.split("**Address review comments**", 1)[1].split("3. **", 1)[0])
+    for needle in ("/omc:check", "re-run `create-mr`", "the MR gate inside `create-mr`"):
+        assert needle in address, f"finish address-review-comments missing {needle!r}"
     m = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
     assert m is not None
-    assert "final verify" in m.group(1)
-    # Step 5's review-comments loop amends and re-runs create-mr; it starts no stage.
-    assert "re-run `create-mr`" in _flat(step5)
-    address = step5.split("**Address review comments**", 1)[1].split("3. **", 1)[0]
-    assert "verify" not in address
+    assert "MR gate" in m.group(1)
+    _assert_mr_gate_description(m.group(1))
+    assert "final verify" not in m.group(1)
 
 
 def test_rebase_conflicts_are_resolved_not_handed_back():
@@ -1908,7 +2227,66 @@ def test_integrate_skill_contract():
     para = text.split("### `.omc/skills/verify`", 1)[1].split("### ", 1)[0]
     assert "Running a subset" in para
     assert "major milestones" not in para
-    assert "only within `/omc:finish`" in " ".join(para.split())
+    assert "two places only" in " ".join(para.split())
+    assert "only within `/omc:finish`" not in " ".join(para.split())
+    # Phase 3: what is now active names audit, finish and the MR gate's hooks
+    wrap = " ".join(text.split("## Phase 3", 1)[1].split())
+    assert (
+        "`/omc:audit` and `/omc:finish` run the stage gates you just designed; "
+        "the MR gate asks your hooks"
+    ) in wrap
+
+
+HOOK_SLOT_VERDICTS = {
+    "needs_review": '`OMC_HOOK {"hook": "needs_review", "run": true|false, "reason": "…"}`',
+    "needs_verify": '`OMC_HOOK {"hook": "needs_verify", "run": true|false, "reason": "…"}`',
+    "post_design": '`OMC_HOOK {"hook": "post_design", "go": true|false, "reason": "…"}`',
+    "post_rebase": (
+        '`OMC_HOOK {"hook": "post_rebase", "ok": true|false, '
+        '"before_implementation": true|false, "reason": "…"}`'
+    ),
+    "pre_push": '`OMC_HOOK {"hook": "pre_push", "ok": true|false, "reason": "…"}`',
+}
+
+# what omc does when each hook is absent (D6, D7, D12, D13, D14)
+HOOK_SLOT_ABSENT = {
+    "needs_review": "Absent → the MR gate runs no review",
+    "needs_verify": "Absent → the MR gate runs verify whenever the tree changed",
+    "post_design": "Absent → the design closes as soon as it is committed",
+    "post_rebase": "Absent → rebase-main behaves as without it",
+    "pre_push": "Absent → `create-mr` pushes straight after the describe amend",
+}
+
+
+def test_integrate_inventories_the_hook_slots():
+    text = (ROOT / "skills" / "integrate" / "SKILL.md").read_text()
+    inventory = text.split("## Phase 1", 1)[1].split("## Phase 2", 1)[0]
+    phase2 = text.split("## Phase 2", 1)[1].split("## Phase 3", 1)[0]
+    assert ".omc/hooks/post-watch.sh" in inventory
+    assert "### `.omc/hooks/post-watch.sh`" in phase2
+    for name, verdict in HOOK_SLOT_VERDICTS.items():
+        path = f".omc/hooks/{name}/SKILL.md"
+        assert path in inventory, f"integrate inventory missing {path!r}"
+        heading = next(
+            (line for line in phase2.splitlines() if line.startswith("### ") and path in line),
+            None,
+        )
+        assert heading, f"integrate Phase 2 has no ### slot for {path!r}"
+        slot = phase2.split(heading, 1)[1].split("\n### ", 1)[0]
+        flat = " ".join(slot.split())
+        assert verdict in flat, f"{name} slot missing its verdict line"
+        assert HOOK_SLOT_ABSENT[name] in flat, f"{name} slot missing what omc does when absent"
+        assert "absence is the correct default" in flat, f"{name} slot missing the default"
+        if name == "needs_review":
+            # both paths: audit reviewed the branch, a direct finish did not (D6)
+            for needle in (
+                "after `/omc:audit` the branch was already reviewed",
+                "a direct `/omc:finish` publishes it unreviewed",
+                "reviews on a direct `/omc:finish`",
+                "with no recorded review, `previous` is the tree of the merge-base",
+            ):
+                assert needle in flat, f"needs_review slot missing {needle!r}"
+            assert "only when the tree changed since the last recorded review" not in flat
 
 
 def test_distribution_agents_task_model_policy():
@@ -1929,15 +2307,59 @@ def test_distribution_agents_task_model_policy():
 
 
 def test_audit_and_project_review_dispatch_review_judgment_even_without_findings():
-    audit = (ROOT / "skills" / "audit" / "SKILL.md").read_text()
-    conformance = audit.split("## Phase 1 — conformance", 1)[1].split("## Phase 2", 1)[0]
-    assert "omc internal models" in conformance
+    # D4: conformance moved from audit into the review stage, as its first pass
+    review = (ROOT / "skills" / "review" / "SKILL.md").read_text()
+    conformance = review.split("2a. **Conformance.**", 1)[1].split("2b. Look for", 1)[0]
+    assert "omc internal design-record" in conformance
     assert "Dispatch a Review worker" in conformance
     assert "even when" in conformance
-    review = (ROOT / "skills" / "review" / "SKILL.md").read_text()
-    project = review.split("2. Look for", 1)[1].split("3. **Grug lens.**", 1)[0]
+    project = review.split("2b. Look for", 1)[1].split("3. **Grug lens.**", 1)[0]
     assert "Dispatch a Review worker" in project
     assert "even when" in project
+
+
+def test_review_runs_conformance_first():
+    # D4: conformance -> its fixes -> then project review, grug and human-review.
+    text = (ROOT / "skills" / "review" / "SKILL.md").read_text()
+    steps = text.split("## Steps", 1)[1]
+    assert (
+        steps.index("omc internal models")
+        < steps.index("2a. **Conformance.**")
+        < steps.index("2b. Look for")
+        < steps.index("3. **Grug lens.**")
+    ), "review must read OMC_MODELS, then run conformance before the project stage"
+    raw = steps.split("2a. **Conformance.**", 1)[1].split("2b. Look for", 1)[0]
+    # other review tests split on these markers; conformance must not carry them
+    assert "**Missing**" not in raw and "**Present**" not in raw
+    conformance = _flat(raw)
+    for needle in (
+        "no design record — conformance skipped",
+        "this is not a failure",
+        "code deviates from the record",
+        "record is stale",
+        "file:line",
+        "Important",
+        "Minor",
+        "conformance only",
+        "Decisions taken during brainstorm",
+        "never waived",
+        "## Implementation review",
+        "immediately before the terminal `## Deliberate complexity`",
+        "append a new dated entry below the previous review entry",
+        "provider",
+        "date",
+        "`tasks.simple`, `tasks.medium`, or `tasks.high`",
+        "/omc:check",
+        "once before the lenses start",
+    ):
+        assert needle in conformance, f"review conformance missing {needle!r}"
+    verdict = _flat(steps.split("4. **Always**", 1)[1])
+    for needle in (
+        "an Important conformance finding",
+        "has no disposition",
+        "names conformance first",
+    ):
+        assert needle in verdict, f"review verdict missing {needle!r}"
 
 
 def test_distribution_agents_validation_cadence():
@@ -1945,42 +2367,42 @@ def test_distribution_agents_validation_cadence():
     for needle in ("Validation cadence", "/omc:check", "builds the world"):
         assert needle in text, f"behavior layer missing {needle!r}"
     prose = " ".join(text.split())
-    # finish bullet: the stage arrow ends in the final verify, skipped on an unchanged tree
-    for needle in (
-        "`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review` → final `/omc:verify`",
-        "skipped when the tree is unchanged since verify passed",
-    ):
-        assert needle in prose, f"behavior layer missing finish route {needle!r}"
+    # publish route: build before check (D2), then the MR gate and pre_push
+    route = (
+        "squash, rebase, `/omc:build` → `/omc:check`, the MR gate (`needs_review`, "
+        "`needs_verify`), `pre_push`, described push"
+    )
+    assert route in prose, "behavior layer missing the publish route"
     cadence = prose.split("**Validation cadence**", 1)[1].split("**stage-gate rule", 1)[0]
     for needle in (
-        "only within `/omc:finish`",
-        "before review, and last before the push",
+        "`/omc:audit`'s fixed verify after its review",
+        "the MR gate when the gate says run",
         "the user or the project may run it at any time",
         "end of `/omc:implement`",
-        "post-fix pass",
+        "the review stage's post-fix check",
     ):
         assert needle in cadence, f"validation cadence missing {needle!r}"
+    assert "`/omc:audit`'s post-fix pass" not in prose
     gate = prose.split("**stage-gate rule", 1)[1].split("**Ask the graph", 1)[0]
-    # the general clause is kept
+    # the general clause: fix, build, check, then the remaining stages (D2)
     for needle in (
         "`OMC_STAGE`",
         '"passed": false',
         "no verdict",
         '"configured": false',
         "heavy coding tier",
-        "at most two fix-and-rerun cycles",
-        "restart from `/omc:build`",
+        "run `/omc:build`, then `/omc:check`, then rerun the remaining gate stages in order",
         "failed `/omc:check`",
         "never resets the bound",
         "CRITICAL",
         "headless",
     ):
         assert needle in gate, f"stage-gate rule missing {needle!r}"
-    # the verify clause: targeted rerun, then build once, then the full verify
+    # the verify clause: build, check, targeted rerun, then the full verify
     assert (
         gate.index("A red `/omc:verify`")
+        < gate.index("then `/omc:build`, then `/omc:check`")
         < gate.index("rerun only the failed pieces")
-        < gate.index("`/omc:build` once")
         < gate.index("the full `/omc:verify`")
     )
     for needle in (
@@ -1988,6 +2410,7 @@ def test_distribution_agents_validation_cadence():
         "briefed with verify's failure output",
         "pieces that are red now",
         "nothing before it is rerun",
+        "never returns to review",
     ):
         assert needle in gate, f"stage-gate verify clause missing {needle!r}"
     # no subset section: no targeted rerun, so one full verify per cycle
@@ -1995,35 +2418,64 @@ def test_distribution_agents_validation_cadence():
     assert gate.index("rerun only the failed pieces") < gate.index(skip)
     for needle in (
         "the targeted rerun is skipped",
-        "`/omc:check`, then `/omc:build` once, then the full `/omc:verify`",
+        "`/omc:build`, then `/omc:check`, then the full `/omc:verify`",
         "one full run per cycle",
     ):
         assert needle in gate[gate.index(skip) :], f"verify clause missing skip {needle!r}"
-    # a fix never repairs the stage itself
+    # a red hook verdict is a red gate (D15)
+    for needle in (
+        "A red hook verdict",
+        # scoped to the two gate hooks: a failed needs_* or post_design is its caller's rule
+        'A red hook verdict (`"ok": false`, or a failed hook\'s `error`, from `post_rebase` '
+        "or `pre_push`) is a red gate under this rule",
+        '"ok": false',
+        "briefed with the hook's `reason`",
+        "the hook again",
+    ):
+        assert needle in gate, f"stage-gate rule missing hook clause {needle!r}"
+    # a fix never repairs the stage or the hook itself
     for needle in (
         "a fix repairs the code under test, never the stage's own definition",
         "`.omc/skills/<stage>/`",
+        "`.omc/hooks/<name>/`",
         "the script or command it runs",
         "a stage that only passes by editing itself is the CRITICAL question",
         "asked at once, without spending the remaining cycles",
     ):
-        assert needle in gate, f"stage-gate rule missing stage-definition guard {needle!r}"
-    # one counter: fix dispatches, shared across the conductor run
+        assert needle in gate, f"stage-gate rule missing definition guard {needle!r}"
+    # the bound (D17): ten progress-gated cycles, one shared budget
     for needle in (
+        "up to ten fix cycles per conductor run",
+        "one budget shared by `/omc:check`, `/omc:build`, `/omc:verify` and the "
+        "`post_rebase` and `pre_push` hooks",
         "a cycle is one fix dispatch",
         "never counted on their own",
-        "shared by every stage",
         "a fix whose rerun passes by flake still spent its cycle",
+        "fewer or different failing pieces",
+        "an idea no earlier cycle tried",
+        '"fix cycle 3/10: progress — 4 → 2 failing pieces"',
+        "A cycle that brings neither is the CRITICAL question at once",
+        "the tenth cycle ending red",
+        "A red review's own repair is not counted",
+        "what the fixes tried",
     ):
-        assert needle in gate, f"stage-gate rule missing one-counter wording {needle!r}"
+        assert needle in gate, f"stage-gate rule missing bound wording {needle!r}"
     # no later phase on a red gate
     for needle in (
         "implement makes no handoff on a red check",
         "audit invokes no `finish`",
-        "finish pushes nothing",
+        "`create-mr` pushes nothing",
     ):
         assert needle in gate, f"stage-gate rule missing red-gate stop {needle!r}"
     for gone in (
+        "at most two",
+        "the two cycles",
+        "what both fixes tried",
+        "final `/omc:verify`",
+        "only within `/omc:finish`",
+        "before review, and last before the push",
+        "finish pushes nothing",
+        "`/omc:build` once",
         "major milestones",
         "three gate runs",
         "`/omc:build` → `/omc:verify` before handoff",
@@ -2032,6 +2484,27 @@ def test_distribution_agents_validation_cadence():
         "flaky pass on rerun consumes a cycle",
     ):
         assert gone not in prose, f"behavior layer still carries {gone!r}"
+
+
+def test_behavior_layer_repairs_every_red_verdict_forward():
+    # D16: the general rule sharpens "Stop for required answers or genuine blockers"
+    flat = " ".join((ROOT / "src" / "omc" / "distribution" / "AGENTS.md").read_text().split())
+    lifecycle = flat.split("Lifecycle scope is binding", 1)[1].split("Worktrees are snapshots", 1)[
+        0
+    ]
+    stop = lifecycle.index("Stop for required answers or genuine blockers")
+    for needle in (
+        "Every red verdict, from a stage or a hook, is repaired forward",
+        "only when no high-confidence decision is possible",
+    ):
+        assert needle in lifecycle, f"lifecycle bullet missing {needle!r}"
+        assert stop < lifecycle.index(needle), f"{needle!r} must follow the stop sentence"
+    assert (
+        "authorizes the fixed review (conformance inside it) and the fixed verify, their fixes "
+        "and record amendments, and publication through finish"
+    ) in lifecycle
+    worktrees = flat.split("Worktrees are snapshots", 1)[1].split("**Publish through", 1)[0]
+    assert "`/omc:audit`'s and `/omc:finish`'s first working step" in worktrees
 
 
 def test_explain_dependency_skill_contract():
@@ -2153,6 +2626,35 @@ def test_design_is_user_facing_and_owns_the_record():
     assert "three continuations" in text and "two continuations" not in text
     assert "`/omc:implement` has been invoked" in text
     assert not (ROOT / "skills" / "spec").exists()
+
+
+def test_design_runs_post_design_after_the_commit():
+    # D12 (spec 2026-11-16 §5.9): the project's post_design hook judges the committed
+    # record; a no-go sends its reason back into hardening, then commit and ask again.
+    text = (ROOT / "skills" / "design" / "SKILL.md").read_text()
+    step5 = _flat(text.split("## Step 5", 1)[1].split("## Completion contract", 1)[0])
+    order = [
+        step5.index("Commit the record"),
+        step5.index("`post_design`"),
+        step5.index("Provider selection per step off"),
+    ]
+    assert order == sorted(order), "design Step 5: commit -> post_design -> close"
+    for needle in (
+        "record=<path>",
+        '"go": true',
+        '"go": false',
+        "back to the Design worker as a finding",
+        "commits, and the hook is called again",
+        "Interactive runs do not bound the loop",
+        "headless run stops after three no-gos",
+        "carrying the three reasons",
+        "An `error` verdict is not a no-go",
+        "a second error is the CRITICAL question",
+    ):
+        assert needle in step5, f"design Step 5 missing {needle!r}"
+    step0 = _flat(text.split("## Step 0", 1)[1].split("## Step 1", 1)[0])
+    assert "`post_design`" in step0
+    assert step0.index("commit and report") < step0.index("`post_design`") < step0.index("close")
 
 
 GRUG_RULE_IDS = (
