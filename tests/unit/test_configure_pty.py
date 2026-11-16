@@ -13,7 +13,7 @@ import pytest
 
 from omc import configure
 from omc.config import store
-from omc.config.schema import GlobalConfig, ProjectConfig, SecretsConfig
+from omc.config.schema import GlobalConfig, ProjectConfig
 from omc.toolctx import ToolContext
 
 from ._stubs import DEFAULT_CODEX_CATALOG, make_codex_stub
@@ -55,8 +55,7 @@ ctx = ToolContext(home=home, env={{"HOME": {str(self.home)!r}, "PATH": {stub_pat
 gcfg = store.load_global(home) or GlobalConfig()
 try:
     flags = configure._run_menu(
-        ctx, Path({str(self.repo)!r}), gcfg, ProjectConfig(), store.load_secrets(home),
-        plain_menu={plain!r}
+        ctx, Path({str(self.repo)!r}), gcfg, ProjectConfig(), plain_menu={plain!r}
     )
 except Refusal as exc:
     (home / 'terminal-result.txt').write_text('Refusal: ' + str(exc))
@@ -176,7 +175,7 @@ def test_plain_menu_saves_nested_project_field_and_escape_leaves(terminal):
     term = terminal()
     prompt = b"Choose (Enter = ok): "
     term.expect(prompt)
-    term.send(b"4\n")
+    term.send(b"3\n")
     term.expect(b"Worktree (project)")
     term.expect(prompt)
     term.send(b"2\n")
@@ -196,7 +195,7 @@ def test_plain_menu_saves_nested_project_field_and_escape_leaves(terminal):
 def test_default_renderer_can_navigate_nested_project_field(terminal):
     term = terminal(plain=False)
     term.expect(b"Worktree (project)")
-    term.send(b"4")
+    term.send(b"3")
     term.expect(b"Base branch")
     term.send(b"2")
     term.expect(b"Base branch main:")
@@ -264,7 +263,7 @@ def test_ctrl_c_abandons_current_edit_without_losing_earlier_save(terminal):
     term = terminal()
     prompt = b"Choose (Enter = ok): "
     term.expect(prompt)
-    term.send(b"4\n")
+    term.send(b"3\n")
     term.expect(prompt)
     term.send(b"2\n")
     term.expect(b"Base branch main:")
@@ -286,7 +285,7 @@ def test_unbuffered_reader_preserves_utf8_input(terminal):
     term = terminal()
     prompt = b"Choose (Enter = ok): "
     term.expect(prompt)
-    term.send(b"4\n")
+    term.send(b"3\n")
     term.expect(prompt)
     term.send(b"2\n")
     term.expect(b"Base branch main:")
@@ -314,7 +313,6 @@ def test_stdin_restored_when_renderer_raises(tmp_path, monkeypatch):
             None,
             GlobalConfig(),
             ProjectConfig(),
-            SecretsConfig(),
         )
     assert sys.stdin is original
 
@@ -336,6 +334,5 @@ def test_unrelated_renderer_assertion_preserves_stdin(tmp_path, monkeypatch):
             None,
             GlobalConfig(),
             ProjectConfig(),
-            SecretsConfig(),
         )
     assert sys.stdin is original

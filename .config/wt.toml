@@ -2,7 +2,6 @@
 # Every gitignored file (.env, caches, .omc) is reflink-copied into new
 # worktrees EXCEPT .gitnexus/ (omc queries the primary's graph) and target/
 # (build cache; a fresh build is cheaper than fixing up copied artifacts).
-# Refresh a worktree's .omc/docs later with /omc:rebase-main.
 # Docs: https://worktrunk.dev
 
 # Blocking setup, in order: submodules, copy, direnv. Any failure aborts the cut.

@@ -1,10 +1,7 @@
 import subprocess
 
-import pytest
-
 from omc.config import resolve, store
-from omc.config.schema import GlobalConfig, ProjectConfig, SecretsConfig
-from omc.errors import ConfigError
+from omc.config.schema import Config, GlobalConfig, ProjectConfig
 from omc.toolctx import ToolContext
 
 
@@ -57,20 +54,13 @@ def test_project_config_defaults_in_repo_without_file(tmp_path, monkeypatch):
     assert resolve.project_config(ctx).worktree.base_branch == "main"
 
 
-def test_load_effective_composes_secrets_and_defaults_to_empty(tmp_path, monkeypatch):
+def test_load_effective_ignores_a_leftover_secrets_yaml(tmp_path, monkeypatch):
+    # The documentation backend's key file is neither read nor deleted (D7).
     ctx, home = _ctx(tmp_path, monkeypatch, tmp_path)
     store.save_global(home, GlobalConfig())
-    assert resolve.load_effective(ctx).secrets.api_keys == {}
-    store.save_secrets(home, SecretsConfig(api_keys={"claude": "sk-test-1234567890"}))
+    leftover = home / "secrets.yaml"
+    leftover.write_text("api_keys:\n  claude: 31\n")
     cfg = resolve.load_effective(ctx)
-    assert cfg.secrets.api_keys == {"claude": "sk-test-1234567890"}
-    assert "sk-test-1234567890" not in repr(cfg)  # repr=False on Config.secrets too
-
-
-def test_load_effective_malformed_secrets_is_a_config_error(tmp_path, monkeypatch):
-    # Same strict stance as config.yaml: every gated command fails loud, rc 1.
-    ctx, home = _ctx(tmp_path, monkeypatch, tmp_path)
-    store.save_global(home, GlobalConfig())
-    (home / "secrets.yaml").write_text("api_keys:\n  claude: 31\n")
-    with pytest.raises(ConfigError, match="secrets.yaml"):
-        resolve.load_effective(ctx)
+    assert isinstance(cfg, Config)
+    assert not hasattr(cfg, "secrets")
+    assert leftover.read_text() == "api_keys:\n  claude: 31\n"

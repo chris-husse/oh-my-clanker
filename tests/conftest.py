@@ -25,4 +25,18 @@ _GIT_CONFIG.write_text(
 )
 os.environ["GIT_CONFIG_GLOBAL"] = str(_GIT_CONFIG)
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+# The same for the host's shell startup config. NixOS shells re-apply the system
+# environment (resetting PATH) unless __NIXOS_SET_ENVIRONMENT_DONE is set, and its
+# generated /etc/fish/config.fish runs `fenv` (bash + a bare `env`) at every fish
+# start — "env: command not found" on a restricted PATH — unless its once-per-shell
+# markers are set (`set -q` honors them exported). No fish flag skips the system
+# config without also skipping conf.d. On every other host nothing reads these.
+HOST_SHELL_MARKERS = (
+    "__NIXOS_SET_ENVIRONMENT_DONE",
+    "__fish_nixos_general_config_sourced",
+    "__fish_nixos_login_config_sourced",
+    "__fish_nixos_interactive_config_sourced",
+)
+for _marker in HOST_SHELL_MARKERS:
+    os.environ[_marker] = "1"
 atexit.register(shutil.rmtree, _GIT_CONFIG.parent, True)

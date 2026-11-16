@@ -48,11 +48,16 @@ def _catalog_models(container, provider: str) -> dict[str, set[str]]:
         rc, status_text = run_in(container, ["claude", "auth", "status"], timeout=240)
         assert rc == 0, f"Claude auth status failed: {status_text}"
         status = json.loads(status_text)
-        if status.get("authMethod") == "api_key" and not status.get("orgId"):
-            # Claude Code 2.1.286 does not cache a model catalog for API-key
-            # auth. Check the saved ID against Anthropic's independent list.
+        auth_method = status.get("authMethod")
+        if auth_method in ("api_key", "oauth_token") and not status.get("orgId"):
+            # Claude Code 2.1.286 (API key) and 2.1.325 (CLAUDE_CODE_OAUTH_TOKEN)
+            # cache no model catalog. Check the saved ID against Anthropic's
+            # independent list, fetched with the same credential.
             rc, raw = run_in(
-                container, ["python3", "-m", "tests.e2e.claude_catalog"], cwd="/repo", timeout=240
+                container,
+                ["python3", "-m", "tests.e2e.claude_catalog", auth_method],
+                cwd="/repo",
+                timeout=240,
             )
             assert rc == 0, raw
         else:

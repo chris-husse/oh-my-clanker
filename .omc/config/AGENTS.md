@@ -45,9 +45,10 @@ the bug).
   the tool works. Every external integration keeps ≥1 E2E driving the REAL
   tool and asserting its on-disk effect.
 - **Stub scripts run on a restricted PATH** (only the stub dir). Use shell
-  builtins (`:` `echo` `case`), absolute paths (`/bin/cat`, `/usr/bin/wc`),
-  or quoted heredocs — bare `touch`/`cat` silently break (this has bitten
-  three times).
+  builtins (`:` `echo` `case`), absolute paths resolved through the shared
+  helper (`tests/unit/_stubs.py:host_bin`) — never a hardcoded `/bin/…` or
+  `/usr/bin/…` literal (`/bin/sh` and `/usr/bin/env` excepted) — or quoted
+  heredocs; bare `touch`/`cat` silently break (this has bitten three times).
 - **LLM judges**: judge on the same provider under test; a rubric per
   scenario; unparseable judge output raises — it never silently passes.
 - Exact-argv assertions over "was called"; loose substring matching only
@@ -95,5 +96,14 @@ the bug).
   the world-build (ruff + package build, no tests).
 - `just e2e-tests [selector]` — Docker E2E; tokens from `.env`
   (`cp env.example .env`). First image build is slow; layers cache.
+  When no `.env` or environment variable provides `CLAUDE_CODE_OAUTH_TOKEN`,
+  use the local Claude login, and don't ask: pass
+  `CLAUDE_CODE_OAUTH_TOKEN="$(jq -r .claudeAiOauth.accessToken ~/.claude/.credentials.json)"`
+  inline on that one run. Never write it to `.env` or print it.
+- Missing host prerequisites (e.g. `direnv`): install them yourself
+  (`nix profile add nixpkgs#<pkg>` on NixOS) instead of asking the user. Ask
+  only before replacing a tool the user runs at a different version; a
+  version mismatch is solved by a minimum version in the tests, not a
+  downgrade.
 - Project stages for this repo: `.omc/skills/{check,build,verify,review}`
   (used by `/omc:finish`).

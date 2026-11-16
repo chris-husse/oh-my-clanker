@@ -1,8 +1,7 @@
 """Faithful-worktree wt configuration: create the starter when absent, sniff
 existing configs and point at /omc:check-wt-config when they look off.
 
-The blocking copy snapshots ignored files except .gitnexus/ and target/;
-.omc/docs is copied and later refreshed by /omc:rebase-main.
+The blocking copy snapshots ignored files except .gitnexus/ and target/.
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ WT_TEMPLATE = """\
 # Every gitignored file (.env, caches, .omc) is reflink-copied into new
 # worktrees EXCEPT .gitnexus/ (omc queries the primary's graph) and target/
 # (build cache; a fresh build is cheaper than fixing up copied artifacts).
-# Refresh a worktree's .omc/docs later with /omc:rebase-main.
 # Docs: https://worktrunk.dev
 
 # Blocking setup, in order: submodules, copy, direnv. Any failure aborts the cut.

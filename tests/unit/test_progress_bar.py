@@ -61,27 +61,3 @@ def test_bar_thread_refreshes_and_redraws_on_tty():
     assert tracker.refreshed >= 1
     assert "\rRENDERED" in out.getvalue()
     assert out.getvalue().endswith("\r\x1b[K")  # stop clears the bar line
-
-
-def test_multibar_paints_block_and_clears_on_stop():
-    from omc.cli.progress_bar import MultiBarThread
-
-    out = _TTY()
-    bar = MultiBarThread(lambda: ["ROW-A", "ROW-B"], out=out)
-    bar.start()
-    time.sleep(1.3)  # one beat
-    bar.stop()
-    text = out.getvalue()
-    assert "ROW-A" in text and "ROW-B" in text
-    assert "\r\x1b[K" in text  # line-erase repaint discipline
-    assert "\x1b[2A" in text  # cursor-up over the 2-line block (stop's erase)
-
-
-def test_multibar_is_noop_without_tty():
-    from omc.cli.progress_bar import MultiBarThread
-
-    out = _NonTTY()
-    bar = MultiBarThread(lambda: ["ROW"], out=out)
-    bar.start()
-    bar.stop()
-    assert out.getvalue() == ""

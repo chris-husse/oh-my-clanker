@@ -55,7 +55,7 @@ lifecycle-full *args:
 codex-login:
     bash docker/codex-login.sh
 
-# LLM-heavy E2E (documentation generation). Costs real money - run only with
+# LLM-heavy E2E (whole-lifecycle evidence runs). Costs real money - run only with
 # explicit user agreement.
 expensive-e2e-tests *args:
     uv run pytest -m "e2e and expensive and not golden and not variation" -q {{args}}

@@ -166,10 +166,10 @@ class ToolContext:
         on_line: Callable[[str], None] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], bool]:
         """Run argv captured like run(), supervised for LIVENESS, not deadline:
-        the child (its whole process group — LLM grandchildren included) is
+        the child (its whole process group, grandchildren included) is
         killed only after ``stall_after`` seconds with NO progress, where
         progress = the heartbeat() token changed OR any output bytes arrived.
-        No overall timeout — a healthy wiki run may take 40+ minutes.
+        No overall timeout — a healthy GitNexus step may run for many minutes.
         Returns (completed, stalled). POSIX-only (killpg), like this module.
 
         heartbeat runs on the supervising thread once per ``poll``; its

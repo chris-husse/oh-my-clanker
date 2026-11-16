@@ -9,13 +9,13 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from . import docsllm, taskmodels
+from . import taskmodels
 from .agentsmd import ensure_global_section, seed_project_agents_md
 from .config import store
-from .config.schema import GlobalConfig, ProjectConfig, ProviderConfig, SecretsConfig
-from .errors import ConfigError, OmcError, Refusal
+from .config.schema import GlobalConfig, ProjectConfig, ProviderConfig
+from .errors import OmcError, Refusal
 from .plugin import ensure_plugin
-from .providers.registry import get_provider, provider_names
+from .providers.registry import provider_names
 from .toolctx import ToolContext
 from .wtconfig import repo_root
 
@@ -38,81 +38,6 @@ omc's start skill hands off to superpowers — install it too:
 
 def _say(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
-
-
-def _docs_provider(gcfg: GlobalConfig) -> str:
-    return gcfg.llm.docs.provider or gcfg.llm.default
-
-
-def _docs_changed(
-    before: GlobalConfig,
-    after: GlobalConfig,
-    before_keys: dict[str, str],
-    after_keys: dict[str, str],
-) -> tuple[bool, bool]:
-    """(documentation tuple changed, docs provider's key changed) — the probe
-    trigger of spec §3.2. The docs provider is evaluated on the POST-apply
-    config FOR BOTH SIDES (deliberate, per spec: "changed" compares the same
-    provider name's value before and after); a provider entry that did not
-    exist before compares as ""."""
-    name = _docs_provider(after)
-
-    def model(cfg: GlobalConfig) -> str:
-        p = cfg.llm.providers.get(name)
-        return p.docs_model if p else ""
-
-    tuple_changed = (before.llm.docs.provider, before.llm.docs.backend, model(before)) != (
-        after.llm.docs.provider,
-        after.llm.docs.backend,
-        model(after),
-    )
-    return tuple_changed, before_keys.get(name, "") != after_keys.get(name, "")
-
-
-def _probe_docs(
-    ctx: ToolContext,
-    gcfg: GlobalConfig,
-    scfg: SecretsConfig,
-    *,
-    before: GlobalConfig,
-    before_keys: dict[str, str],
-    removed_provider: str | None = None,
-) -> bool:
-    """Refuse api-without-key, then run exactly the probes the change calls
-    for. Returns True when docs_model was rewritten (api: the resolved full
-    id). Raises ProbeFailed/ConfigError — nothing has been written yet."""
-    name, backend = _docs_provider(gcfg), gcfg.llm.docs.backend
-    key = scfg.api_keys.get(name, "")
-    if backend == "api" and not key:
-        # Unconditional (spec §3.2): also fires on an unrelated --set when a stored
-        # api config lost its key (hand-deleted secrets.yaml). Escape hatch:
-        # `--set llm.docs.backend=cli`.
-        raise ConfigError(f"llm.providers.{name}.api_key is required for the api backend")
-    tuple_changed, key_changed = _docs_changed(before, gcfg, before_keys, scfg.api_keys)
-    if key_changed and backend != "api":
-        # The key changed while the backend does not use it: prove it anyway.
-        docsllm.validate_key_only(ctx, name, key, say=_say)
-    if not tuple_changed and not (key_changed and backend == "api"):
-        return False
-    # The two triggers are independent: a backend/provider/model change always
-    # runs the selected backend's probes, even when a key probe just ran.
-    # setdefault may add a provider entry (e.g. docs.provider=codex with no codex
-    # section) — the same thing `--set llm.providers.codex.model=` does today.
-    # A configured toggle may remove the selected provider. Probe its fallback
-    # model without recreating the entry that the user just removed.
-    removed_selected = name == removed_provider and name not in gcfg.llm.providers
-    pcfg = (
-        ProviderConfig()
-        if removed_selected
-        else gcfg.llm.providers.setdefault(name, ProviderConfig())
-    )
-    model = docsllm.validate_selection(
-        ctx, docsllm.DocsSelection(name, backend, pcfg.docs_model, key), say=_say
-    )
-    if model != pcfg.docs_model and not removed_selected:
-        pcfg.docs_model = model
-        return True
-    return False
 
 
 def _probe_task_models(ctx: ToolContext, gcfg: GlobalConfig, *, before: GlobalConfig) -> None:
@@ -140,31 +65,29 @@ def _apply_settings(
     root: Path | None,
     gcfg: GlobalConfig,
     pcfg: ProjectConfig,
-    scfg: SecretsConfig,
     sets: list[str],
     *,
     defaults: bool = False,
     legacy: bool = False,
     remove_provider: str | None = None,
-) -> tuple[bool, bool, bool]:
-    """Validate, probe, and persist candidates; return global/project/secrets write flags.
+) -> tuple[bool, bool]:
+    """Validate, probe, and persist candidates; return global/project write flags.
 
     Callers that need rollback after a failed edit supply copies. Migration and
     other post-steps remain with the caller.
     """
-    before, before_keys = copy.deepcopy(gcfg), dict(scfg.api_keys)
+    before = copy.deepcopy(gcfg)
     write_global = defaults
     # --defaults seeds a missing project file but never clobbers an
     # existing one: it is committed team truth, not personal state.
     write_project = bool(
         defaults and root is not None and not store.project_config_path(root).exists()
     )
-    write_secrets = False
     for i, pair in enumerate(sets, 1):
         key, sep, value = pair.partition("=")
         if not sep:
-            # Never echo the argument: a ':' typo on an api_key pair would
-            # print the secret to stderr.
+            # Never echo the argument: a ':' typo for '=' may carry a secret
+            # the user pasted, which would land on stderr.
             raise Refusal(f"--set expects KEY=VALUE (argument {i} has no '=')")
         parts = key.split(".")
         if parts[0] == "worktree":
@@ -172,23 +95,15 @@ def _apply_settings(
                 raise Refusal("worktree.* is project config — run inside a git repository")
             store.set_key(pcfg, key, value)
             write_project = True
-        elif len(parts) == 4 and parts[:2] == ["llm", "providers"] and parts[3] == "api_key":
-            # Routing key, not a ProviderConfig field: secrets.yaml only.
-            store.set_api_key(scfg, parts[2], value)
-            write_secrets = True
         else:
             store.set_key(gcfg, key, value)
             write_global = True
     if remove_provider is not None:
         store.remove_provider(gcfg, remove_provider)
         write_global = True
-    # Order (spec §3.2): consistency → refuse api-without-key → probes → write.
+    # Order: consistency → probes → write.
     store.validate_llm(gcfg.llm)
     _probe_task_models(ctx, gcfg, before=before)
-    if _probe_docs(
-        ctx, gcfg, scfg, before=before, before_keys=before_keys, removed_provider=remove_provider
-    ):
-        write_global = True  # the resolved full model id was written into docs_model
     # Migration must not lose the legacy worktree section: when this run
     # writes the global YAML (which deletes the JSON afterwards) and the
     # repo has no project file yet, seed it from the legacy content.
@@ -199,14 +114,6 @@ def _apply_settings(
         and not store.project_config_path(root).exists()
     ):
         write_project = True
-    # Secrets FIRST: if this write fails, config.yaml must not already say `api`
-    # (that state trips the unconditional api-without-key refusal on every run).
-    if write_secrets:
-        store.save_secrets(ctx.home, scfg)
-        print(f"Updated {store.secrets_path(ctx.home)} (mode 0600)")
-        for name, k in scfg.api_keys.items():
-            if before_keys.get(name) != k:
-                _say(f"✓ {name} API key stored ({docsllm.mask_key(k)})")
     if write_global:
         store.save_global(ctx.home, gcfg)
         label = "Wrote defaults to" if defaults and not sets else "Updated"
@@ -214,7 +121,7 @@ def _apply_settings(
     if write_project and root is not None:
         store.save_project(root, pcfg)
         print(f"Updated {store.project_config_path(root)}")
-    return write_global, write_project, write_secrets
+    return write_global, write_project
 
 
 def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
@@ -233,9 +140,8 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
             else (store.load_global(ctx.home) or legacy_global or GlobalConfig())
         )
         pcfg = (store.load_project(root) if root else None) or legacy_project or ProjectConfig()
-        scfg = store.load_secrets(ctx.home)
-        write_global, write_project, _ = _apply_settings(
-            ctx, root, gcfg, pcfg, scfg, sets, defaults=defaults, legacy=legacy is not None
+        write_global, write_project = _apply_settings(
+            ctx, root, gcfg, pcfg, sets, defaults=defaults, legacy=legacy is not None
         )
         _migrate_legacy(ctx, migrated=write_global, carried=write_project)
         _ensure_instructions(ctx, gcfg, root)
@@ -246,11 +152,8 @@ def run_configure(ctx: ToolContext, *, defaults: bool, sets: list[str]) -> int:
     if not sys.stdin.isatty():
         raise Refusal("interactive configure needs a TTY (use --defaults or --set KEY=VALUE)")
     gcfg = store.load_global(ctx.home) or legacy_global or GlobalConfig()
-    scfg = store.load_secrets(ctx.home)
     pcfg = (store.load_project(root) if root else None) or legacy_project or ProjectConfig()
-    write_global, write_project, _ = _run_menu(
-        ctx, root, gcfg, pcfg, scfg, legacy=legacy is not None
-    )
+    write_global, write_project = _run_menu(ctx, root, gcfg, pcfg, legacy=legacy is not None)
     _migrate_legacy(ctx, migrated=write_global, carried=write_project)
     _ensure_instructions(ctx, gcfg, root)
     _ensure_plugins(ctx, gcfg)
@@ -312,7 +215,7 @@ class _MenuSession:
     """Stable menu tree and the write state shared by its field callbacks."""
 
     root: dict[str, Any] = field(default_factory=dict)
-    flags: tuple[bool, bool, bool] = (False, False, False)
+    flags: tuple[bool, bool] = (False, False)
     interface: Any = None
 
 
@@ -339,13 +242,12 @@ def _compose_menu(
     root: Path | None,
     gcfg: GlobalConfig,
     pcfg: ProjectConfig,
-    scfg: SecretsConfig,
     *,
     legacy: bool = False,
 ) -> _MenuSession:
     """Compose schema leaves into mininterface's nested-dict form."""
     from mininterface.exceptions import Cancelled
-    from mininterface.tag import SecretTag, SelectTag, Tag
+    from mininterface.tag import SelectTag, Tag
 
     class SavedTag(Tag):
         # TextAdaptor calls _on_change_trigger(ui_val), then update(ui_val)
@@ -396,10 +298,6 @@ def _compose_menu(
         def _get_selected_key(self):
             return super()._get_selected_key() or (str(self.val) if self.val else None)
 
-    class MaskedKeyTag(SavedTag, SecretTag):
-        def _get_masked_val(self):
-            return docsllm.mask_key(self.val) if self.val else ""
-
     session = _MenuSession()
     tags: list[tuple[Any, str, str | None]] = []
 
@@ -429,11 +327,7 @@ def _compose_menu(
         old = current(key, provider)
         if value == old:
             return True, old
-        candidate_g, candidate_p, candidate_s = (
-            copy.deepcopy(gcfg),
-            copy.deepcopy(pcfg),
-            copy.deepcopy(scfg),
-        )
+        candidate_g, candidate_p = copy.deepcopy(gcfg), copy.deepcopy(pcfg)
         try:
             if key.endswith(".configured"):
                 if value:
@@ -442,7 +336,6 @@ def _compose_menu(
                         root,
                         candidate_g,
                         candidate_p,
-                        candidate_s,
                         [f"llm.providers.{provider}.model="],
                         legacy=legacy,
                     )
@@ -452,29 +345,18 @@ def _compose_menu(
                         root,
                         candidate_g,
                         candidate_p,
-                        candidate_s,
                         [],
                         legacy=legacy,
                         remove_provider=provider,
                     )
             else:
                 sets = [f"{key}={str(value).lower() if isinstance(value, bool) else value}"]
-                if key.endswith(".api_key") and provider not in gcfg.llm.providers:
-                    # A key edit on a disabled provider configures it in the
-                    # same transaction. Existing provider key edits stay secrets-only.
-                    sets.append(f"llm.providers.{provider}.model=")
-                flags = _apply_settings(
-                    ctx, root, candidate_g, candidate_p, candidate_s, sets, legacy=legacy
-                )
+                flags = _apply_settings(ctx, root, candidate_g, candidate_p, sets, legacy=legacy)
         except OmcError as exc:
-            message = str(exc)
-            if key == "llm.docs.backend" and "api_key is required" in message:
-                message += " — set the provider API key first"
-            return message
+            return str(exc)
         gcfg.llm = candidate_g.llm
         gcfg.gitnexus = candidate_g.gitnexus
         pcfg.worktree = candidate_p.worktree
-        scfg.api_keys = candidate_s.api_keys
         session.flags = tuple(a or b for a, b in zip(session.flags, flags, strict=True))
         # mininterface revalidates every tag on level submit. A probe can
         # resolve another leaf, and removing a provider changes both model
@@ -488,8 +370,6 @@ def _compose_menu(
         parts = key.split(".")
         if key.endswith(".configured"):
             return provider in gcfg.llm.providers
-        if key.endswith(".api_key"):
-            return scfg.api_keys.get(provider, "")
         if provider is not None:
             obj: Any = gcfg.llm.providers.get(provider, ProviderConfig())
             for part in parts[3:]:
@@ -507,7 +387,6 @@ def _compose_menu(
         *,
         provider: str | None = None,
         options: list[str] | dict[str, str] | None = None,
-        secret: bool = False,
     ):
         meta = next(f.metadata for f in fields(obj) if f.name == name)
         value = current(key, provider)
@@ -517,9 +396,7 @@ def _compose_menu(
             "description": meta.get("help", ""),
             "validation": lambda tag: guarded_commit(key, tag, provider=provider),
         }
-        if secret:
-            tag = MaskedKeyTag(**kwargs)
-        elif options is not None:
+        if options is not None:
             tag = SavedSelectTag(options=options, **kwargs)
         else:
             tag = SavedTag(**kwargs)
@@ -529,13 +406,12 @@ def _compose_menu(
     configured = list(gcfg.llm.providers)
     llm = {}
     for config_field in fields(gcfg.llm):
-        if config_field.name in ("docs", "providers"):
-            continue  # nested sections, composed below
+        if config_field.name == "providers":
+            continue  # nested section, composed below
         options = configured or [gcfg.llm.default] if config_field.name == "default" else None
         llm[config_field.metadata["label"]] = leaf(
             gcfg.llm, config_field.name, f"llm.{config_field.name}", options=options
         )
-    other = "__other_model__"
     warned: set[str] = set()
 
     def warn_once(msg: str) -> None:
@@ -554,7 +430,6 @@ def _compose_menu(
             ),
         )
         tags.append((toggle, f"llm.providers.{name}.configured", name))
-        models = list(get_provider(name).models())
         submenu = {"Configured": toggle}
         for config_field in fields(p):
             attr = config_field.name
@@ -580,12 +455,6 @@ def _compose_menu(
             choices = None
             if attr == "model":
                 choices = _model_picker(ctx, name, "orchestrator", p.model, warn=warn_once)
-            elif attr == "docs_model" and models:
-                value = getattr(p, attr)
-                choices = {m: m for m in models}
-                choices["Other (type a model id)"] = other
-                if value and value not in choices.values():
-                    choices = {value: value, **choices}
             submenu[config_field.metadata["label"]] = leaf(
                 p,
                 attr,
@@ -593,36 +462,11 @@ def _compose_menu(
                 provider=name,
                 options=choices,
             )
-        if get_provider(name).api_base_url():
-            meta = next(f.metadata for f in fields(scfg) if f.name == "api_keys")
-            key_tag = MaskedKeyTag(
-                val=scfg.api_keys.get(name, ""),
-                label=meta["label"],
-                description=meta.get("help", ""),
-                validation=lambda tag, n=name: guarded_commit(
-                    f"llm.providers.{n}.api_key", tag, provider=n
-                ),
-            )
-            submenu[meta["label"]] = key_tag
-            tags.append((key_tag, f"llm.providers.{name}.api_key", name))
         llm[name] = submenu
-    docs_name = _docs_provider(gcfg)
-    docs = {}
-    for config_field in fields(gcfg.llm.docs):
-        options = None
-        if config_field.name == "provider":
-            options = {"Follow default provider": "", **{n: n for n in configured}}
-        elif config_field.name == "backend":
-            options = ["cli", "api"] if get_provider(docs_name).api_base_url() else ["cli"]
-        docs[config_field.metadata["label"]] = leaf(
-            gcfg.llm.docs, config_field.name, f"llm.docs.{config_field.name}", options=options
-        )
     session.root = {}
     for config_field in fields(gcfg):
         if config_field.name == "llm":
             session.root[config_field.metadata["label"]] = llm
-            docs_field = next(f for f in fields(gcfg.llm) if f.name == "docs")
-            session.root[docs_field.metadata["label"]] = docs
         elif config_field.name == "gitnexus":
             session.root[config_field.metadata["label"]] = {
                 f.metadata["label"]: leaf(gcfg.gitnexus, f.name, f"gitnexus.{f.name}")
@@ -638,28 +482,11 @@ def _compose_menu(
 
 
 def _text_interface(plain_menu: bool):
-    """Use mininterface's text renderer with a no-echo secret input adaptor."""
-    import getpass
-
+    """Use mininterface's text renderer."""
     from mininterface._text_interface import TextInterface
-    from mininterface._text_interface.adaptor import TextAdaptor
     from mininterface.exceptions import InterfaceNotAvailable
     from mininterface.interfaces import get_interface
     from mininterface.settings import MininterfaceSettings, TextSettings
-    from mininterface.tag.secret_tag import SecretTag
-
-    class MaskedTextAdaptor(TextAdaptor):
-        def widgetize(self, tag, only_label=False):
-            if isinstance(tag, SecretTag):
-                if only_label:
-                    return tag._get_masked_val()
-                try:
-                    return getpass.getpass(f"{tag.label}: ")
-                except (EOFError, KeyboardInterrupt):
-                    # TextAdaptor catches KeyboardInterrupt at the leaf and
-                    # returns to its enclosing menu without losing saved edits.
-                    raise KeyboardInterrupt from None
-            return super().widgetize(tag, only_label=only_label)
 
     text_settings = TextSettings(plain_menu=plain_menu)
     interface = get_interface("text", settings=MininterfaceSettings(text=text_settings))
@@ -667,7 +494,6 @@ def _text_interface(plain_menu: bool):
     # there is no controlling terminal, even with an explicit "text" request.
     if not isinstance(interface, TextInterface):
         raise InterfaceNotAvailable("configure needs a controlling terminal")
-    interface._adaptor = MaskedTextAdaptor(interface, text_settings)
     return interface
 
 
@@ -676,11 +502,10 @@ def _run_menu(
     root: Path | None,
     gcfg: GlobalConfig,
     pcfg: ProjectConfig,
-    scfg: SecretsConfig,
     *,
     legacy: bool = False,
     plain_menu: bool = False,
-) -> tuple[bool, bool, bool]:
+) -> tuple[bool, bool]:
     """Run one immediate-save menu session and return accumulated write flags."""
     import codecs
     import errno
@@ -721,7 +546,7 @@ def _run_menu(
         def __getattr__(self, name):
             return getattr(self.wrapped, name)
 
-    session = _compose_menu(ctx, root, gcfg, pcfg, scfg, legacy=legacy)
+    session = _compose_menu(ctx, root, gcfg, pcfg, legacy=legacy)
     try:
         session.interface = _text_interface(plain_menu)
         original_stdin = sys.stdin
@@ -736,6 +561,13 @@ def _run_menu(
         ) from None
     except TerminalDisconnected:
         raise Refusal("interactive configure lost its terminal") from None
+    except OSError as exc:
+        # mininterface 1.4's input_timeout restores termios in a `finally`; on Linux
+        # that raises EIO once the terminal is gone, masking TerminalDisconnected, and
+        # its fallback `input()` then fails with EIO too. Only EIO is terminal loss.
+        if exc.errno == errno.EIO:
+            raise Refusal("interactive configure lost its terminal") from None
+        raise
     except AssertionError as exc:
         # simple_term_menu 1.6 can mask an EIO from its terminal with an
         # assertion in _clear_menu during cleanup. Match that exact cleanup
@@ -757,10 +589,10 @@ def _run_menu(
     # First exit must establish usable defaults. Project config is seeded
     # independently, even when a prior edit only touched a personal file.
     if not store.global_config_path(ctx.home).exists():
-        flags = _apply_settings(ctx, root, gcfg, pcfg, scfg, [], defaults=True, legacy=legacy)
+        flags = _apply_settings(ctx, root, gcfg, pcfg, [], defaults=True, legacy=legacy)
         session.flags = tuple(a or b for a, b in zip(session.flags, flags, strict=True))
     elif root is not None and not store.project_config_path(root).exists():
         store.save_project(root, pcfg)
         print(f"Updated {store.project_config_path(root)}")
-        session.flags = (session.flags[0], True, session.flags[2])
+        session.flags = (session.flags[0], True)
     return session.flags

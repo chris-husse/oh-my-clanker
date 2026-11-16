@@ -13,6 +13,8 @@ from omc.fish_integration import fish_hook_path
 from omc.herdr import osc7_report
 from omc.shells.fish import FishShell
 
+from ._stubs import host_bin
+
 
 @pytest.fixture
 def fish_session(tmp_path):
@@ -191,6 +193,7 @@ def test_generated_start_in_iterm2_dispatches_exactly_one_set_despite_double_sou
     stubs = tmp_path / "stubs"
     stubs.mkdir()
     (stubs / "git").symlink_to(shutil.which("git"))
+    (stubs / "mkdir").symlink_to(host_bin("mkdir"))  # the hook runs `command mkdir`
     (stubs / "omc").write_text(
         '#!/bin/sh\nprintf \'PATH-OMC %s\\n\' "$*" >> "$OMC_TITLE_LOG"\nexit 0\n'
     )
@@ -201,10 +204,10 @@ def test_generated_start_in_iterm2_dispatches_exactly_one_set_despite_double_sou
     wait = (
         "set -l t 0; while test $t -lt 200; "
         "and test (count (string match -r '^request:' <$OMC_TITLE_LOG)) -lt 1; "
-        "set t (math $t + 1); /bin/sleep 0.05; end"
+        f"set t (math $t + 1); {host_bin('sleep')} 0.05; end"
     )
     proc, lines = run(
-        f"emit fish_prompt; emit fish_prompt; {wait}; /bin/sleep 0.2",
+        f"emit fish_prompt; emit fish_prompt; {wait}; {host_bin('sleep')} 0.2",
         env_extra={
             "ITERM_SESSION_ID": "w0t1p0:38B11221-B7E1-4F36-8A3B-50D549172632",
             "TERM_PROGRAM": "iTerm.app",

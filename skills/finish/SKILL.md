@@ -40,15 +40,14 @@ often leaving the commit still reading `wip: squash of…`.
 `git fetch origin <base>`, then count `git rev-list --count origin/<base>..HEAD`.
 Zero commits and a clean tree → "nothing to finish on this branch", stop.
 
-## Step 2 — squash and rebase onto the fresh base + refresh the snapshot
+## Step 2 — squash and rebase onto the fresh base
 
 Invoke the **`rebase-main`** skill **with `--squash`** (`omc internal
 rebase-main --squash`) — it folds uncommitted changes (with notice),
 squashes the branch to one `wip:` commit over
-`merge-base origin/<base> HEAD`, rebases that single commit onto
-`origin/<base>`, and re-mirrors `.omc/docs` from the primary checkout
-(in the primary checkout itself — a plain clone — it squashes and rebases
-the same way and mirrors nothing). Only one commit is replayed, so a
+`merge-base origin/<base> HEAD`, and rebases that single commit onto
+`origin/<base>` (in the primary checkout itself — a plain clone — it
+squashes and rebases the same way). Only one commit is replayed, so a
 conflict with the base stops the rebase at most once — and this session
 resolves that stop itself (rc 3 below). The `.gitnexus/` graph stays
 primary for `/omc:explain` queries.

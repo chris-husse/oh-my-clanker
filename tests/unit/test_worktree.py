@@ -9,7 +9,7 @@ from omc.errors import OmcError
 from omc.toolctx import ToolContext
 from omc.worktree import create_worktree, sync_base
 
-from ._stubs import stub_env
+from ._stubs import host_bin, stub_env
 
 
 def make_recording_stub(bindir, name, *, stdout="", rc=0, rc_first=None):
@@ -18,7 +18,7 @@ def make_recording_stub(bindir, name, *, stdout="", rc=0, rc_first=None):
     calls = bindir / f"{name}.calls"
     script = f"""#!/bin/sh
 echo "$@" >> "{calls}"
-count=$(/usr/bin/wc -l < "{calls}")
+count=$({shlex.quote(host_bin("wc"))} -l < "{calls}")
 if [ -n "{rc_first if rc_first is not None else ""}" ] && [ "$count" -eq 1 ]; then
   exit {rc_first if rc_first is not None else 0}
 fi
@@ -113,13 +113,14 @@ exit 99
 def make_worktree_wt_stub(bindir, *, stdout="", stderr="", rc=0):
     calls = bindir / "wt.calls"
     marker = bindir / "wt.invoked"
+    cat = shlex.quote(host_bin("cat"))
     script = f"""#!/bin/sh
 printf '%s\\n' "$*" >> {shlex.quote(str(calls))}
 : > {shlex.quote(str(marker))}
-/bin/cat <<'OMC_WT_STDOUT'
+{cat} <<'OMC_WT_STDOUT'
 {stdout}
 OMC_WT_STDOUT
-/bin/cat >&2 <<'OMC_WT_STDERR'
+{cat} >&2 <<'OMC_WT_STDERR'
 {stderr}
 OMC_WT_STDERR
 exit {rc}

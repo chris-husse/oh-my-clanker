@@ -22,48 +22,52 @@ def _ctx(tmp_path):
     return ToolContext(home=home, env=env), calls
 
 
-def _seed_manifest(home, *, indexed=True, documented=False):
+def _seed_manifest(home, *, indexed=True, documented=None):
+    """One manifest entry as ensure writes it. ``documented`` (with its ``docs``
+    sibling) is only for the old manifest shape written before documentation
+    was removed."""
     from omc.dependency import load_manifest, save_manifest
 
+    entry = {
+        "checkout": str(home / "dependencies" / "github.com" / "foo" / "bar" / H),
+        "indexed": indexed,
+        "created": "2026-07-22T00:00:00+00:00",
+    }
+    if documented is not None:
+        entry["docs"] = str(home / "gitnexus" / "github.com" / "foo" / "bar" / H / "docs")
+        entry["documented"] = documented
     m = load_manifest(home)
     m["dependencies"]["github.com/foo/bar"] = {
         "url": "https://github.com/foo/bar.git",
-        "commits": {
-            H: {
-                "checkout": str(home / "dependencies" / "github.com" / "foo" / "bar" / H),
-                "docs": str(home / "gitnexus" / "github.com" / "foo" / "bar" / H / "docs"),
-                "indexed": indexed,
-                "documented": documented,
-                "created": "2026-07-22T00:00:00+00:00",
-            }
-        },
+        "commits": {H: entry},
     }
     save_manifest(home, m)
 
 
-def test_tick_documents_undocumented(tmp_path):
+def test_indexed_entry_is_done_even_without_documented(tmp_path):
+    # An old manifest entry that was indexed but never documented needs no work:
+    # a commit is done once it is indexed.
     ctx, calls = _ctx(tmp_path)
     _seed_manifest(ctx.home, indexed=True, documented=False)
     assert run_dependency_watch(ctx, once=True) == 0
-    assert f"internal dependency document --git github.com/foo/bar@{H}" in calls.read_text()
+    assert not calls.exists()
 
 
 def test_tick_ensures_unindexed(tmp_path):
     ctx, calls = _ctx(tmp_path)
-    _seed_manifest(ctx.home, indexed=False, documented=False)
+    _seed_manifest(ctx.home, indexed=False)
     assert run_dependency_watch(ctx, once=True) == 0
     logged = calls.read_text()
     assert f"internal dependency ensure --git https://github.com/foo/bar.git --commit {H}" in logged
     # The stub never flips `indexed`, so the drain's re-scan sees the same
-    # unindexed entry, skips it (already attempted this pass) and never
-    # reaches document — and the pass must not spin on the retry either.
-    assert "document" not in logged
+    # unindexed entry and skips it (already attempted this pass): the pass
+    # must not spin on the retry.
     assert logged.count("internal dependency ensure") == 1
 
 
 def test_tick_quiet_when_reconciled(tmp_path):
     ctx, calls = _ctx(tmp_path)
-    _seed_manifest(ctx.home, indexed=True, documented=True)
+    _seed_manifest(ctx.home, indexed=True)
     assert run_dependency_watch(ctx, once=True) == 0
     assert not calls.exists()  # zero subprocess work
 
@@ -128,7 +132,7 @@ def test_tick_survives_missing_omc_binary(tmp_path):
     # omc absent from PATH must warn-and-continue, never crash the loop
     # The watch loop must warn and skip, never crash.
     ctx, calls = _ctx(tmp_path)
-    _seed_manifest(ctx.home, indexed=True, documented=False)  # triggers a document spawn
+    _seed_manifest(ctx.home, indexed=False)  # triggers an ensure spawn
     (tmp_path / "bin" / "omc").unlink()  # remove the stub
     # Restrict PATH to the now-omc-less bindir so no real omc is discovered either.
     ctx = ToolContext(home=ctx.home, env={**ctx.env, "PATH": str(tmp_path / "bin")})
@@ -156,7 +160,6 @@ def test_tick_skips_manifest_entry_without_url(tmp_path):
             H: {
                 "checkout": str(ctx.home / "dependencies" / "github.com" / "foo" / "bar" / H),
                 "indexed": False,
-                "documented": False,
                 "created": "2026-07-22T00:00:00+00:00",
             }
         }
@@ -193,8 +196,8 @@ def test_tick_survives_oserror_during_scan(tmp_path):
 
 def _stateful_ctx(tmp_path):
     """ToolContext whose `omc` stub actually mutates the manifest the way the
-    real internal subcommands would: ensure -> indexed:true, document ->
-    documented:true. Proves the drain reaches completion in ONE pass."""
+    real internal ensure would (indexed:true). Proves the drain reaches
+    completion in ONE pass."""
     import shutil
 
     bindir = tmp_path / "bin"
@@ -207,10 +210,9 @@ def _stateful_ctx(tmp_path):
         "import json,sys\n"
         f"p = {str(home / 'dependencies.json')!r}\n"
         "d = json.load(open(p))\n"
-        "field = sys.argv[1]\n"
         "for dep in d['dependencies'].values():\n"
         "    for entry in dep['commits'].values():\n"
-        "        entry[field] = True\n"
+        "        entry['indexed'] = True\n"
         "json.dump(d, open(p, 'w'))\n"
     )
     script = bindir / "flip.py"
@@ -220,8 +222,7 @@ def _stateful_ctx(tmp_path):
         "#!/bin/sh\n"
         f'echo "$@" >> "{calls}"\n'
         'case "$3" in\n'
-        f'  ensure) "{python}" "{script}" indexed ;;\n'
-        f'  document) "{python}" "{script}" documented ;;\n'
+        f'  ensure) "{python}" "{script}" ;;\n'
         "esac\nexit 0\n"
     )
     omc.chmod(omc.stat().st_mode | stat.S_IXUSR)
@@ -231,40 +232,39 @@ def _stateful_ctx(tmp_path):
 
 def test_once_pass_drains_to_completion_and_announces(tmp_path, capsys):
     ctx, calls = _stateful_ctx(tmp_path)
-    _seed_manifest(ctx.home, indexed=False, documented=False)
+    _seed_manifest(ctx.home, indexed=False)
     assert run_dependency_watch(ctx, once=True) == 0
     logged = calls.read_text()
-    # one pass covers BOTH steps: ensure, then (fresh manifest) document
     assert f"internal dependency ensure --git https://github.com/foo/bar.git --commit {H}" in logged
-    assert f"internal dependency document --git github.com/foo/bar@{H}" in logged
+    assert "document" not in logged  # indexing is the only step
     err = capsys.readouterr().err
-    assert "Finished documenting all dependencies!" in err
-    assert "(1 dependency, 1 commit)" in err
+    assert "✓ Finished indexing all dependencies! (1 dependency, 1 commit)" in err
 
 
 def test_once_pass_reports_pending_not_finished_on_failure(tmp_path, capsys):
-    # The no-op stub never flips `documented`, so the pass ends with work
+    # The no-op stub never flips `indexed`, so the pass ends with work
     # remaining: say so plainly, never claim completion, and don't spin.
     ctx, calls = _ctx(tmp_path)
-    _seed_manifest(ctx.home, indexed=True, documented=False)
+    _seed_manifest(ctx.home, indexed=False)
     assert run_dependency_watch(ctx, once=True) == 0
-    assert calls.read_text().count("internal dependency document") == 1
+    assert calls.read_text().count("internal dependency ensure") == 1
     err = capsys.readouterr().err
-    assert "still pending" in err
-    assert "Finished documenting" not in err
+    assert "still pending" in err and "Finished indexing" not in err
 
 
 def test_dependency_list_prints_status_table(tmp_path, capsys):
     from omc.depwatch import run_dependency_list
 
     ctx, _ = _ctx(tmp_path)
-    _seed_manifest(ctx.home, indexed=True, documented=False)
+    _seed_manifest(ctx.home, indexed=True)
     assert run_dependency_list(ctx.home) == 0
     out = capsys.readouterr().out
-    assert "DEPENDENCY" in out and "COMMIT" in out  # header
+    header = out.splitlines()[0].split()
+    assert header == ["DEPENDENCY", "COMMIT", "REF", "INDEXED", "CREATED"]
+    assert "DOCUMENTED" not in out
     assert "github.com/foo/bar" in out
     assert H[:7] in out
-    assert "✓" in out and "✗" in out  # indexed yes, documented no
+    assert "✓" in out  # indexed
 
 
 def test_dependency_list_empty_manifest_is_friendly(tmp_path, capsys):
@@ -297,42 +297,10 @@ def test_cli_bare_dependency_is_usage_error(tmp_path, monkeypatch, capsys):
     assert main(["dependency"]) == 2
 
 
-def test_document_job_logs_output_and_parses_progress(tmp_path, capsys):
-    ctx, calls = _ctx(tmp_path)
-    omc = tmp_path / "bin" / "omc"
-    omc.write_text(
-        f'#!/bin/sh\necho "$@" >> "{calls}"\n'
-        "echo 'OMC_PROGRESS {\"percent\": 42}'\n"
-        "echo NARRATION >&2\n"
-        "echo 'OMC_PROGRESS not-json'\n"  # malformed: must be ignored, not crash
-        "exit 0\n"
-    )
-    _seed_manifest(ctx.home, indexed=True, documented=False)
-    assert run_dependency_watch(ctx, once=True) == 0
-    err = capsys.readouterr().err
-    assert "✓ done github.com/foo/bar@" in err
-    assert "log: " in err
-    log_path = err.split("log: ", 1)[1].split()[0].rstrip(")")
-    logged = open(log_path).read()
-    assert 'OMC_PROGRESS {"percent": 42}' in logged and "NARRATION" in logged
-    assert "\x1b[" not in err  # non-TTY: no ANSI bar bytes
-
-
-def test_document_job_failure_names_exit_and_log(tmp_path, capsys):
-    ctx, calls = _ctx(tmp_path)
-    omc = tmp_path / "bin" / "omc"
-    omc.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\nexit 3\n')
-    _seed_manifest(ctx.home, indexed=True, documented=False)
-    assert run_dependency_watch(ctx, once=True) == 0
-    err = capsys.readouterr().err
-    assert "✗ failed (exit 3) github.com/foo/bar@" in err
-    assert "log: " in err
-
-
 def test_failed_adoption_never_claims_finished(tmp_path, capsys):
     # The no-op stub's ensure leaves the manifest empty, so the pass's only
     # "action" produced nothing adopted — the announcement must say pending,
-    # not "Finished documenting all dependencies! (0 dependencies, …)".
+    # not "Finished indexing all dependencies! (0 dependencies, …)".
     ctx, calls = _ctx(tmp_path)
     dest = ctx.home / "dependencies" / "github.com" / "baz" / "qux" / H
     dest.mkdir(parents=True)
@@ -344,57 +312,4 @@ def test_failed_adoption_never_claims_finished(tmp_path, capsys):
     assert run_dependency_watch(ctx, once=True) == 0
     err = capsys.readouterr().err
     assert "still pending" in err
-    assert "Finished documenting" not in err
-
-
-def test_documents_missing_dependencies_in_parallel(tmp_path, capsys):
-    # Choreography that only completes when documents run CONCURRENTLY: the
-    # sorted-FIRST dep's document stub blocks until a marker that only the
-    # sorted-LAST dep's stub creates. Sequential execution (aaa first) could
-    # never create the marker and would exit 1 -> a ✗ line.
-    from omc.dependency import load_manifest, save_manifest
-
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    calls = bindir / "omc.calls"
-    marker = bindir / "ccc.marker"
-    omc = bindir / "omc"
-    omc.write_text(
-        "#!/bin/sh\n"
-        f'echo "$@" >> "{calls}"\n'
-        'case "$@" in\n'
-        f'  *aaa*) i=0; while [ ! -f "{marker}" ]; do sleep 0.1; i=$((i+1)); '
-        "[ $i -gt 100 ] && exit 1; done ;;\n"
-        f'  *ccc*) touch "{marker}" ;;\n'
-        "esac\nexit 0\n"
-    )
-    omc.chmod(omc.stat().st_mode | stat.S_IXUSR)
-    home = tmp_path / "omc-home"
-    home.mkdir()
-    m = load_manifest(home)
-    for name in ("aaa", "bbb", "ccc"):
-        m["dependencies"][f"github.com/{name}/{name}"] = {
-            "url": f"https://github.com/{name}/{name}.git",
-            "commits": {
-                H: {
-                    "checkout": str(home / "dependencies" / "github.com" / name / name / H),
-                    "docs": str(home / "gitnexus" / "github.com" / name / name / H / "docs"),
-                    "indexed": True,
-                    "documented": False,
-                    "created": "2026-07-23T00:00:00+00:00",
-                }
-            },
-        }
-    save_manifest(home, m)
-    env = {"HOME": str(tmp_path), "PATH": f"{bindir}:{os.environ['PATH']}"}
-    ctx = ToolContext(home=home, env=env)
-    assert run_dependency_watch(ctx, once=True) == 0
-    logged = calls.read_text()
-    for name in ("aaa", "bbb", "ccc"):
-        assert f"internal dependency document --git github.com/{name}/{name}@{H}" in logged
-    err = capsys.readouterr().err
-    # aaa's wait was satisfied -> concurrency happened (a sequential run would
-    # time aaa out -> exit 1 -> a "✗ failed" line). The pending-summary line's
-    # "see ✗ lines above" glyph is expected: the stub never flips the manifest.
-    assert "✗ failed" not in err
-    assert "documenting 3 dependencies" in err
+    assert "Finished indexing" not in err

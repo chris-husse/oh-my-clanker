@@ -19,6 +19,8 @@ import pytest
 
 from tests.e2e import stages
 
+from ._stubs import host_bin
+
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -116,7 +118,7 @@ exit 0
     env.pop("OMC_E2E_NO_DOCKER", None)
 
     result = subprocess.run(
-        ["/bin/bash", str(REPO / "scripts" / "e2e.sh"), "golden"],
+        [host_bin("bash"), str(REPO / "scripts" / "e2e.sh"), "golden"],
         cwd=REPO,
         env=env,
         capture_output=True,
@@ -246,7 +248,7 @@ exit 0
         env["OMC_E2E_NO_DOCKER"] = "1"
     else:
         env.pop("OMC_E2E_NO_DOCKER", None)
-    argv = ["/bin/bash", str(REPO / "scripts" / "e2e.sh"), mode, *extra_args]
+    argv = [host_bin("bash"), str(REPO / "scripts" / "e2e.sh"), mode, *extra_args]
     if collect_only:
         argv.append("--collect-only")
     result = subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True)

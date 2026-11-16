@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from ._fishpty import drive_fish
+from ._stubs import host_bin
 
 ROOT = Path(__file__).resolve().parents[2]
 SESSION = "w0t1p0:38B11221-B7E1-4F36-8A3B-50D549172632"
@@ -53,6 +54,8 @@ def _base_env():
     """
     uv = _tool("uv", "curl -LsSf https://astral.sh/uv/install.sh | sh")
     keep = ("PATH", "TMPDIR", "LANG", "TERM", "USER", "LOGNAME", "UV_PYTHON")
+    # tests/conftest.py HOST_SHELL_MARKERS: keep the host's shell config out of fish.
+    keep += tuple(name for name in os.environ if name.startswith(("__NIXOS_", "__fish_nixos_")))
     env = {name: os.environ[name] for name in keep if name in os.environ}
     env["UV_CACHE_DIR"] = os.environ.get("UV_CACHE_DIR") or _host_uv_dir(uv, ["cache", "dir"])
     env["UV_PYTHON_INSTALL_DIR"] = os.environ.get("UV_PYTHON_INSTALL_DIR") or _host_uv_dir(
@@ -151,19 +154,20 @@ def test_ordinary_fish_prompt_loads_the_installed_hook(installed, tmp_path):
     (stubs / "omc").write_text(STUB_OMC)
     (stubs / "omc").chmod(0o755)
     (stubs / "git").symlink_to(git)
+    (stubs / "mkdir").symlink_to(host_bin("mkdir"))  # the hook runs `command mkdir`
     config = Path(installed.env["XDG_CONFIG_HOME"]) / "fish" / "config.fish"
     config.write_text(
         "set -g fish_greeting\n"
         'function fish_prompt; echo P >> "$OMC_PROMPT_LOG"; printf "READY> "; end\n'
         # The disowned helper dies with the PTY: stay at the prompt until it logged. Builtins
-        # only (PATH holds just the stubs), plus the absolute /bin/sleep.
+        # only (PATH holds just the stubs), plus the real sleep by resolved absolute path.
         "function wait_for_request\n"
         "    set -l tries 0\n"
         "    while test $tries -lt 200\n"
         '        test -e "$OMC_TEST_LOG"; and string match -q "request: *" <"$OMC_TEST_LOG"\n'
         "        and return 0\n"
         "        set tries (math $tries + 1)\n"
-        "        /bin/sleep 0.05\n"
+        f"        {host_bin('sleep')} 0.05\n"
         "    end\n"
         "end\n"
     )

@@ -13,10 +13,6 @@ class Provider(ABC):
     name: str
 
     @abstractmethod
-    def models(self) -> list[str]:
-        """Known model ids for the config picker; [] means free-text entry."""
-
-    @abstractmethod
     def families(self) -> list[str]:
         """Model families available as task choices."""
 
@@ -96,25 +92,19 @@ class Provider(ABC):
     def install_hint(self) -> str:
         """One-line install command for this provider's CLI."""
 
-    def docs_model_default(self) -> str:
-        """Model for documentation/wiki runs when docs_model is unconfigured.
-
-        The standard-coding-tier floor. "" = pass no model flag and let the
-        provider CLI use its own default coding model (codex ids are
-        free-text and move fast — pinning one here would rot)."""
-        return ""
-
     def api_base_url(self) -> str:
-        """HTTP API base URL for the `api` documentation backend, WITH a trailing
-        slash. "" = this provider has no API backend: configure refuses
-        `llm.docs.backend=api` for it (spec 2026-10-01 §2.1/§5)."""
+        """HTTP API base URL, WITH a trailing slash, for the model listing that
+        `taskmodels._api_catalog` reads under API-key auth (`ANTHROPIC_API_KEY`)
+        and OAuth-token auth (`CLAUDE_CODE_OAUTH_TOKEN`): the CLI writes no local
+        catalog then. "" = this provider has no HTTP model listing."""
         return ""
 
     def api_model_family(self, alias: str) -> str:
         """Model-id prefix for a CLI family alias ("sonnet" -> "claude-sonnet-").
-        "" = not a family alias, treat the value as a full model id. Full ids are
-        resolved from the provider's LIVE model list at configure time — there is
-        deliberately no static alias→id table anywhere, so nothing rots."""
+        "" = not a family alias, treat the value as a full model id. Used to tag
+        the ids of the LIVE HTTP model listing (`taskmodels._api_catalog`) with
+        their family — there is deliberately no static alias→id table anywhere,
+        so nothing rots."""
         return ""
 
     def auth_status_argv(self) -> list[str]:

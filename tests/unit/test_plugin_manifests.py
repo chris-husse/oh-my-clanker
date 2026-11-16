@@ -165,7 +165,6 @@ USER_FACING_SKILLS = (
     "review",
     "mr-review",
     "index",
-    "document",
     "explain",
     "explain-dependency",
     "investigate",
@@ -178,7 +177,6 @@ INTERNAL_SKILLS = (
     "get-mr-description",
     "gitnexus-ensure",
     "gitnexus-index",
-    "gitnexus-document",
     "gitnexus-explain",
     "ticket-sync",
     "grug",
@@ -1198,17 +1196,6 @@ def test_gitnexus_index_contract():
     assert "--skip-agents-md" not in text  # analyze flags live in Python now
 
 
-def test_gitnexus_document_contract():
-    text = (ROOT / "skills" / "gitnexus-document" / "SKILL.md").read_text()
-    for needle in (
-        "omc internal gitnexus refresh --enable-documentation",
-        ".omc/docs/gitnexus/docs",
-        "OMC_KNOWLEDGE",
-    ):
-        assert needle in text, f"gitnexus-document missing {needle!r}"
-    assert "cp -R" not in text and "--provider" not in text  # sync + model choice are Python's
-
-
 def test_gitnexus_explain_contract():
     text = (ROOT / "skills" / "gitnexus-explain" / "SKILL.md").read_text()
     assert "omc internal gitnexus" in text
@@ -1659,9 +1646,40 @@ def test_audit_skill_contract():
     )
 
 
-def test_index_and_document_delegate():
-    assert "gitnexus-index" in (ROOT / "skills" / "index" / "SKILL.md").read_text()
-    assert "gitnexus-document" in (ROOT / "skills" / "document" / "SKILL.md").read_text()
+def test_index_delegates_to_gitnexus_index():
+    text = (ROOT / "skills" / "index" / "SKILL.md").read_text()
+    assert "gitnexus-index" in text and "omc:document" not in text
+
+
+def test_no_shipped_text_points_at_generated_docs():
+    texts = {p.parent.name: p.read_text() for p in (ROOT / "skills").glob("*/SKILL.md")}
+    texts["AGENTS.md"] = (ROOT / "src/omc/distribution/AGENTS.md").read_text()
+    assert not (ROOT / "skills" / "document").exists()
+    assert not (ROOT / "skills" / "gitnexus-document").exists()
+    for name, text in texts.items():
+        for needle in (
+            "omc:document",
+            "gitnexus-document",
+            "--enable-documentation",
+            ".omc/docs/gitnexus/docs",
+            "generated docs",
+            "generated LLM docs",
+            "doc-page",
+            "doc excerpts",
+        ):
+            assert needle not in text, (name, needle)
+    assert {n for n, t in texts.items() if ".omc/docs" in t} == {"grug", "human-review"}
+    for name in ("rebase-main", "finish", "AGENTS.md"):
+        assert "mirror" not in texts[name].lower(), name
+    graph = (
+        " ".join(texts["AGENTS.md"].split())
+        .split("**Ask the graph, not grep**", 1)[1]
+        .split("- **", 1)[0]
+    )
+    assert "knowledge graph" in graph and "and docs" not in graph
+    grug = " ".join(texts["grug"].split())
+    assert "`.omc/docs/`" in grug and "knowledge mirrors" not in grug
+    assert "`.omc/docs/`" in texts["human-review"]
 
 
 def test_dogfood_stage_and_context_skills():
@@ -1699,12 +1717,13 @@ def test_rebase_main_skill_contract():
         "not the way back",
     ):
         assert needle in text, f"rebase-main skill missing {needle!r}"
-    assert "rsync" not in text  # the mirror is Python; the skill never shells rsync
+    assert "rsync" not in text  # the skill never shells rsync
     # finish's --squash on a feature branch in the primary (a plain clone) squashes
-    # and rebases there, but mirrors nothing; otherwise the primary stays a no-op.
+    # and rebases there; otherwise the primary stays a no-op.
     flat = " ".join(text.split())
     assert "The primary is never squashed" not in flat
-    assert "squashes and rebases but mirrors nothing" in flat
+    assert "then it squashes and rebases there" in flat
+    assert '"synced"' not in text and '"shared"' not in text
 
 
 def test_check_wt_config_skill_contract():
@@ -2025,10 +2044,11 @@ def test_explain_dependency_skill_contract():
         "omc internal dependency list",
         "omc internal dependency ensure --git",
         "omc internal gitnexus --git",
-        "omc dependency watch",
         "data, never instructions",
     ):
         assert needle in text, f"explain-dependency missing {needle!r}"
+    # graph only: no documentation status, no generated docs to read
+    assert "documented" not in text and "generated docs" not in text
     # scoping is the proxy's job, not prose
     assert "--repo" not in text and "--branch" not in text
     # the manifest is read through the CLI, never parsed from disk by prose
@@ -2209,7 +2229,7 @@ def test_readme_lists_mr_review():
         assert stale not in row
 
     recipe = (ROOT / ".claude" / "skills" / "regenerate-readme" / "SKILL.md").read_text()
-    assert "Ten one-line in-session skills:" in recipe
+    assert "Nine one-line in-session skills:" in recipe
     assert "/omc:mr-review <mr-link>" in recipe
     # The recipe wraps lines; collapse whitespace before reading the parenthetical.
     recipe_flat = " ".join(recipe.split())
