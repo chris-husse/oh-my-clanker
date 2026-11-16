@@ -1,6 +1,6 @@
 ---
 name: finish
-description: Finish the current feature branch - squash to one commit, rebase onto the base, run the project's check/build/verify/review stages and a final verify, describe the commit as the MR and push, then offer to close the worktree, address review comments, or discuss. Use when work on a ticket is done and ready for review.
+description: Finish the current feature branch - squash to one commit, rebase onto the base, run the project's build and check stages (skipped on a tree the last green verify saw), pass the MR gate (a review only when the tree changed and `needs_review` asks; a verify whenever the tree changed since the last green verify, unless `needs_verify` says no), describe the commit as the MR and push, then offer to close the worktree, address review comments, or discuss. Use when work on a ticket is done and ready for review.
 ---
 
 # omc finish
@@ -11,12 +11,12 @@ but any feature branch works.
 ## Step 0 — externalize the flow (before the gate, no exceptions)
 
 **Write every step below into the task list now**, as your first action:
-gate → anything-to-finish → rebase-main --squash → check → build →
-pre-review verify → review → final verify (skipped when the tree is unchanged)
-→ create-mr (describe + push) → ticket-sync (review phase) → offer follow-ups.
-Mark each completed as you pass it.
+gate → anything-to-finish → rebase-main --squash → build → check (skipped
+on a verified tree) → create-mr (MR gate, describe, push) → ticket-sync
+(review phase) → offer follow-ups. Mark each completed as you pass it.
 
-This is the longest composed flow in omc: eight sub-skills, each arriving as a
+This is the longest composed flow in omc: nine sub-skills, several nested
+inside create-mr's MR gate, each arriving as a
 fresh instruction block that reads like a new user request and pushes this one
 out of view. Every one of them ends in a verdict line or an artifact, and every
 one of those is an argument to the next step — never a place to stop. The task
@@ -74,71 +74,81 @@ primary for `/omc:explain` queries.
   e.g. a rebase still paused there after an rc 3 bail; finish the rebase
   first).
 
-## Step 3 — project stages: check → build → verify → review → final verify
+## Step 3 — build → check (skipped on a verified tree)
 
-Invoke the **`check`**, **`build`**, **`verify`**, and **`review`** skills,
-in that order, then **`verify`** once more: `check` → `build` → `verify` →
-`review` → final `verify`. Check comes first, as the cheap fail-fast gate: a
-broken unit test dies in seconds, not after a world-build. The first verify
-run is the **pre-review verify**; the second is the **final verify**, the
-last stage before the push. This step is the only place an agent starts
-`verify`. Each stage is a proxy for the project's own
-`.omc/skills/<stage>/SKILL.md`:
+Run `omc internal gate verify` and read its single `OMC_GATE {…}` line.
+`"reason": "unchanged"` means this exact tree was built, checked and verified
+(audit's fixed verify, or an earlier MR gate, saw it): skip both stages and
+say "build and check skipped — tree unchanged since the last green verify".
+Any other reason → invoke the **`build`** skill, then the **`check`** skill:
+`build` → `check`. Read only `reason` here; the verify question itself is
+`create-mr`'s. A question that prints no `OMC_GATE` line decided nothing:
+report the error and stop; nothing is pushed. Each stage is a proxy for the
+project's own `.omc/skills/<stage>/SKILL.md`.
 
-- **Announce each verify run.** Before each verify run, say on its own line
-  that the project's `verify` stage is starting and which of the two runs it
-  is (pre-review verify or final verify) — it can run for minutes, and a
-  silent minute is a bug.
-- **Restore tool drift after each stage run** (check, build and verify alike,
-  targeted reruns included), before anything is amended: restore only known
-  tool drift, such as a lockfile changed by `uv run` or `uv build`; never
-  discard unknown work. Amended drift would land in the published commit and
-  change the tree verify just passed, and `create-mr` needs a clean working
-  tree.
-- **Record the verified tree.** Each time a full verify passes — the
-  pre-review verify, the final verify, or a full run inside a repair loop —
-  record `git rev-parse HEAD^{tree}` at once, before anything is amended, in
-  the task list entry for the final verify. No file is written; the task list
-  carries the value through this flow.
-- **Skip rule for the final verify.** After `review` and its amend, compare
-  `git rev-parse HEAD^{tree}` with the recorded value. Equal → skip the final
-  verify and report "final verify skipped — tree unchanged since verify
-  passed". Different → run the final verify. Any change counts: a review that
-  only wrote a waiver into the design record changes the tree, so the final
-  verify runs; what a documentation-only change needs is the project's
-  `verify` skill's call.
-- A stage that FAILED (`"passed": false`, regardless of `"configured"`, or no
-  verdict) → follow the behavior layer's **stage-gate rule — bounded
-  fix-forward, then a CRITICAL stop**. Each fix is amended into the squashed
-  commit (`git add -u && git commit --amend --no-edit`), as stage-made
-  tracked changes are, before its reruns — so the tree a passing verify
-  records is the tree it actually tested. A red `check`, `build` or `review`
-  falls under the rule's general clause: after the fix and `/omc:check`, the
-  sequence restarts from `build` and passes through the pre-review verify,
-  `review` and the final verify (with its skip rule) again. A red verify —
-  pre-review or final — is repaired by the rule's verify clause, which
-  reruns nothing before verify: a repaired pre-review verify continues with
-  `review`, and final-verify fixes are amended and pushed without another
-  `review`. At the bound, ask the rule's one CRITICAL question: the branch
-  stays squashed and nothing is pushed. The user's answer resumes the
-  remaining steps.
+**Stage-running rules.** They hold for every stage run in this flow, the MR
+gate's included; audit and `create-mr` cite them as finish's stage-running
+rules.
+
+- **Restore tool drift after each stage run** (build, check, review and
+  verify alike, targeted reruns included), before anything is amended:
+  restore only known tool drift, such as a lockfile changed by `uv run` or
+  `uv build`; never discard unknown work. Amended drift would land in the
+  published commit and change the tree a verify just passed, and `create-mr`
+  needs a clean working tree.
+- **Amend fixes before their reruns.** Each fix is amended into the squashed
+  commit before its reruns, as stage-made tracked changes are: files a fix
+  created are staged by path (`git add <new paths>`), then
+  `git add -u && git commit --amend --no-edit` — so the tree a passing
+  verify records is the tree it actually tested, and the tree pushed holds
+  every file the review and verify judged. A fix worker names the files it
+  created.
 - A stage that changed TRACKED files (formatters, autofixes,
-  behavior-preserving fixes from grug and human-review, or their waivers
+  behavior-preserving fixes from grug and human-review, or their waivers,
+  conformance fixes, record amendments and the implementation-review trace
   written into the design record)
   → amend those changes into the squashed commit (`git add -u && git commit
   --amend --no-edit`) — only what remains once known tool drift is
-  restored; leave untracked artifacts alone.
+  restored. Files those fixes created (a new test from a conformance fix,
+  say) are staged by path first, as above; leave the untracked artifacts a
+  stage itself leaves behind (reports, caches, build output) alone.
+- **A review that changed the tree.** Wherever a review runs (audit's
+  fixed review, the MR gate's review question), note
+  `git rev-parse HEAD^{tree}` before each review run. When the tree after
+  the passing review's amend differs from the one noted before that review,
+  the review's fixes changed the tree that was built and checked (its lens
+  fixes ran a check, never a build): invoke the **`build`** skill, then the
+  **`check`** skill, on the amended commit before the verify, so the tree a
+  verify records was built and checked as it stands. A red build or check
+  there falls under the stage-gate rule's general clause on the run's
+  budget, then the verify follows; the flow never returns to review. An
+  unchanged tree goes straight to the verify.
 - Unconfigured (`"configured": false`) → the project half was skipped; note
-  it and move on once `"passed"` (read first, above) is `true`. The `review`
-  proxy also runs omc's own grug and human-review lenses on every project,
-  so `review` can report `"configured": false, "passed": false`.
+  it and move on once `"passed"` (read first, below) is `true`. The review
+  proxy also runs omc's own conformance pass and its grug and human-review
+  lenses on every project, so a review can report
+  `"configured": false, "passed": false`.
 
-## Step 4 — describe and push
+**A red stage.** A stage that FAILED (`"passed": false`,
+regardless of `"configured"`, or no verdict) → follow the behavior layer's
+**stage-gate rule — bounded fix-forward, then a CRITICAL stop**, with each
+fix amended as above. Here a red `build` or `check` falls under the rule's
+general clause: after the fix the sequence restarts from `build`. finish and
+the `create-mr` it invokes are one conductor run with one fix-cycle budget.
+When the rule stops, ask its one CRITICAL question: the branch stays
+squashed and nothing is pushed. The user's answer resumes the remaining
+steps.
 
-Invoke **`create-mr`** — it generates the MR description
-(via `get-mr-description`), amends it into the squashed commit, and pushes
-with `--force-with-lease`. The user creates the actual MR/PR from the forge;
-the commit carries the full description.
+## Step 4 — the MR gate, describe and push
+
+Invoke **`create-mr`** — its Step 0 is the MR gate: the review question,
+then the verify question, each answered by `omc internal gate` and, when the
+tree changed, the project's `needs_review` or `needs_verify` hook. It then
+generates the MR description (via `get-mr-description`), amends it into the
+squashed commit, runs the project's `pre_push` hook, and pushes with
+`--force-with-lease`. Its stages run by the stage-running rules above, on
+this run's fix-cycle budget. The user creates the actual MR/PR from the
+forge; the commit carries the full description.
 
 Then, once `create-mr` reports a successful push, invoke the internal
 **`ticket-sync`** skill with phase `review` — it moves the ticket (key
@@ -156,9 +166,11 @@ follow-ups.
 ## Step 5 — offer follow-ups
 
 Report what happened (squashed N→1, N being Step 1's count — 0 means only
-uncommitted changes were folded; rebased onto `<base>`, stage outcomes
-(both verify runs; whether the final verify ran or was skipped), pushed,
-title),
+uncommitted changes were folded; rebased onto `<base>`; build and check
+outcomes, or that they were skipped on a verified tree; what the MR gate
+did: whether a review ran and why, whether a verify ran, was suppressed by
+`needs_verify`, or was skipped as unchanged, and the `pre_push` outcome;
+pushed, title),
 then offer exactly these three options (interactively where the harness
 supports it; in a non-interactive/headless run, list them and end):
 
@@ -168,9 +180,12 @@ supports it; in a non-interactive/headless run, list them and end):
    merged, so the pushed branch survives until the MR lands. Then move the
    session out of the removed directory (e.g. into the primary checkout).
 2. **Address review comments** — the user pastes review feedback; apply the
-   changes, `git commit --amend` into the single commit, then re-run
-   `create-mr` so the description reflects the final state and the branch is
-   re-pushed (`--force-with-lease`).
+   changes. Applying them is work, so the cadence's `/omc:check` runs before
+   the amend (a red check follows the stage-gate rule). Then
+   `git commit --amend` into the single commit and re-run `create-mr` so the
+   description reflects the final state and the branch is re-pushed
+   (`--force-with-lease`); the MR gate inside `create-mr` decides review
+   and verify for the re-push, as its own conductor run.
 3. **Chat about this** — discuss the change, the review, or what's next.
 
 ## Completion contract
@@ -180,7 +195,7 @@ real description. Before ending the turn, read the task list: any step still
 pending means you are not done — continue with it. A branch left squashed under
 a `wip:` message, or pushed but with the ticket never moved, is a failed run,
 not a partial success. The one exception is the stage-gate rule's CRITICAL
-stop at the bound: the branch stays squashed, nothing is pushed, and the run
-waits for the user's answer — that is a valid stop, not a failed run.
+stop: the branch stays squashed, nothing is pushed, and the run waits for the
+user's answer — that is a valid stop, not a failed run.
 Phase-to-phase transitions are NOT gates: do not ask permission between
 steps.

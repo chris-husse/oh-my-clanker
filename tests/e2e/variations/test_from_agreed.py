@@ -6,14 +6,15 @@ import ast
 
 import pytest
 
-from ..harness import run_in
+from ..harness import add_hook, run_in
 from ..lifecycle_helpers import (
+    _assert_audit_stage_order,
     _assert_boundary,
-    _assert_check_only_before_finish,
+    _assert_check_only_before_audit,
     _assert_critical_wait,
-    _assert_finish_stage_order,
     _assert_primary_boundary,
     _assert_published_fix,
+    _assert_recorded,
     _direct_design,
     _direct_implement,
     _judge_claude,
@@ -219,10 +220,71 @@ def test_design_auto_advances_to_push(stage_session):
     assert rc == 0 and not dirty.strip(), f"the chain left a dirty tree: {dirty}; {answer}"
     rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
     assert rc == 0, f"project stages never executed; {answer}"
-    # implement and audit gate on check only; finish runs its pre-review verify
-    # and at most a final verify after review, plus their bounded repair reruns
-    _assert_check_only_before_finish(markers)
-    _assert_finish_stage_order(markers)
+    # implement gates on check only; audit runs build → check → review → verify
+    # plus its repair reruns, and finish on the verified tree adds no stage
+    _assert_check_only_before_audit(markers)
+    _assert_audit_stage_order(markers)
     _assert_published_fix(
         container, m["repo"], worktree, branch, "def greeting():\n    return 'Goodbye, world!'\n"
     )
+
+
+_POST_DESIGN = "post_design"
+_POST_DESIGN_PATH = f".omc/hooks/{_POST_DESIGN}/SKILL.md"
+_POST_DESIGN_BODY = (
+    "Read `record=<path>` from the caller's context. From the project root run\n"
+    "`grep -qx '## Rollback' <path>`.\n\n"
+    "- Exit 0 (the record has a `## Rollback` section) → answer\n"
+    '  `OMC_HOOK {"hook": "post_design", "go": true, '
+    '"reason": "the record has a Rollback section"}`.\n'
+    "- Any other exit → answer\n"
+    '  `OMC_HOOK {"hook": "post_design", "go": false, '
+    '"reason": "the record has no ## Rollback section: add one that says how to undo '
+    'this change"}`.\n\n'
+    "End with exactly that one OMC_HOOK line, plain text, no backticks or code fences."
+)
+
+
+# Spec 2026-11-16 D12, §6 "post_design no-go, then go": two hardening passes
+# and two record commits cannot fit the 300 s default ceiling (plan decision
+# 4). It runs in the expensive tier with the chain test above: `just
+# lifecycle-full`, or `just e2e-rest -m "e2e and expensive" …/test_from_agreed.py`.
+@pytest.mark.expensive
+@pytest.mark.timeout(3700)
+@pytest.mark.variation("agreed")
+def test_post_design_no_go_then_go(stage_session):
+    """The project's post_design hook says no-go until the record has a
+    Rollback section: design hardens again and commits again, then stops on go."""
+    container, session, m = stage_session
+    worktree = m["worktree"]
+    add_hook(container, worktree, _POST_DESIGN, _POST_DESIGN_BODY)
+    rc, out = run_in(
+        container,
+        ["bash", "-c", f"git add {_POST_DESIGN_PATH} && git commit -qm 'add post_design hook'"],
+        cwd=worktree,
+    )
+    assert rc == 0, out
+    rc, original_hook = run_in(
+        container, ["git", "show", f"HEAD:{_POST_DESIGN_PATH}"], cwd=worktree
+    )
+    assert rc == 0, original_hook
+    baseline = session.snapshot(worktree)
+
+    session.send(_direct_design("claude"))
+    turn = session.wait_turn(3500)
+    answer = f"design answer (tail): {turn['text'][-2000:]}"
+    record = _assert_recorded(baseline, session.snapshot(worktree), "post_design loop")
+    rc, content = run_in(container, ["git", "show", f"HEAD:{record}"], cwd=worktree)
+    assert rc == 0 and "## Rollback" in content.splitlines(), (
+        f"the committed record has no ## Rollback section; {answer}"
+    )
+    rc, commits = run_in(
+        container, ["git", "log", "--format=%H", "--", record], cwd=worktree, stdout_only=True
+    )
+    assert rc == 0 and len(commits.split()) >= 2, (
+        f"the no-go did not cost a second record commit: {commits!r}; {answer}"
+    )
+    rc, hook = run_in(container, ["git", "show", f"HEAD:{_POST_DESIGN_PATH}"], cwd=worktree)
+    assert rc == 0 and hook == original_hook, f"design changed the post_design hook; {answer}"
+    rc, dirty = run_in(container, ["git", "status", "--porcelain"], cwd=worktree)
+    assert rc == 0 and not dirty.strip(), f"design left the worktree dirty: {dirty}; {answer}"

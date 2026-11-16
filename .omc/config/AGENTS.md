@@ -68,9 +68,9 @@ the bug).
   judgment").
 - **Skill machine contracts** are single JSON lines: `OMC_SLUG`, `OMC_STAGE`,
   `OMC_REBASE_MAIN`, `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`,
-  `OMC_MODELS`. Parsers tolerate markdown wrapping; skills
-  forbid it. Internal skills carry "not meant for direct invocation" in
-  their frontmatter description.
+  `OMC_MODELS`, `OMC_GATE`, `OMC_HOOK`. Parsers tolerate markdown
+  wrapping; skills forbid it. Internal skills carry "not meant for direct
+  invocation" in their frontmatter description.
 - CLI phases narrate progress on stderr (`→` / `✓` / `·` lines) — a silent
   minute is a bug.
 - Provider CLI quirks are comments at the exact code site that depends on
@@ -106,4 +106,4 @@ the bug).
   version mismatch is solved by a minimum version in the tests, not a
   downgrade.
 - Project stages for this repo: `.omc/skills/{check,build,verify,review}`
-  (used by `/omc:finish`).
+  (used by `/omc:audit`, `/omc:finish` and its MR gate).

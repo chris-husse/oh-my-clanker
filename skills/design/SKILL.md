@@ -31,6 +31,7 @@ question deferred until after hardening. Resume at Step 0 once answered.
 
 **Write the remaining steps into the task list now**: record check → Design
 worker writes → per-section hardening → whole-record pass → iterate → commit and report →
+the project's `post_design` hook until it says go →
 close: continue into `/omc:implement` when provider selection per step is off,
 otherwise state the three continuations and wait. Mark each completed as you
 pass it. The last task is the close; with the setting on it is literally to
@@ -150,6 +151,20 @@ grug-unavailable stop (Step 2, `grug skill unavailable — plugin stale? run
 omc update`) is a hard stop in both settings: do NOT commit, do NOT report
 success and do NOT continue; hand the sentence to the user, whose remediation
 is `omc update` and a new session.
+
+Then ask the project's `post_design` hook about the committed record: invoke
+the internal `hook` skill with `post_design record=<path>` (the
+`OMC_DESIGN_RECORD` path) and read its single `OMC_HOOK` line.
+
+- `"configured": false` (no hook) or `"go": true` → close as below.
+- `"go": false` → its `reason` goes back to the Design worker as a finding;
+  the worker hardens again through Steps 2–4, the main session commits, and
+  the hook is called again. Interactive runs do not bound the loop: the
+  user is present and can interrupt. A headless run stops after three no-gos
+  with one CRITICAL question carrying the three reasons.
+- An `error` verdict is not a no-go: nothing in the record repairs a hook
+  that does not answer. Call the hook once more; a second error is the
+  CRITICAL question.
 
 Then post a short summary of what hardening found and changed, and close by
 the `OMC_MODELS` verdict Step 1 read. If that verdict is no longer in context, read it again the same way before closing. Only an `OMC_MODELS` verdict with `"ok": true` and `"provider_selection_per_step": false` continues; a missing field or any other value stops as below.

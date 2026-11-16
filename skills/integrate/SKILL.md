@@ -50,6 +50,9 @@ the remaining slots. The interactive session is where files get written.
      `omc internal skills list explain-source` to see resolved project,
      primary, and global entries. Inventory availability, purpose, and
      overlap; a missing global entry is optional, not a project stage gap.
+   - Session-side hooks, each optional: `.omc/hooks/needs_review/SKILL.md` ·
+     `.omc/hooks/needs_verify/SKILL.md` · `.omc/hooks/post_design/SKILL.md` ·
+     `.omc/hooks/post_rebase/SKILL.md` · `.omc/hooks/pre_push/SKILL.md`
    - `.omc/hooks/post-watch.sh` — optional CLI-side hook `omc watch` runs
      after action ticks (sync / forced refresh)
 2. **Mechanical fixes** via the existing machinery (with the user's go-ahead):
@@ -105,11 +108,11 @@ in review mode: the skill says `make test` while CI runs `just build`.
 What's the heavier "does it still work" tier here — integration tests, e2e
 suites, docker harnesses, smoke scripts? How long does it take, what does it
 need (services, tokens)? Propose the stage with honest cost notes and hard
-pass criteria. An agent runs it only within `/omc:finish` (before review,
-and last before the push); the user or the project may run it at any time.
-When the project's E2E runner can select tests, suggest a "Running a subset"
-section saying how to rerun only named pieces, so a red verify reruns just
-the failed pieces after a fix.
+pass criteria. An agent starts it in two places only: `/omc:audit`'s fixed
+verify after its review, and the MR gate when the gate says run; the user or
+the project may run it at any time. When the project's E2E runner can select
+tests, suggest a "Running a subset" section saying how to rerun only named
+pieces, so a red verify reruns just the failed pieces after a fix.
 
 ### `.omc/skills/review`
 What do this project's reviews actually check — CONTRIBUTING.md, CI lint
@@ -137,6 +140,67 @@ execution-model or report-location overrides. A project with no live
 environments correctly skips this slot — `/omc:investigate` then refuses
 with instructions, which is the intended behavior.
 
+### Session-side hooks
+
+Each hook is a project skill at `.omc/hooks/<name>/SKILL.md`, which the
+internal `hook` skill follows as a black box from the project root and whose
+single `OMC_HOOK` line it relays (a hook may wrap a script when the project
+wants determinism). A hook that prints no valid verdict is reported as
+failed: a failed `needs_*` hook counts as `"run": true`, and a failed
+`post_rebase` or `pre_push` is a red gate. Investigate each against the
+project's real paths and commands; a hook's own file is never what a fix
+changes.
+
+### `.omc/hooks/needs_review/SKILL.md` (optional)
+Asked only in the MR gate, and only when the tree differs from the last
+recorded review's, with `previous=<sha> tree=<sha>`; with no recorded review,
+`previous` is the tree of the merge-base with `origin/<base>`, so a branch
+that was never reviewed is always asked about. It answers
+`OMC_HOOK {"hook": "needs_review", "run": true|false, "reason": "…"}`.
+Absent → the MR gate runs no review: after `/omc:audit` the branch was
+already reviewed, but a direct `/omc:finish` publishes it unreviewed.
+Propose it when the project wants reviews on a direct `/omc:finish`, or
+when a later change (a re-push after review comments, say) should earn a
+fresh review; absence is the correct default.
+
+### `.omc/hooks/needs_verify/SKILL.md` (optional)
+Asked only when the tree differs from the last green-verify tree, with
+`previous=<sha> tree=<sha>`; it answers
+`OMC_HOOK {"hook": "needs_verify", "run": true|false, "reason": "…"}`, and
+`"run": false` suppresses that verify. Absent → the MR gate runs verify
+whenever the tree changed since the last green verify (and always when none
+is recorded). Propose it only when some changes provably cannot break what
+verify exercises (documentation-only paths, say), named by path from the
+project's layout; absence is the correct default.
+
+### `.omc/hooks/post_design/SKILL.md` (optional)
+Run after `/omc:design` commits the record, with `record=<path>`; it answers
+`OMC_HOOK {"hook": "post_design", "go": true|false, "reason": "…"}`. A no-go
+sends the record back for another hardening pass. Absent → the design closes
+as soon as it is committed. Propose it only when the project has a design
+bar of its own (required sections, a sign-off rule); absence is the correct
+default.
+
+### `.omc/hooks/post_rebase/SKILL.md` (optional)
+Run inside `rebase-main` whenever a rebase moved the branch onto a different
+base commit, with `base=<branch> old_merge_base=<sha> new_base=<sha>
+squash=true|false`; it answers
+`OMC_HOOK {"hook": "post_rebase", "ok": true|false, "before_implementation": true|false, "reason": "…"}`.
+`"before_implementation": true` skips the post-conflict check. Absent →
+rebase-main behaves as without it. Propose it only when the project has
+post-rebase work (regenerating lockfiles or generated code, migrations to
+renumber); absence is the correct default.
+
+### `.omc/hooks/pre_push/SKILL.md` (optional)
+Run in `create-mr` after the describe amend, so it judges the final commit,
+and before the push, with `base=<branch> branch=<branch>`; it answers
+`OMC_HOOK {"hook": "pre_push", "ok": true|false, "reason": "…"}`. Nothing is
+pushed while it is red. Absent → `create-mr` pushes straight after the
+describe amend. A versioned git `pre-push` hook still guards manual pushes
+beside it. Propose it only when the project has a last check that must see
+the final commit (a commit-message rule, a changelog entry); absence is the
+correct default.
+
 ### `.omc/hooks/post-watch.sh` (optional)
 The CLI-side sibling of the session skills: `omc watch` runs it after every
 cycle that did real work (env: `OMC_WATCH_OUTCOME`=`synced`|`refreshed`;
@@ -161,9 +225,10 @@ surface left unchanged. The drafts are ready for a later interactive review.
 **Interactive:**
 
 1. The after-table: created / updated / left alone, per surface.
-2. What's now active: `/omc:finish` runs the stage gates you just designed;
-   `/omc:explain` uses the context map; `omc watch` keeps the graph fresh
-   (suggest the cadence); worktrees snapshot it all.
+2. What's now active: `/omc:audit` and `/omc:finish` run the stage gates
+   you just designed; the MR gate asks your hooks; `/omc:explain` uses the
+   context map; `omc watch` keeps the graph fresh (suggest the cadence);
+   worktrees snapshot it all.
 3. Suggest committing the new/changed files (they're all meant to be
    committed) — offer to run the project's own check stage first as a sanity
    check.

@@ -23,6 +23,13 @@ FULL = {
     "test_codex_implement_handoff_from_claude_record",
     "test_codex_review_handoff_from_claude_implementation",
     "test_design_auto_advances_to_push",
+    "test_post_design_no_go_then_go",
+}
+HOOKS = {
+    "test_docs_only_change_skips_verify_by_needs_verify",
+    "test_product_change_runs_verify_by_needs_verify",
+    "test_red_pre_push_is_fixed_then_pushed",
+    "test_post_rebase_before_implementation_skips_the_check",
 }
 GOLDEN = {
     "test_stage_start",
@@ -79,6 +86,16 @@ def test_default_e2e_collects_write_plan_variation():
 def test_default_e2e_never_collects_the_auto_advance_chain():
     # one /omc:design turn that runs to the push: expensive tier only
     assert "test_design_auto_advances_to_push" not in _collected("e2e-tests")
+
+
+def test_default_e2e_never_collects_the_post_design_loop():
+    # two hardening passes cannot fit the 300 s ceiling: expensive tier only
+    assert "test_post_design_no_go_then_go" not in _collected("e2e-tests")
+
+
+def test_default_e2e_collects_the_hook_scenarios():
+    collected = _collected("e2e-tests")
+    assert HOOKS <= collected, HOOKS - collected
 
 
 def test_e2e_tests_subset_runs_a_golden_node_id():
