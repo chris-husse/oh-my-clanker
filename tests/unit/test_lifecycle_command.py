@@ -24,6 +24,13 @@ FULL = {
     "test_codex_review_handoff_from_claude_implementation",
     "test_design_auto_advances_to_push",
     "test_post_design_no_go_then_go",
+    # the expensive variations: no other recipe collects them
+    # (`expensive-e2e-tests` excludes `variation`)
+    "test_failing_build_blocks_publication",
+    "test_unrelated_untracked_draft_blocks_publication",
+    "test_audit_repairs_committed_greeting_drift",
+    "test_implement_commits_without_publication",
+    "test_audit_refuses_design_only_branch",
 }
 HOOKS = {
     "test_docs_only_change_skips_verify_by_needs_verify",

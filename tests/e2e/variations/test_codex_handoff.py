@@ -13,7 +13,7 @@ from testcontainers.core.container import DockerContainer
 
 from ..codex_auth import codex_account, require_codex_ready
 from ..conftest import _finish_container_setup, _forward_tokens
-from ..harness import configure_omc, run_in
+from ..harness import configure_omc, hold_watch_stand_in, run_in
 from ..lifecycle_helpers import (
     IMPLEMENT_TURN_BUDGET,
     _assert_audited_artifacts,
@@ -54,6 +54,8 @@ def test_codex_implement_handoff_from_claude_record():
     )
     with codex_account(c, _finish_container_setup, use_account=True):
         m = read_manifest(c)
+        # The golden path's real watch did not survive the snapshot (design 7).
+        hold_watch_stand_in(c, m["repo"])
         # configure_omc runs docker/setup-plugins.sh codex (plugins into the
         # account CODEX_HOME) and then `omc configure --set llm.default=codex`;
         # the default is restored to claude below so the FLAG is what selects
@@ -120,6 +122,8 @@ def test_codex_review_handoff_from_claude_implementation():
     )
     with codex_account(c, _finish_container_setup, use_account=True):
         m = read_manifest(c)
+        # The golden path's real watch did not survive the snapshot (design 7).
+        hold_watch_stand_in(c, m["repo"])
         configure_omc(c, "codex")
         require_codex_ready(c)
         rc, out = run_in(

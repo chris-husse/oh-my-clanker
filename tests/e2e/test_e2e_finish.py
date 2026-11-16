@@ -5,7 +5,18 @@ from __future__ import annotations
 
 import pytest
 
-from .harness import add_stage, configure_omc, make_work_repo, require_token, run_in
+from .harness import (
+    _watch_state,
+    _write_skill,
+    add_stage,
+    add_stage_hook,
+    configure_omc,
+    hold_watch_stand_in,
+    hook_instructions,
+    make_work_repo,
+    require_token,
+    run_in,
+)
 from .judge import judge
 
 pytestmark = pytest.mark.e2e
@@ -93,17 +104,17 @@ def test_finish_runs_passing_build_and_check_stages_then_pushes(container):
         container,
         repo,
         "build",
-        "Run `sh -c 'echo build >> /tmp/omc-finish-order && echo BUILD-OK'`.\n"
-        "BUILD-OK printed means the build passed; anything else is a failure.",
+        "echo build >> /tmp/omc-finish-order && echo BUILD-OK",
+        "Exit 0, after BUILD-OK is printed. Any other exit is failed.",
     )
     add_stage(
         container,
         repo,
         "check",
-        "Run `sh -c 'echo check >> /tmp/omc-finish-order && echo CHECK-OK'`.\n"
-        "CHECK-OK printed means the check passed; anything else is a failure.",
+        "echo check >> /tmp/omc-finish-order && echo CHECK-OK",
+        "Exit 0, after CHECK-OK is printed. Any other exit is failed.",
     )
-    # the stage file must be part of the branch (a real project tracks .omc/)
+    # the stage hooks must be part of the branch (a real project tracks .omc/)
     rc, out = run_in(
         container,
         ["bash", "-c", f"cd {repo} && git add -A && git commit -qm 'add build and check stages'"],
@@ -161,14 +172,14 @@ def test_finish_stops_before_push_on_failing_stage(container):
         container,
         repo,
         "build",
-        "Run `sh -c 'echo the build is broken >&2; exit 1'`.\n"
-        "A non-zero exit code means the build FAILED.",
+        "echo the build is broken >&2; exit 1",
+        "Exit 0. A non-zero exit code means the build FAILED.",
     )
     rc, out = run_in(
         container, ["bash", "-c", f"cd {repo} && git add -A && git commit -qm 'add build stage'"]
     )
     assert rc == 0, out
-    stage_path = ".omc/skills/build/SKILL.md"
+    stage_path = ".omc/bin/build"
     rc, original_stage = run_in(container, ["git", "-C", repo, "show", f"HEAD:{stage_path}"])
     assert rc == 0, original_stage
 
@@ -218,14 +229,14 @@ def test_finish_stops_before_push_on_failing_check_stage(container):
         container,
         repo,
         "check",
-        "Run `sh -c 'echo the unit tests are broken >&2; exit 1'`.\n"
-        "A non-zero exit code means the check FAILED.",
+        "echo the unit tests are broken >&2; exit 1",
+        "Exit 0. A non-zero exit code means the check FAILED.",
     )
     rc, out = run_in(
         container, ["bash", "-c", f"cd {repo} && git add -A && git commit -qm 'add check stage'"]
     )
     assert rc == 0, out
-    stage_path = ".omc/skills/check/SKILL.md"
+    stage_path = ".omc/bin/check"
     rc, original_stage = run_in(container, ["git", "-C", repo, "show", f"HEAD:{stage_path}"])
     assert rc == 0, original_stage
 
@@ -255,3 +266,116 @@ def test_finish_stops_before_push_on_failing_check_stage(container):
         ["git", "-C", f"{repo}-origin", "rev-parse", "--verify", "feature/manual-fix"],
     )
     assert rc2 != 0, f"failing check stage must stop the push!\ntranscript:\n{out[:2000]}"
+
+
+_CRIT_RAN = "/tmp/omc-crit-ran"
+# Worst case under the default 300 s ceiling: 30 (configure_omc, as in
+# test_e2e_stage_hold) + 4 x 5 (repo, branch, stage files, commit) + 30 (the
+# stand-in takes the lock; `unmigrated` only) + 190 (the finish turn: squash,
+# then a refused build stage is a CRITICAL STOP with no fix cycle, spec C4)
+# + 6 x 5 (the before snapshot and the five checks) = 300 s. The turn's own
+# 190 s timeout bounds it, and the turn must end by itself within it.
+_CRIT_TURN_S = 190
+
+
+def _tree_bytes(container, repo, paths) -> dict[str, str]:
+    """Each path's committed (on the feature branch) and on-disk bytes, hex-encoded."""
+    script = (
+        "import subprocess, sys\n"
+        "repo, *paths = sys.argv[1:]\n"
+        "for path in paths:\n"
+        "    shown = subprocess.run(['git', '-C', repo, 'show', f'feature/manual-fix:{path}'],"
+        " capture_output=True).stdout\n"
+        "    disk = open(f'{repo}/{path}', 'rb').read()\n"
+        "    print(path, shown.hex(), disk.hex())\n"
+    )
+    rc, out = run_in(container, ["python3", "-c", script, repo, *paths], timeout=5)
+    assert rc == 0, out
+    return {line.split()[0]: line for line in out.splitlines()}
+
+
+@pytest.mark.parametrize("case", ["no-watch", "unmigrated"])
+def test_finish_stops_at_once_on_a_critical_stop_stage(container, case):
+    """A refused build (spec C4) stops finish at once: no hook run, no push.
+
+    `no-watch`: a real `.omc/bin/build` but no `omc watch`, so `stage start`
+    refuses with the no-watch CRITICAL STOP; the agent must not start a watch
+    itself. `unmigrated`: only an old `.omc/skills/build/SKILL.md` (with a watch
+    held), so `stage start` refuses with the migrate CRITICAL STOP; the agent
+    must neither follow the old skill nor write the hook itself."""
+    require_token("claude")
+    configure_omc(container, "claude")
+    repo = make_work_repo(container)
+    _make_feature_branch(container, repo)
+    if case == "no-watch":
+        instructions = hook_instructions(
+            timeout="5m",
+            quiet="2m",
+            done="The hook exits once its build command has run. Nothing is held.",
+            passed="Exit 0. Any other exit is failed.",
+            fixing="Read the end of the log. Never edit `.omc/bin/*`: that is the stage itself.",
+        )
+        add_stage_hook(container, repo, "build", f"echo build >> {_CRIT_RAN}", instructions)
+        stage_paths = [".omc/bin/build", ".omc/bin/build.instructions.md"]
+    else:
+        _write_skill(
+            container,
+            repo,
+            "skills",
+            "build",
+            "Build the project (old-style stage skill).",
+            f"Run `echo build >> {_CRIT_RAN}` in the project root. Then end with "
+            '`OMC_STAGE {"stage": "build", "configured": true, "passed": true, '
+            '"summary": "built"}`.',
+        )
+        stage_paths = [".omc/skills/build/SKILL.md"]
+        hold_watch_stand_in(container, repo)
+    rc, out = run_in(
+        container,
+        ["bash", "-c", f"cd {repo} && git add -A && git commit -qm 'add build stage'"],
+        timeout=5,
+    )
+    assert rc == 0, out
+    before = _tree_bytes(container, repo, stage_paths)
+    if case == "no-watch":
+        assert _watch_state(container, repo) == "not running"
+
+    rc, out = run_in(
+        container,
+        [
+            "claude",
+            "-p",
+            "/omc:finish",
+            "--output-format",
+            "text",
+            "--allowed-tools",
+            "Bash",
+            "Read",
+            "Skill",
+        ],
+        cwd=repo,
+        timeout=_CRIT_TURN_S,
+    )
+    turn_rc = rc
+    # the branch must NOT reach origin while a stage is a CRITICAL STOP
+    rc2, _ = run_in(
+        container,
+        ["git", "-C", f"{repo}-origin", "rev-parse", "--verify", "feature/manual-fix"],
+        timeout=5,
+    )
+    assert rc2 != 0, f"a CRITICAL STOP stage must stop the push!\ntranscript:\n{out[:2000]}"
+    rc, _ = run_in(container, ["test", "!", "-e", _CRIT_RAN], timeout=5)
+    assert rc == 0, f"the build ran (hook or old skill) despite the refusal:\n{out[:2000]}"
+    rc, _ = run_in(container, ["test", "!", "-e", f"{repo}/.cache/omc/run.json"], timeout=5)
+    assert rc == 0, f"a stage run was started:\n{out[:2000]}"
+    assert _tree_bytes(container, repo, stage_paths) == before, (
+        f"finish changed the stage files; transcript:\n{out[:2000]}"
+    )
+    if case == "unmigrated":
+        rc, _ = run_in(container, ["test", "!", "-e", f"{repo}/.omc/bin/build"], timeout=5)
+        assert rc == 0, f"finish wrote the build hook itself:\n{out[:2000]}"
+    else:
+        assert _watch_state(container, repo) == "not running", (
+            f"the agent started a watch to get past the refusal:\n{out[:2000]}"
+        )
+    assert turn_rc == 0, f"the finish turn did not stop by itself within {_CRIT_TURN_S} s:\n{out}"

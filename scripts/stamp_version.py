@@ -2,8 +2,10 @@
 
 MAJOR.MINOR is owned by humans in pyproject.toml; PATCH is owned by GitHub
 (github.run_number) and passed in on each merge to main. This script reads
-MAJOR.MINOR from pyproject.toml and OVERWRITES the three plugin manifests to
-match, so a forgotten manifest edit self-heals.
+MAJOR.MINOR from pyproject.toml and OVERWRITES the three plugin manifests and
+uv.lock's editable `omc` entry to match, so a forgotten manifest edit
+self-heals. A stale lock entry would make every `uv run` rewrite uv.lock, which
+changes the E2E runner's working-tree source id between its passes.
 
 Edits are surgical: only the version VALUE is replaced, via a regex that must
 match exactly once per file. A json.dumps round-trip is deliberately avoided
@@ -20,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
+UV_LOCK = ROOT / "uv.lock"
 JSON_FILES = (
     ROOT / ".claude-plugin" / "plugin.json",
     ROOT / ".claude-plugin" / "marketplace.json",
@@ -27,6 +30,9 @@ JSON_FILES = (
 )
 
 _PYPROJECT_RE = re.compile(r'(?m)^(version = ")[^"]*(")$')
+# Only the `omc` package entry: uv.lock also has a top-level `version = 1`
+# (the lockfile format) and one `version` line per locked dependency.
+_UV_LOCK_RE = re.compile(r'(?m)^(\[\[package\]\]\nname = "omc"\nversion = ")[^"]*(")$')
 # Value-only replacement of the single "version" field per file. This assumes
 # marketplace.json carries exactly one plugin entry (the omc one) — if a second
 # plugin with its own "version" is ever added, the exactly-one guard in
@@ -53,14 +59,19 @@ def stamp_pyproject(text: str, version: str) -> str:
     return _replace_once(_PYPROJECT_RE, text, version, "pyproject.toml")
 
 
+def stamp_uv_lock(text: str, version: str) -> str:
+    return _replace_once(_UV_LOCK_RE, text, version, "uv.lock (omc package)")
+
+
 def stamp_json(text: str, version: str, where: str) -> str:
     return _replace_once(_JSON_RE, text, version, where)
 
 
 def stamp(patch: int) -> str:
-    """Write MAJOR.MINOR.<patch> into all four files; return the new version."""
+    """Write MAJOR.MINOR.<patch> into all five files; return the new version."""
     version = f"{major_minor(PYPROJECT.read_text())}.{patch}"
     PYPROJECT.write_text(stamp_pyproject(PYPROJECT.read_text(), version))
+    UV_LOCK.write_text(stamp_uv_lock(UV_LOCK.read_text(), version))
     for path in JSON_FILES:
         path.write_text(stamp_json(path.read_text(), version, path.name))
     return version

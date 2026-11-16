@@ -19,7 +19,7 @@ def test_failing_build_blocks_publication(stage_session):
     container, session, m = stage_session
     session.bind(m["implement_session"], m["worktree"], m["repo"])
     before = session.snapshot(m["worktree"])
-    rc, original_stage = run_in(container, ["cat", f"{m['worktree']}/.omc/stage-scripts/build.sh"])
+    rc, original_stage = run_in(container, ["cat", f"{m['worktree']}/.omc/bin/build"])
     assert rc == 0 and "omc-external-build-unavailable" in original_stage
     rc, out = run_in(container, ["git", "status", "--porcelain"], cwd=m["worktree"])
     assert rc == 0 and not out.strip(), f"implemented fixture is dirty: {out}"
@@ -31,9 +31,9 @@ def test_failing_build_blocks_publication(stage_session):
     assert rc == 0 and "build" in markers.splitlines(), (
         f"failing build never executed; audit answer: {turn['text']}"
     )
-    rc, stage = run_in(container, ["cat", f"{m['worktree']}/.omc/stage-scripts/build.sh"])
+    rc, stage = run_in(container, ["cat", f"{m['worktree']}/.omc/bin/build"])
     assert rc == 0 and stage == original_stage, "audit or finish changed external build gate"
-    rc, _ = run_in(container, ["sh", ".omc/stage-scripts/build.sh"], cwd=m["worktree"])
+    rc, _ = run_in(container, ["sh", ".omc/bin/build"], cwd=m["worktree"])
     assert rc != 0, "build stage no longer fails under external condition"
     after = session.snapshot(m["worktree"])
     assert after["remote_refs"] == before["remote_refs"], "failing stage published"

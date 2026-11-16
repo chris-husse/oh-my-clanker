@@ -9,6 +9,7 @@ import posixpath
 import re
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -16,10 +17,14 @@ from .codex_auth import require_codex_ready
 from .conversation import Conversation
 from .harness import (
     configure_omc,
+    hold_watch_stand_in,
+    hook_instructions,
+    hook_script,
     make_work_repo,
     require_token,
     run_in,
     set_codex_container_policy,
+    start_real_watch,
 )
 
 # omc's /omc:implement exceeds the 300 s ceiling today (2026-10-01); the
@@ -120,18 +125,96 @@ _CLI = "/root/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js"
 NEEDS_VERIFY_HOOK = Path(__file__).resolve().parents[2] / ".omc/hooks/needs_verify/SKILL.md"
 
 
-def _fixture(container, *, failing_stage: str | None = None, path="/work/lifecycle") -> str:
-    """A real, small Python repo with all four local stages, this repo's
-    needs_verify hook and a bare origin."""
+# The lifecycle project's stage commands; check/build/verify are hooks, review a skill.
+_STAGE_COMMANDS = {
+    "check": "python3 -m unittest discover -v",
+    "build": "python3 -m compileall -q greeting.py test_greeting.py",
+    "verify": "python3 -m unittest discover -v",
+    "review": "git diff --check",
+}
+# What each stage's external condition adds after its command (failing_stage).
+_STAGE_FAILURES = {
+    "check": "",
+    "build": "\ntest ! -e /tmp/omc-external-build-unavailable",
+    "verify": (
+        "\nif test -e "
+        '"${OMC_EXTERNAL_VERIFY_SENTINEL:-/tmp/omc-external-verify-unavailable}"; then\n'
+        "  echo 'E2E environment unavailable: verify sentinel present' >&2\n"
+        "  exit 1\nfi"
+    ),
+    "review": "",
+}
+_NEVER_EDIT = "Never edit `.omc/bin/*`: that is the stage itself."
+_STAGE_INSTRUCTIONS = {
+    "check": dict(
+        done="The hook exits once `python3 -m unittest discover -v` has run. Nothing is held.",
+        passed="Exit 0: every unittest in the repository passes. Any other exit is failed.",
+        fixing="Read the end of the log: unittest names each failing test and shows its "
+        f"traceback. Fix the code under test. {_NEVER_EDIT}",
+    ),
+    "build": dict(
+        done="The hook exits once `python3 -m compileall` has compiled greeting.py and "
+        "test_greeting.py. Nothing is held.",
+        passed="Exit 0: both modules compile. Any other exit is failed.",
+        fixing="Read the end of the log: a compile error names the file and line; fix that "
+        "code. A failure with no compile error in the log is the build environment, not "
+        f"code: report it, never work around it. {_NEVER_EDIT}",
+    ),
+    "verify": dict(
+        done="The hook exits once `python3 -m unittest discover -v` has run. Nothing is held.",
+        passed="Exit 0: every unittest passes in a working verify environment. Any other "
+        "exit is failed.",
+        fixing="Read the end of the log: unittest names each failing test. A line "
+        "`E2E environment unavailable` is the environment, not code: report it, never work "
+        f"around it. {_NEVER_EDIT}",
+    ),
+}
+
+
+def _stage_body(stage: str) -> str:
+    return (
+        f"set -eu\nprintf '{stage}\\n' "
+        '>> "${OMC_LIFECYCLE_MARKER:-/tmp/omc-lifecycle-stages}"\n'
+        f"{_STAGE_COMMANDS[stage]}{_STAGE_FAILURES[stage]}"
+    )
+
+
+def _stage_files() -> dict[str, str]:
+    """Repo-relative path → content: the three stage hooks with their instructions,
+    the review skill over its script, and this repo's needs_verify hook verbatim."""
+    files = {}
+    for stage, sections in _STAGE_INSTRUCTIONS.items():
+        files[f".omc/bin/{stage}"] = hook_script(stage, _stage_body(stage))
+        files[f".omc/bin/{stage}.instructions.md"] = hook_instructions(**sections)
+    files[".omc/stage-scripts/review.sh"] = f"#!/bin/sh\n{_stage_body('review')}\n"
+    files[".omc/skills/review/SKILL.md"] = (
+        "---\nname: review\n"
+        "description: Run the review stage for this Python project.\n---\n\n"
+        "Run `sh .omc/stage-scripts/review.sh` in the project root. "
+        "Report the actual exit status.\n"
+    )
+    files[".omc/hooks/needs_verify/SKILL.md"] = NEEDS_VERIFY_HOOK.read_text(encoding="utf-8")
+    return files
+
+
+def _fixture(
+    container,
+    *,
+    failing_stage: str | None = None,
+    path="/work/lifecycle",
+    watch: Literal["stand-in", "real", "none"] = "stand-in",
+) -> str:
+    """A real, small Python repo with all four local stages, this repo's needs_verify
+    hook and a bare origin; `watch` is the watch its stage runs need (design 6.4):
+    the lock-holding stand-in, a real `omc watch`, or none."""
     assert failing_stage in (None, "build", "verify")
+    assert watch in ("stand-in", "real", "none")
     repo = make_work_repo(container, path)
     payload = r"""
+import json
 import sys
 from pathlib import Path
 root = Path(sys.argv[1])
-hook = root / ".omc" / "hooks" / "needs_verify" / "SKILL.md"
-hook.parent.mkdir(parents=True, exist_ok=True)
-hook.write_text(sys.argv[2], encoding="utf-8")
 (root / ".gitignore").write_text("__pycache__/\n.claude/settings.local.json\n")
 (root / "greeting.py").write_text("def greeting():\n    return 'Goodbye, world!'\n")
 (root / "test_greeting.py").write_text(
@@ -145,43 +228,21 @@ hook.write_text(sys.argv[2], encoding="utf-8")
     "# Project guidance\n"
     "This is a small Python greeting module. Use unittest for verification.\n"
 )
-for stage in ("check", "build", "verify", "review"):
-    stage_dir = root / ".omc" / "skills" / stage
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    command = {
-        "check": "python3 -m unittest discover -v",
-        "build": "python3 -m compileall -q greeting.py test_greeting.py",
-        "verify": "python3 -m unittest discover -v",
-        "review": "git diff --check",
-    }[stage]
-    fail = ""
-    if stage == "build":
-        fail = "\ntest ! -e /tmp/omc-external-build-unavailable"
-    elif stage == "verify":
-        fail = (
-            "\nif test -e "
-            '"${OMC_EXTERNAL_VERIFY_SENTINEL:-/tmp/omc-external-verify-unavailable}"; then\n'
-            "  echo 'E2E environment unavailable: verify sentinel present' >&2\n"
-            "  exit 1\nfi"
-        )
-    script = (
-        f"#!/bin/sh\nset -eu\nprintf '{stage}\\n' "
-        '>> "${OMC_LIFECYCLE_MARKER:-/tmp/omc-lifecycle-stages}"\n'
-        f"{command}{fail}\n"
-    )
-    scripts = root / ".omc" / "stage-scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    (scripts / f"{stage}.sh").write_text(script)
-    (stage_dir / "SKILL.md").write_text(
-        f"---\nname: {stage}\n"
-        f"description: Run the {stage} stage for this Python project.\n---\n\n"
-        f"Run `sh .omc/stage-scripts/{stage}.sh` in the project root. "
-        "Report the actual exit status.\n"
-    )
+for name, content in json.loads(sys.argv[2]).items():
+    target = root / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    if name.startswith(".omc/bin/") and not name.endswith(".md"):
+        target.chmod(0o755)
 """
-    hook_text = NEEDS_VERIFY_HOOK.read_text(encoding="utf-8")
-    rc, out = run_in(container, ["python3", "-c", payload, repo, hook_text])
+    rc, out = run_in(container, ["python3", "-c", payload, repo, json.dumps(_stage_files())])
     assert rc == 0, out
+    rc, out = run_in(
+        container,
+        ["bash", "-c", "omc internal stage template > .omc/bin/INSTRUCTIONS.template.md"],
+        cwd=repo,
+    )
+    assert rc == 0, f"omc internal stage template failed:\n{out}"
     if failing_stage in ("build", "verify"):
         rc, out = run_in(container, ["touch", f"/tmp/omc-external-{failing_stage}-unavailable"])
         assert rc == 0, out
@@ -205,6 +266,10 @@ for stage in ("check", "build", "verify", "review"):
     assert rc == 0, f"real GitNexus index failed: {out[-1800:]}"
     rc, _ = run_in(container, ["test", "-d", f"{repo}/.gitnexus"])
     assert rc == 0, "real GitNexus index produced no graph"
+    if watch == "stand-in":
+        hold_watch_stand_in(container, repo)
+    elif watch == "real":
+        start_real_watch(container, repo)
     return repo
 
 

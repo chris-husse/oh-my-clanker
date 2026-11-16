@@ -44,9 +44,47 @@ def stage_tag(provider: str, stage: str) -> str:
     return f"omc-e2e-stage:{provider}-{stage}-{source_id()}"
 
 
+# Run in the container with the repo as argv[1]: a JSON list naming each
+# `.cache/omc/run.json` of the repo or a linked worktree that says `running` or
+# `held`. Linked worktrees are read from `.git/worktrees/*/gitdir`, so no git
+# call is needed.
+LIVE_RUNS_PY = """\
+import json, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+roots = [repo] + [
+    pathlib.Path(gitdir.read_text().strip()).parent
+    for gitdir in sorted((repo / ".git" / "worktrees").glob("*/gitdir"))
+]
+live = []
+for root in roots:
+    path = root / ".cache" / "omc" / "run.json"
+    try:
+        state = json.loads(path.read_text()).get("state")
+    except (OSError, ValueError, AttributeError):
+        continue
+    if state in ("running", "held"):
+        live.append(f"{path}: {state}")
+print(json.dumps(live))
+"""
+
+
 def snapshot(container, manifest: dict) -> str:
-    """Write the manifest into the container, commit it, return the tag."""
+    """Write the manifest into the container, commit it, return the tag.
+
+    Only once every stage run has ended (the golden-snapshot rule): an image
+    whose `run.json` says `running` or `held` forks variations that record a
+    process group the image does not have."""
     cid = container.get_wrapped_container().id
+    live = json.loads(
+        subprocess.run(
+            ["docker", "exec", cid, "python3", "-c", LIVE_RUNS_PY, manifest["repo"]],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    if live:
+        raise AssertionError(f"golden snapshot with a live stage run: {', '.join(live)}")
     subprocess.run(
         [
             "docker",

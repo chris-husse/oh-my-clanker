@@ -1,42 +1,33 @@
 """Live `omc watch --once`: real git sync and GitNexus reindex. The auto-build
-shim test declares its real Claude token prerequisite."""
+hook test runs a real .omc/bin/build and needs no LLM token."""
 
 from __future__ import annotations
 
 import json
 import re
-import shlex
+import uuid
 
 import pytest
 
-from .harness import configure_omc, make_work_repo, require_token, run_in
+from .harness import (
+    add_stage_hook,
+    configure_omc,
+    hold_watch_stand_in,
+    hook_instructions,
+    make_work_repo,
+    run_in,
+)
 
 pytestmark = pytest.mark.e2e
 
 
-def _claude_build_shim(real_cli: str) -> str:
-    """Stub only the streamed build turn; leave auth and model checks real."""
-    return (
-        "#!/bin/sh\n"
-        "previous=\n"
-        "for arg do\n"
-        '  if [ "$previous" = --output-format ] && [ "$arg" = stream-json ] && '
-        '[ "$1" = -p ]; then\n'
-        "    echo 'OMC_STAGE "
-        '{"stage": "build", "configured": true, "passed": true, "summary": "ok"}'
-        "'\n"
-        "    exit 0\n"
-        "  fi\n"
-        "  previous=$arg\n"
-        "done\n"
-        f'exec {shlex.quote(real_cli)} "$@"\n'
-    )
-
-
-def _push_remote_commit(container, repo):
+def _push_remote_commit(container, repo, *, project_id: str | None = None):
+    """A teammate's commit on origin/main; with `project_id`, it also commits
+    `.omc/project.id` with that ID."""
+    commit_id = f"mkdir -p .omc && echo {project_id} > .omc/project.id && " if project_id else ""
     script = (
         f"git clone -q {repo}-origin /work/other && cd /work/other && "
-        "echo teammate > t.txt && git add -A && git commit -qm 'remote change' && "
+        f"echo teammate > t.txt && {commit_id}git add -A && git commit -qm 'remote change' && "
         "git push -q origin main"
     )
     rc, out = run_in(container, ["bash", "-c", script])
@@ -46,13 +37,28 @@ def _push_remote_commit(container, repo):
 def test_watch_once_syncs_and_reindexes_for_real(container):
     configure_omc(container, "claude")
     repo = make_work_repo(container)
-    _push_remote_commit(container, repo)
+    # The primary made its own untracked ID before the teammate committed theirs:
+    # git refuses the ff-merge over it, and watch yields to the committed one.
+    local_id, committed_id = str(uuid.uuid4()), str(uuid.uuid4())
+    rc, out = run_in(
+        container, ["bash", "-c", f"mkdir -p .omc && echo {local_id} > .omc/project.id"], cwd=repo
+    )
+    assert rc == 0, out
+    _push_remote_commit(container, repo, project_id=committed_id)
 
     rc, out = run_in(container, ["omc", "watch", "--once"], cwd=repo, timeout=300)
     assert rc == 0, out
     assert "synced main" in out, out
     rc, _ = run_in(container, ["test", "-f", f"{repo}/t.txt"])
     assert rc == 0, "remote commit did not arrive via ff-sync"
+    rc, project_id = run_in(container, ["cat", f"{repo}/.omc/project.id"])
+    assert rc == 0 and project_id.strip() == committed_id, (
+        f"the committed project ID did not win: {project_id!r}\n{out[:1500]}"
+    )
+    # Clean but for the wt starter the watch seeds untracked (asserted below):
+    # no `.omc/project.id` left modified or untracked, the index is self-ignored.
+    rc, status = run_in(container, ["git", "status", "--porcelain"], cwd=repo, stdout_only=True)
+    assert rc == 0 and status.splitlines() == ["?? .config/"], status
     # the REAL gitnexus analyze ran and produced an index
     rc, _ = run_in(container, ["test", "-d", f"{repo}/.gitnexus"])
     assert rc == 0, f"watch did not build a real index:\n{out[:1500]}"
@@ -143,38 +149,163 @@ def test_watch_auto_build_skips_when_unconfigured(container):
     assert "no project build stage configured — skipping auto-build" in out, out
 
 
-def test_watch_auto_build_runs_stage_via_shim_provider(container):
-    require_token("claude")
-    configure_omc(container, "claude")
+def test_watch_auto_build_runs_build_hook(container):
+    """--auto-build runs the real `.omc/bin/build` through the stage runner; no LLM."""
+    # Deliberately NOT configure_omc: its model pin is a live `claude` probe, and
+    # auto-build asks no provider anything. `llm.default` alone probes nothing; watch
+    # needs only a configured omc and the provider CLI on PATH (its tool probe).
+    rc, out = run_in(container, ["omc", "configure", "--set", "llm.default=claude"], timeout=60)
+    assert rc == 0, out
     repo = make_work_repo(container)
-    rc, real_claude = run_in(container, ["bash", "-c", "command -v claude"])
-    assert rc == 0 and real_claude.strip().startswith("/"), real_claude
-    # Seed a project build stage + a shim for that one streamed build turn.
-    # Other Claude commands must still reach the real CLI: watch now checks
-    # auth and the current model catalog before it can run the build stage.
-    # NOTE: a printf-based one-liner with escaped embedded quotes (as originally
-    # sketched) loses its backslashes when the container's shell writes the file,
-    # producing an invalid (unquoted-key) OMC_STAGE JSON line. A quoted heredoc
-    # sidesteps that escaping entirely, matching _seed_container_hook's style above.
-    seed = (
-        f"mkdir -p {repo}/.omc/skills/build /shim && "
-        f"printf '# build\\nrun true\\n' > {repo}/.omc/skills/build/SKILL.md && "
-        "cat > /shim/claude <<'EOF'\n"
-        f"{_claude_build_shim(real_claude.strip())}"
-        "EOF\n"
-        "chmod +x /shim/claude"
+    instructions = hook_instructions(
+        timeout="5m",
+        quiet="2m",
+        done="The hook exits once it has written `marker`. Nothing is held.",
+        passed="Exit 0. Any other exit is failed.",
+        fixing="Read the log. Never edit `.omc/bin/*`: that is the stage itself.",
     )
-    rc, out = run_in(container, ["bash", "-c", seed])
+    add_stage_hook(container, repo, "build", "echo built > marker; exit 0", instructions)
+    rc, out = run_in(
+        container,
+        ["bash", "-c", "git add -A && git commit -qm 'build hook' && git push -q origin main"],
+        cwd=repo,
+    )
     assert rc == 0, out
-    shim_path = "PATH=/shim:/usr/local/bin:/usr/bin:/bin"
-    rc, status_text = run_in(container, ["env", shim_path, "claude", "auth", "status"])
-    assert rc == 0, status_text
-    assert json.loads(status_text)["loggedIn"] is True
-    argv = ["env", shim_path, "omc", "watch", "--once", "--auto-build"]
-    rc, out = run_in(container, argv, cwd=repo, timeout=300)
+    rc, out = run_in(container, ["omc", "watch", "--once", "--auto-build"], cwd=repo, timeout=300)
     assert rc == 0, out
-    assert "running project build stage via claude" in out, out
+    assert "running project build stage (.omc/bin/build)" in out, out
     assert "auto-build passed" in out, out
+    rc, marker = run_in(container, ["cat", f"{repo}/marker"])
+    assert rc == 0 and marker.strip() == "built", f"the build hook did not run:\n{out}"
+
+
+def _json_file(container, path):
+    rc, raw = run_in(container, ["cat", path], timeout=5)
+    assert rc == 0, f"no {path}: {raw}"
+    return json.loads(raw)
+
+
+def _file_hex(container, path) -> str:
+    rc, out = run_in(
+        container,
+        ["python3", "-c", "import sys; print(open(sys.argv[1], 'rb').read().hex())", path],
+        timeout=5,
+    )
+    assert rc == 0, out
+    return out.strip()
+
+
+def _stage_answer(out: str) -> dict:
+    lines = [line for line in out.splitlines() if line.startswith("OMC_STAGE_RUN ")]
+    assert len(lines) == 1, out
+    return json.loads(lines[0][len("OMC_STAGE_RUN ") :])
+
+
+# Worst case under the default 300 s ceiling: 10 (configure) + 5 (repo) + 2 x 5 (the
+# hook and its template) + 5 (commit) + 140 (watch --once: sync, a three-file repo's
+# embedding index, the build) + 4 x 5 (the primary's ids, record and project id) + 20
+# (wt switch, copying the ignored files) + 5 (the copied id) + 30 (the stand-in takes
+# the lock) + 3 x 10 (wait, start, wait: the hook exits at once) + 5 x 5 (the checks)
+# = 300 s.
+def test_watch_auto_build_cache_copied_into_a_worktree_is_rekeyed(container):
+    """A worktree cut after an auto-build gets the primary's `.cache/` through the
+    seeded wt config's copy-ignored step; its first stage command re-keys the copied
+    `worktree.id`, so it never sees the primary's run, and its own build leaves the
+    primary's record alone. No LLM: as test_watch_auto_build_runs_build_hook."""
+    rc, out = run_in(container, ["omc", "configure", "--set", "llm.default=claude"], timeout=10)
+    assert rc == 0, out
+    repo = make_work_repo(container, timeout=5)
+    instructions = hook_instructions(
+        timeout="5m",
+        quiet="2m",
+        done="The hook exits once it has recorded the build. Nothing is held.",
+        passed="Exit 0. Any other exit is failed.",
+        fixing="Read the log. Never edit `.omc/bin/*`: that is the stage itself.",
+    )
+    # Outside the checkout: an untracked marker would make the worktree dirty.
+    add_stage_hook(
+        container, repo, "build", 'echo "$PWD" >> /tmp/omc-copied-builds; exit 0', instructions
+    )
+    rc, out = run_in(
+        container,
+        ["bash", "-c", "git add -A && git commit -qm 'build hook' && git push -q origin main"],
+        cwd=repo,
+        timeout=5,
+    )
+    assert rc == 0, out
+    rc, out = run_in(container, ["omc", "watch", "--once", "--auto-build"], cwd=repo, timeout=140)
+    assert rc == 0, out
+    assert "auto-build passed" in out, out
+    primary_wid = _json_file(container, f"{repo}/.cache/worktree.id")
+    primary_last = _json_file(container, f"{repo}/.cache/omc/last-build.json")
+    primary_last_hex = _file_hex(container, f"{repo}/.cache/omc/last-build.json")
+    rc, project_id = run_in(container, ["cat", f"{repo}/.omc/project.id"], timeout=5)
+    assert rc == 0, project_id
+    project_id = project_id.strip()
+
+    rc, out = run_in(
+        container,
+        [
+            "wt",
+            "switch",
+            "--create",
+            "feature/copied",
+            "--base",
+            "origin/main",
+            "--no-cd",
+            "--yes",
+            "--format=json",
+        ],
+        cwd=repo,
+        timeout=20,
+        stdout_only=True,
+    )
+    assert rc == 0, out
+    worktree = json.loads(out)["path"]
+    copied = _json_file(container, f"{worktree}/.cache/worktree.id")
+    assert copied == primary_wid, f"wt did not copy the primary's .cache/: {copied}"
+
+    hold_watch_stand_in(container, repo)
+    rc, out = run_in(
+        container, ["omc", "internal", "stage", "wait", "build"], cwd=worktree, timeout=10
+    )
+    assert rc == 1, f"the worktree saw the primary's copied build run:\n{out}"
+    rc, out = run_in(
+        container,
+        ["omc", "internal", "stage", "start", "build"],
+        cwd=worktree,
+        timeout=10,
+        stdout_only=True,
+    )
+    assert rc == 0, out
+    started = _stage_answer(out)
+    rc, out = run_in(
+        container,
+        ["omc", "internal", "stage", "wait", "build"],
+        cwd=worktree,
+        timeout=10,
+        stdout_only=True,
+    )
+    assert rc == 0, out
+    answer = _stage_answer(out)
+    assert answer["run"] == started["run"] and answer["state"] == "passed", answer
+
+    rekeyed = _json_file(container, f"{worktree}/.cache/worktree.id")
+    assert rekeyed["id"] != primary_wid["id"], rekeyed
+    assert rekeyed["path"] == worktree, rekeyed
+    last = _json_file(container, f"{worktree}/.cache/omc/last-build.json")
+    assert last["run"] == answer["run"] != primary_last["run"], last
+    assert last["worktree_id"] == rekeyed["id"], last
+    assert f"/{project_id}/{rekeyed['id']}/build-" in last["log"], last
+    assert _file_hex(container, f"{repo}/.cache/omc/last-build.json") == primary_last_hex, (
+        "the worktree's build rewrote the primary's last-build.json"
+    )
+    rc, _ = run_in(container, ["test", "!", "-e", f"{worktree}/.omc/project.id"], timeout=5)
+    assert rc == 0, "the worktree has its own .omc/project.id"
+    rc, status = run_in(
+        container, ["git", "status", "--porcelain"], cwd=worktree, timeout=5, stdout_only=True
+    )
+    assert rc == 0 and status == "", status
 
 
 _CLI = "/root/.omc/dependencies/gitnexus/gitnexus/dist/cli/index.js"

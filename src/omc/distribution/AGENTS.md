@@ -58,27 +58,33 @@ repo). In any other repository, ignore everything in this section.
 - **stage-gate rule — bounded fix-forward, then a CRITICAL stop**: Consume
   each stage's single `OMC_STAGE` verdict. Only `"passed": true` passes;
   `"configured": false` is success when `"passed": true`. A `"passed": false`
-  verdict or no verdict fails closed. On failure, dispatch one fix subagent at
-  the heavy coding tier with the failed stage's `summary` as its brief (or
-  the observed failure when no verdict exists), run `/omc:build`, then
-  `/omc:check`, then rerun the remaining gate stages in order;
+  verdict or no verdict fails closed. A verdict whose summary starts with
+  `CRITICAL STOP:` is the CRITICAL question at once: no fix is dispatched and
+  no cycle is spent. On any other failure, dispatch one fix subagent at the
+  heavy coding tier, briefed with the failed stage's `summary`, its log path
+  and the stage's `## Fixing failures` section from the instructions path in
+  the summary (or the observed failure when no verdict exists). For a held verify
+  (its summary says `held`) the brief adds: the system is still up;
+  `/omc:investigate local` inspects it; the `/omc:build` that follows the fix
+  ends the hold, so look first and build afterwards. Then run `/omc:build`,
+  then `/omc:check`, then rerun the remaining gate stages in order;
   a fix repairs the code under test, never the stage's own definition
-  (`.omc/skills/<stage>/`), a hook's own file (`.omc/hooks/<name>/`) or the
-  script or command it runs, and a stage that only passes by editing itself
-  is the CRITICAL question, asked at once, without spending the remaining
-  cycles.
+  (`.omc/bin/<stage>` and its instructions, or `.omc/skills/review/`), a
+  hook's own file (`.omc/hooks/<name>/`) or the script or command it runs,
+  and a stage that only passes by editing itself is the CRITICAL question,
+  asked at once, without spending the remaining cycles.
   A failed `/omc:check` blocks every later stage. It is the cycle's red
   stage; any further repair consumes the remaining cycle budget and never
   resets the bound. A red `/omc:verify` is repaired instead of restarted:
-  the fix subagent is briefed with verify's failure output, then `/omc:build`,
-  then `/omc:check`, then `/omc:verify rerun only: <pieces>` to rerun only
-  the failed pieces. Still red takes the next fix; green runs the full
-  `/omc:verify`. Without a "Running a subset" section in the project's verify
-  skill, the targeted rerun is skipped: `/omc:build`, then `/omc:check`, then
-  the full `/omc:verify`, one full run per cycle. A red full run takes the
-  next fix, briefed with the pieces that are red now; a green one continues
-  with the stage after verify, and nothing before it is rerun: a verify fix
-  never returns to review.
+  the fix subagent is briefed as above, with verify's failure output, then
+  `/omc:build`, then `/omc:check`, then `/omc:verify rerun only: <pieces>`
+  to rerun only the failed pieces. Still red takes the next fix; green runs
+  the full `/omc:verify`. Without a "Rerunning a subset" section in the
+  verify stage's instructions, the targeted rerun is skipped: `/omc:build`,
+  then `/omc:check`, then the full `/omc:verify`, one full run per cycle. A
+  red full run takes the next fix, briefed with the pieces that are red now;
+  a green one continues with the stage after verify, and nothing before it
+  is rerun: a verify fix never returns to review.
   A red hook verdict (`"ok": false`, or a failed hook's `error`, from
   `post_rebase` or `pre_push`) is a red gate under this rule: the fix subagent is
   briefed with the hook's `reason` (or its `error`), then `/omc:build`, then
@@ -87,18 +93,26 @@ repo). In any other repository, ignore everything in this section.
   MR gate's verify question.
   The bound: up to ten fix cycles per conductor run, one budget shared by
   `/omc:check`, `/omc:build`, `/omc:verify` and the `post_rebase` and
-  `pre_push` hooks; a cycle is one fix dispatch with whatever reruns follow
+  `pre_push` hooks, or `<n>` while the red stage's summary carries
+  `fix cycles: <n>` (its `## Limits` `Fix cycles`, at most 10, so a stage
+  only ever lowers the ten); the cycles stay one counter per conductor run:
+  with the counter at 3, spent on stages without a bound of their own, a
+  stage whose summary carries `fix cycles: 3` that turns red is the CRITICAL
+  question; a cycle is one fix dispatch with whatever reruns follow
   it, targeted or full; reruns are never counted on their own; a fix whose
   rerun passes by flake still spent its cycle. Each cycle must make progress
   (fewer or different failing pieces than before it) or try an idea no
   earlier cycle tried, and the conductor says which in one line per cycle,
   e.g. "fix cycle 3/10: progress — 4 → 2 failing pieces"; that line is also
   what a compacted context keeps of the count. A cycle that brings neither is
-  the CRITICAL question at once; so is the tenth cycle ending red. The
+  the CRITICAL question at once; so is the tenth cycle ending red, or the
+  `<n>`th under a stage's own bound. The
   question names the red gate, its failure summary, what the fixes tried,
   and what answer is needed from the user. A red review's own repair is not
   counted, though a red build or check after it is; the review stage turns
-  what it cannot settle into its batched question. No later phase runs on a
+  what it cannot settle into its batched question. No conductor kills a
+  stage run; a CRITICAL question, or any other question to the user, leaves
+  a held verify up. No later phase runs on a
   red gate: implement makes no handoff on a red check, audit invokes no
   `finish`, `create-mr` pushes nothing.
   A required answer resumes the remaining phases under the same authorization;
@@ -120,7 +134,7 @@ repo). In any other repository, ignore everything in this section.
     three-line rubric over a one-line fixture needs no more), overridable
     through `CLAUDE_E2E_MODEL` / `CLAUDE_E2E_JUDGE_MODEL`.
 - **Machine contracts are sacred**: single-line `OMC_SLUG` / `OMC_STAGE` /
-  `OMC_REBASE_MAIN` / `OMC_TICKET` / `OMC_KNOWLEDGE` /
+  `OMC_STAGE_RUN` / `OMC_REBASE_MAIN` / `OMC_TICKET` / `OMC_KNOWLEDGE` /
   `OMC_DESIGN_RECORD` / `OMC_MODELS` / `OMC_GATE` / `OMC_HOOK` verdicts are
   parsed by tools — emit them exactly as their skills specify, never wrapped in
   markdown.

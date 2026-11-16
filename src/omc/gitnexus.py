@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .fsutil import read_json_object
 from .toolctx import ToolContext, gitnexus_env
 from .wtconfig import current_branch
 
@@ -395,19 +396,11 @@ def store_inverted(root: Path, base: str) -> bool:
 INDEX_META_NAMES = ("gitnexus.json", "meta.json")
 
 
-def _read_json_object(path: Path) -> dict | None:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
 def read_index_meta(root: Path) -> dict | None:
     for name in INDEX_META_NAMES:
         p = Path(root) / ".gitnexus" / name
         if p.is_file():
-            return _read_json_object(p)  # unreadable counts as missing, no fallback
+            return read_json_object(p)  # unreadable counts as missing, no fallback
     return None
 
 

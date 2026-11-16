@@ -80,8 +80,8 @@ def _feature_with_verify_stage(container):
         container,
         repo,
         "verify",
-        f"Run `sh -c 'echo verified >> {_VERIFY_MARKER} && echo VERIFY-OK'`.\n"
-        "VERIFY-OK printed means the verify passed; anything else is a failure.",
+        f"echo verified >> {_VERIFY_MARKER} && echo VERIFY-OK",
+        "Exit 0, after VERIFY-OK is printed. Any other exit is failed.",
     )
     _write(
         container,
@@ -153,8 +153,8 @@ def test_red_pre_push_is_fixed_then_pushed(container):
         container,
         repo,
         "verify",
-        f"Run `sh -c 'echo verified >> {_VERIFY_MARKER} && echo VERIFY-OK'`.\n"
-        "VERIFY-OK printed means the verify passed; anything else is a failure.",
+        f"echo verified >> {_VERIFY_MARKER} && echo VERIFY-OK",
+        "Exit 0, after VERIFY-OK is printed. Any other exit is failed.",
     )
     add_hook(container, repo, "pre_push", _PRE_PUSH_BODY)
     _commit_all(container, repo, "add greeting, changelog, verify stage and pre_push")
@@ -205,8 +205,8 @@ def test_post_rebase_before_implementation_skips_the_check(container):
         container,
         worktree,
         "check",
-        f"Run `sh -c 'echo checked > {_CHECK_MARKER} && echo CHECK-OK'`.\n"
-        "CHECK-OK printed means the check passed; anything else is a failure.",
+        f"echo checked > {_CHECK_MARKER} && echo CHECK-OK",
+        "Exit 0, after CHECK-OK is printed. Any other exit is failed.",
     )
     add_hook(container, worktree, "post_rebase", _POST_REBASE_BODY)
     _commit_all(container, worktree, "branch greeting, check stage and post_rebase")

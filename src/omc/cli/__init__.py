@@ -117,7 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument(
         "--auto-build",
         action="store_true",
-        help="After each action tick, run the project's build stage via the default LLM",
+        help="After each action tick, run the project's `.omc/bin/build` stage (no LLM)",
     )
     p_watch.add_argument(
         "--rebase",

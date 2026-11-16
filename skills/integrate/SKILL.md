@@ -41,9 +41,11 @@ the remaining slots. The interactive session is where files get written.
    - `.omc/config/AGENTS.md` — the project's own agent instructions
    - `.config/wt.toml` — does a copy-ignored step exist?
    - `.gitnexus/` index
-   - `.omc/skills/check` · `.omc/skills/build` · `.omc/skills/verify` ·
-     `.omc/skills/review` · `.omc/skills/explain-context` ·
-     `.omc/skills/investigation-context`
+   - `.omc/bin/check` · `.omc/bin/build` · `.omc/bin/verify` (each
+     with its `.instructions.md`; an old `.omc/skills/<stage>` without a hook
+     is **unmigrated**, a red stage, and so is a hook still named
+     `<stage>.sh`) · `.omc/skills/review` ·
+     `.omc/skills/explain-context` · `.omc/skills/investigation-context`
    - Global knowledge skills: `~/.omc/skills/explain-context/SKILL.md` and
      each `~/.omc/skills/explain-source/<name>/SKILL.md`. Use
      `omc internal skills list explain-context` and
@@ -120,37 +122,89 @@ proposal in this turn.
 In review mode, show the existing file beside your proposal and flag drift
 and gaps; never silently replace it.
 
-### `.omc/skills/check`
+**Hook contract** — the three stage slots design a pair: the hook
+`.omc/bin/<stage>` and `.omc/bin/<stage>.instructions.md`, drafted from
+`omc internal stage template`. The conventional hook:
+
+```sh
+#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = "--show-instructions" ]; then
+    exec cat "$(dirname "$0")/<stage>.instructions.md"
+fi
+exec <command> "$@"
+```
+
+- `chmod +x` the hook: a hook that is not executable is a CRITICAL STOP.
+- The hook has no extension: `.omc/bin/<stage>`, never `<stage>.sh`. omc
+  runs the hook directly by its path, so its first line must be a shebang
+  (`#!/bin/sh`, `#!/usr/bin/env python3`, …) or the file a binary; any
+  language works. A hook that cannot start is a CRITICAL STOP.
+- `"$@"` carries the arguments of the `## Rerunning a subset` section.
+- The exit code is the verdict. `$OMC_STAGE_RESULT` is only for a verify
+  that keeps a system up after a failure.
+- The instructions follow the template; omc checks them at every `start`.
+  `## Limits` keeps only its `Timeout:`, `Quiet timeout:` and `Fix cycles:`
+  lines; the template's paragraph there is guidance to delete, and any other
+  line is a CRITICAL STOP.
+
+**Unmigrated stage**: `.omc/skills/<stage>/SKILL.md` without a hook → convert
+it: commands into the hook, prose into `## Limits` (data: `Timeout`,
+`Quiet timeout`, optional `Fix cycles`) plus the agent-read sections; delete
+the old skill once the user approves the pair. A hook still named
+`<stage>.sh` is unmigrated too: `git mv` it to `.omc/bin/<stage>`, keeping
+its executable bit and shebang.
+
+**Validating a pair** — interactive only, after the user approves the pair;
+never in headless mode. Stages need a running `omc watch` in the primary
+checkout, so first confirm with the user that it runs (without one, `start`
+is refused).
+- check, build: `omc internal stage start <stage>`, then
+  `omc internal stage wait <stage>` until the run ends. A `refused` answer
+  (other than the missing watch) means the pair is defective: fix the pair —
+  that is this skill's job. Show the user a run that ends red.
+- verify: run `.omc/bin/verify --show-instructions`, check its output
+  against the template, and say that this is all you validated (a `start`
+  would launch the full run). Offer the full run to the user; if they run it
+  and it holds, end it with `/omc:verify kill`.
+
+### `.omc/bin/check`
 The fast "am I on the right track" gate: build only what the unit tests
 need, then run them. Investigate the minimal test loop — justfile/Makefile
 test recipes, package.json scripts, CI unit-test jobs, and the graph
-(`query "unit tests"`). Propose a draft naming the REAL commands and what
-passing means. Keep it fast: no E2E, no world-build.
+(`query "unit tests"`). Design the hook plus `.omc/bin/check.instructions.md`
+per the hook contract, naming the REAL commands and what passing means, and
+validate it as in *Validating a pair*. Keep it fast: no E2E, no world-build.
 
-**Migration trigger**: `.omc/skills/check` absent while `.omc/skills/build`
-exists → the project predates the check/build split. Audit the build stage
-against the current semantics (build = the world, NO tests): a build stage
-that runs unit tests is pre-split — propose splitting it into `check`
-(minimal build + unit tests) and `build` (world, no tests), grounded in the
-project's actual commands. Applies in BOTH fresh-setup and review modes.
+**Migration trigger**: no check stage (`.omc/bin/check` or
+`.omc/skills/check`) while a build stage exists (`.omc/bin/build` or
+`.omc/skills/build`) → the project predates the check/build split. Audit
+the build stage against the current semantics (build = the world, NO
+tests): a build stage that runs unit tests is pre-split — propose splitting
+it into `check` (minimal build + unit tests) and `build` (world, no tests),
+grounded in the project's actual commands. Applies in BOTH fresh-setup and
+review modes.
 
-### `.omc/skills/build`
+### `.omc/bin/build`
 Build the world — everything compiles and packages, NO tests (unit tests
 live in `check`). Investigate how this project actually builds: justfile,
 Makefile, package.json scripts, pyproject, CI workflows — and the graph
-(`query "build"`). Propose a draft naming the REAL commands and what
-passing means (exit codes, format/lint steps). Drift example worth flagging
-in review mode: the skill says `make test` while CI runs `just build`.
+(`query "build"`). Design the hook plus `.omc/bin/build.instructions.md`
+per the hook contract, naming the REAL commands and what passing means
+(exit codes, format/lint steps), and validate it as in *Validating a pair*.
+Drift example worth flagging in review mode: the stage runs `make test` while
+CI runs `just build`.
 
-### `.omc/skills/verify`
+### `.omc/bin/verify`
 What's the heavier "does it still work" tier here — integration tests, e2e
 suites, docker harnesses, smoke scripts? How long does it take, what does it
-need (services, tokens)? Propose the stage with honest cost notes and hard
-pass criteria. An agent starts it in two places only: `/omc:audit`'s fixed
-verify after its review, and the MR gate when the gate says run; the user or
-the project may run it at any time. When the project's E2E runner can select
-tests, suggest a "Running a subset" section saying how to rerun only named
-pieces, so a red verify reruns just the failed pieces after a fix.
+need (services, tokens)? Design the hook plus
+`.omc/bin/verify.instructions.md` per the hook contract, with honest cost
+notes and hard pass criteria, and validate its `--show-instructions` (a
+real run is the user's call). An agent starts it in two places only:
+`/omc:audit`'s fixed verify after its review, and the MR gate when the gate
+says run; the user or the project may run it at any time. When the project's E2E runner can
+select tests, suggest a "Rerunning a subset" section saying how to rerun only
+named pieces, so a red verify reruns just the failed pieces after a fix.
 
 ### `.omc/skills/review`
 What do this project's reviews actually check — CONTRIBUTING.md, CI lint
@@ -180,6 +234,8 @@ with instructions, which is the intended behavior.
 
 ### Session-side hooks
 
+These answer one yes/no question each; they are not the
+`.omc/bin/<stage>` stage hooks above, which are the stages themselves.
 Each hook is a project skill at `.omc/hooks/<name>/SKILL.md`, which the
 internal `hook` skill follows as a black box from the project root and whose
 single `OMC_HOOK` line it relays (a hook may wrap a script when the project
@@ -266,9 +322,10 @@ surface left unchanged. The drafts are ready for a later interactive review.
    `.omc/skills/gitnexus-ignore-context` and `.gitnexusignore`, which are
    committed with the rest.
 2. What's now active: `/omc:audit` and `/omc:finish` run the stage gates
-   you just designed; the MR gate asks your hooks; `/omc:explain` uses the
-   context map; `omc watch` keeps the graph fresh (suggest the cadence);
-   worktrees snapshot it all.
+   you just designed; the MR gate asks your hooks; stages need a running
+   `omc watch` in the primary checkout; `/omc:explain` uses the context map;
+   `omc watch` keeps the graph fresh (suggest the cadence); worktrees
+   snapshot it all.
 3. Suggest committing the new/changed files (they're all meant to be
    committed) — offer to run the project's own check stage first as a sanity
    check.

@@ -14,9 +14,7 @@ same failure every tick (`knowledge-stale:<codes>`).
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -24,7 +22,8 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
-from .buildprogress import ProgressTracker, sentinel_line
+from . import stagedef, stageid, stagerun
+from .buildprogress import ProgressTracker
 from .cli.progress_bar import BarThread
 from .config.schema import Config
 from .errors import OmcError
@@ -37,12 +36,16 @@ from .gitnexus import (
     snapshot_freshness,
 )
 from .probe import require_tools
-from .providers.registry import get_provider
-from .reconcile import reconcile
-from .skills_source import skill_prompt
-from .taskmodels import orchestrator
 from .toolctx import ToolContext
-from .watchlock import WATCH_BAIL_MSG, acquire_busy_narrated, acquire_instance, watch_locks
+from .watchlock import (
+    WATCH_BAIL_MSG,
+    acquire_busy_narrated,
+    acquire_instance,
+    alive_lock_path,
+    hold_alive,
+    release_alive,
+    watch_locks,
+)
 from .wtconfig import current_branch, ensure_wt_config, primary_root, rebase_in_progress, repo_root
 
 
@@ -106,21 +109,6 @@ def _post_watch_hook(ctx: ToolContext, root: str, outcome: str) -> None:
         _say(f"✗ post-watch hook failed ({status}) — log: {log_path}")
 
 
-_STAGE_RE = re.compile(r"^OMC_STAGE (\{.*\})\s*$", re.MULTILINE)
-
-
-def _parse_stage(output: str) -> dict | None:
-    matches = _STAGE_RE.findall(output)
-    if not matches:
-        return None
-    try:
-        # last verdict line wins — transcripts may echo earlier OMC_STAGE lines
-        v = json.loads(matches[-1])
-    except json.JSONDecodeError:
-        return None
-    return v if isinstance(v, dict) else None
-
-
 _CARGO_PROGRESS_ENV = {
     # cargo suppresses its (12/1288) counters when piped; these force them so
     # the progress parsers see real numbers. Harmless for non-cargo projects.
@@ -129,84 +117,43 @@ _CARGO_PROGRESS_ENV = {
 }
 
 
-def _auto_build(ctx: ToolContext, cfg: Config, root: str) -> None:
-    """--auto-build: run the project's build stage via the default LLM after
-    an action tick, STREAMING: decoded transcript tees to a live log
-    (announced up front, tail -f-able) and feeds the progress bar. No
-    timeout — a build may run an hour; the elapsed clock + Ctrl-C replace
-    it. Failures warn, never crash. The SKILL.md existence pre-check
-    deliberately mirrors the build skill's own step 2 — a cost guard so an
-    unconfigured project never spends an LLM call per tick to learn
-    'nothing to do'."""
-    if not (Path(root) / ".omc" / "skills" / "build" / "SKILL.md").is_file():
+def _auto_build(ctx: ToolContext, root: str) -> None:
+    """--auto-build: run the project's `.omc/bin/build` after an action tick,
+    through the stage runner in this process (design 6.7) — no LLM. The log is
+    announced once the run started, and its lines feed the progress bar. No
+    timeout beyond the stage's own limits; Ctrl-C kills the run, then reaches
+    run_watch. Watch holds the alive lock throughout, so the run's watch probe
+    passes. Failures warn, never crash."""
+    if stagedef.hook_state(Path(root), "build") == "absent":
         _say("· no project build stage configured — skipping auto-build")
         return
-    name = cfg.llm.default
-    try:
-        provider = get_provider(name)
-        choice = orchestrator(ctx, cfg)
-    except OmcError as exc:
-        _say(f"✗ auto-build failed (model choice: {exc})")
-        return
-    log, log_path = _make_live_log("omc-auto-build-")
-    _say(f"→ running project build stage via {name} (LLM-heavy) — log: {log_path}")
+    _say("→ running project build stage (.omc/bin/build)")
     tracker = ProgressTracker()
-    collected: list[str] = []
-
-    def on_line(raw: str) -> None:
-        for text in provider.decode_stream_line(raw):
-            log.write(text + "\n")
-            log.flush()
-            collected.append(text)
-            tracker.feed(text)
-
     bar = BarThread(tracker)
-    status: str | None = None
-    rc: int | None = None
-    bar.start()
+
+    def started(answer: stagerun.RunAnswer) -> None:
+        _say(f"— log: {answer.log}")
+        bar.start()  # after the line: the bar redraws in place on the line below it
+
     try:
-        rc = ctx.stream(
-            provider.headless_stream_argv(
-                skill_prompt("build"),
-                model=choice.model_arg,
-                effort=choice.effort,
-                allowed_tools=["Bash", "Read", "Glob", "Grep"],
-            ),
-            cwd=root,
-            extra_env={**provider.title_env(), **_CARGO_PROGRESS_ENV},
-            on_line=on_line,
+        answer = stagerun.run_foreground(  # in watch's cwd: the primary checkout, `root`
+            ctx,
+            "build",
+            on_line=tracker.feed,
+            on_start=started,
+            extra_env=_CARGO_PROGRESS_ENV,
         )
-    except OSError as exc:
-        # ctx.stream re-raises an on_line failure (our own log write) after
-        # reaping the child, so this OSError is BOTH a spawn failure (nothing
-        # decoded yet) AND a mid-stream log-write failure (lines already in).
-        status = "failed to start" if not collected else "log write failed"
-        try:
-            log.write(f"{exc}\n")
-        except OSError:
-            pass
+    except (OmcError, OSError) as exc:  # OSError: e.g. a stage root it cannot write
+        _say(f"✗ auto-build failed ({exc})")
+        return
     finally:
         bar.stop()
-        try:
-            log.write(sentinel_line(rc) + "\n")
-        except OSError:
-            pass
-        try:
-            log.close()
-        except OSError:
-            pass
-    if status is None:
-        verdict = _parse_stage("\n".join(collected))
-        if rc != 0:
-            status = f"exit {rc}"
-        elif verdict is None:
-            status = "no verdict"
-        elif not verdict.get("passed"):
-            status = str(verdict.get("summary") or "stage failed")
-    if status is None:
+    if answer.state == "passed":
         _say("✓ auto-build passed")
-    else:
-        _say(f"✗ auto-build failed ({status}) — log: {log_path}")
+        return
+    why = f"{answer.state}: {answer.reason}" if answer.reason else answer.state
+    log = f" — log: {answer.log}" if answer.log else ""
+    _say(f"✗ auto-build failed ({why}){log}")
 
 
 def _refresh_index(
@@ -304,7 +251,14 @@ def _tick(
         if _out(ctx, [ctx.git_bin, "ls-files", "-u"], root):
             return quiet("conflicted", "· unmerged paths in the tree — resolve them, skipping sync")
         old = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
-        cp = ctx.run([ctx.git_bin, "rebase", "--autostash", f"origin/{base}"], cwd=root)
+        rebase_argv = [ctx.git_bin, "rebase", "--autostash", f"origin/{base}"]
+        cp = ctx.run(rebase_argv, cwd=root)
+        if (
+            cp.returncode != 0
+            and not rebase_in_progress(ctx, root)
+            and stageid.yield_to_committed_id(ctx, root, base, cp.stderr or "")
+        ):
+            cp = ctx.run(rebase_argv, cwd=root)
         if cp.returncode != 0:
             why = (cp.stderr or "").strip()[:200]
             if rebase_in_progress(ctx, root):
@@ -350,6 +304,8 @@ def _tick(
         return quiet("dirty", "· working tree is dirty — skipping sync")
     old = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
     cp = ctx.run([ctx.git_bin, "merge", "--ff-only", f"origin/{base}"], cwd=root)
+    if cp.returncode != 0 and stageid.yield_to_committed_id(ctx, root, base, cp.stderr or ""):
+        cp = ctx.run([ctx.git_bin, "merge", "--ff-only", f"origin/{base}"], cwd=root)
     if cp.returncode != 0:
         return quiet("merge-failed", f"✗ ff-merge failed: {(cp.stderr or '').strip()[:200]}")
     new = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
@@ -405,45 +361,23 @@ def run_watch(
         # Unreachable inside a repo in practice; doctrine says warn, never wedge.
         _say("✗ could not resolve the watch lock dir — running without the mutex")
         instance = busy = None
+        alive_fd = None
     else:
         instance, busy = locks
         if not acquire_instance(instance, clear=clear_mutex):
             print(WATCH_BAIL_MSG, file=sys.stderr)
             return 1
+        # Held for the whole lifetime: what a stage run probes (design 6.4).
+        alive_path = alive_lock_path(ctx, cwd=root)
+        alive_fd = None if alive_path is None else hold_alive(alive_path, clear=clear_mutex)
     _say(f"→ watching {root} (base {base}, every {interval}s) — Ctrl-C stops")
     last: str | None = None
     reset_pending = reset_gitnexus
     reset_note: str | None = None
-    model_groups: set[str] = set()
-    if auto_build:
-        model_groups.add("orchestrator")
-    first_tick = True
-    last_reconcile_failed = False
     try:
         while True:
             # Busy lock held for the WHOLE busy portion (tick + hooks): free ⇔ idle.
             with acquire_busy_narrated(busy, _say) if busy is not None else nullcontext():
-                if model_groups:
-                    # The first tick is the command's entry: fail loud. Later
-                    # ticks warn-and-skip, keeping the previous cfg.
-                    try:
-                        cfg = reconcile(
-                            ctx,
-                            cfg,
-                            model_groups,
-                            say=_say,
-                            dry_run=False,
-                            report_current=first_tick or last_reconcile_failed,
-                            # The refresh turn belongs to the entry tick only.
-                            command_start=first_tick,
-                        )
-                        last_reconcile_failed = False
-                    except OmcError as exc:
-                        if first_tick:
-                            raise
-                        _say(f"✗ model reconciliation failed: {exc}")
-                        last_reconcile_failed = True
-                first_tick = False
                 reset_progress = ResetProgress()
                 last = _tick(
                     ctx,
@@ -470,7 +404,7 @@ def run_watch(
                 if last in ("synced", "refreshed"):
                     _post_watch_hook(ctx, root, last)
                     if auto_build:
-                        _auto_build(ctx, cfg, root)
+                        _auto_build(ctx, root)
             if once:
                 return 0
             time.sleep(interval)
@@ -478,5 +412,7 @@ def run_watch(
         _say("· stopped")
         return 0
     finally:
+        if alive_fd is not None:
+            release_alive(alive_fd)
         if instance is not None and instance.is_locked:
             instance.release()

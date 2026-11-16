@@ -813,12 +813,12 @@ def test_refresh_waits_for_busy_lock_holder(tmp_path, capsys, monkeypatch):
     from omc.toolctx import ToolContext
     from omc.watchlock import BUSY_WAIT_MSG, busy_lock
 
-    from .test_watchlock import _hold_in_subprocess
+    from ._mutexproc import hold_in_subprocess
 
     repo, wt, calls, _ = _gitnexus_env_with_config(tmp_path, monkeypatch)
     _seed_fresh_index(repo)
     lock = busy_lock(ToolContext.from_env(), cwd=str(repo))
-    p = _hold_in_subprocess(lock.lock_file, None)
+    p = hold_in_subprocess(lock.lock_file, None)
     original_say = internal._say
 
     def say_and_release(msg):
@@ -992,8 +992,7 @@ def test_design_record_invalid_config_reaches_the_rc1_boundary(tmp_path, capsys,
 
 
 def test_refresh_move_during_analyze_releases_lock(tmp_path, capsys, monkeypatch):
-    from ._mutexproc import flock_free
-    from .test_watch import _analyze_side_effects
+    from ._mutexproc import analyze_side_effects, flock_free
 
     repo, wt, calls, _ = _gitnexus_env_with_config(tmp_path, monkeypatch)
     subprocess.run(["git", "-C", str(repo), "branch", "feature/x"], check=True)
@@ -1002,7 +1001,7 @@ def test_refresh_move_during_analyze_releases_lock(tmp_path, capsys, monkeypatch
         "#!/bin/sh\n"
         f'echo "$@" >> "{calls}"\n'
         'case "$*" in\n*" analyze --skip-agents-md --skip-skills"*) '
-        + _analyze_side_effects(move_to="feature/x")
+        + analyze_side_effects(move_to="feature/x")
         + " ;;\nesac\necho ok\n"
     )
     old = _chdir(repo)

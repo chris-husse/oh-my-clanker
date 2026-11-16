@@ -14,7 +14,9 @@ root=$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)
 
 # Source id = the content of the working tree (tracked + untracked, minus
 # ignored), so two checkouts with identical content share one image and any
-# edit — tracked or not — gets its own id. A temporary index keeps the real
+# edit — tracked or not — gets its own id. pytest below always runs under
+# `uv run --frozen`: a run that rewrote uv.lock would change its own source
+# id between the golden and parallel passes. A temporary index keeps the real
 # one untouched; write-tree only adds objects, never refs.
 source_id=$(
     # A path that does not exist yet: git rejects an empty pre-created index.
@@ -134,7 +136,7 @@ sweep() {
         | awk '$2 ~ /^omc-e2e(:|-stage:)/ {print $1}' | xargs -r docker rm -f >/dev/null 2>&1 || true
 }
 run_golden() {
-    uv run pytest -m "e2e and golden and not expensive and not codex_gate" -q -n 0 \
+    uv run --frozen pytest -m "e2e and golden and not expensive and not codex_gate" -q -n 0 \
         -p no:cacheprovider "$root/tests/e2e/golden" "$@"
     [ "$no_docker" = 1 ] && return 0
     # The stages' side effect is the point: refuse to continue without snapshots.
@@ -145,7 +147,7 @@ run_golden() {
     fi
 }
 run_rest() {
-    uv run pytest -m "e2e and not golden and not expensive and not codex_gate" -q -n auto \
+    uv run --frozen pytest -m "e2e and not golden and not expensive and not codex_gate" -q -n auto \
         --dist loadgroup -p no:cacheprovider "$@"
 }
 selection_is_golden_node_ids() {
@@ -182,11 +184,11 @@ prune() {
     # a 72 h threshold for holders with a valid creation label.
     # Holders first: a running holder blocks even `rmi -f` of its image.
     docker ps -aq --filter label=omc.e2e=holder \
-        | xargs docker inspect --format '{{.Id}} {{index .Config.Labels "omc.e2e.source"}}' 2>/dev/null \
-        | awk -v id="${source_id}" '$2 != id {print $1}' | xargs docker rm -f >/dev/null 2>&1 || true
+        | xargs -r docker inspect --format '{{.Id}} {{index .Config.Labels "omc.e2e.source"}}' 2>/dev/null \
+        | awk -v id="${source_id}" '$2 != id {print $1}' | xargs -r docker rm -f >/dev/null 2>&1 || true
     docker images --format '{{.Repository}}:{{.Tag}}' \
         | grep -E '^omc-e2e(:|-stage:)' | grep -v -- "${source_id}\$" \
-        | xargs docker rmi -f >/dev/null 2>&1 || true
+        | xargs -r docker rmi -f >/dev/null 2>&1 || true
     echo "kept images for ${source_id}; removed the rest" >&2
 }
 case "$mode" in

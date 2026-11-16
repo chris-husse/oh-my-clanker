@@ -4,6 +4,7 @@ Judged by recomputing the verdict, never by exit codes."""
 import json
 import shlex
 import stat
+import subprocess
 
 import pytest
 
@@ -11,15 +12,24 @@ from omc.config.schema import Config
 from omc.gitnexus import refresh_knowledge
 from omc.toolctx import ToolContext
 
-from ._stubs import host_bin
-from .test_watch import (
-    _ctx_with_healing_node_stub,
-    _ctx_with_node_stub,
-    _ctx_with_shared_store_node_stub,
-    _git,
-    _git_out,
-    _repo_with_origin,
+from ._mutexproc import (
+    ctx_with_healing_node_stub,
+    ctx_with_node_stub,
+    ctx_with_shared_store_node_stub,
+    repo_with_origin,
 )
+from ._stubs import host_bin
+
+
+def _git(*args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _git_out(repo, *args):
+    return subprocess.run(
+        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
 
 REPO_PATH_SLOT = '"repoPath":"%s"'
 
@@ -52,17 +62,17 @@ def _run(ctx, repo, **kw):
 
 
 def test_fresh_snapshot_narrates_current_and_calls_nothing(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     v, said = _run(ctx, repo, reset=False)
     assert v.fresh and not calls.exists()  # refresh_knowledge itself never probes --version
     assert "✓ knowledge is current" in said
 
 
 def test_stale_index_heals_with_one_incremental_analyze(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     recorded = calls.read_text()
@@ -74,9 +84,9 @@ def test_stale_index_heals_with_one_incremental_analyze(tmp_path):
 
 
 def test_analyze_that_leaves_it_stale_escalates_to_clean(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     _foreign_stamping_stub(tmp_path)
     v, said = _run(ctx, repo, reset=False)
     recorded = calls.read_text()
@@ -94,9 +104,9 @@ def test_analyze_that_leaves_it_stale_escalates_to_clean(tmp_path):
 def test_failed_analyze_exit_code_is_narrated_but_verdict_decides(tmp_path, still_stale):
     """Exit codes are narrated, never trusted: a non-zero analyze that DID fix the
     metadata ends fresh; one that did not escalates like any other stale result."""
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     node = tmp_path / "bin" / "node"
     node.write_text(node.read_text().replace("echo ok\nexit 0\n", "echo ok\nexit 7\n"))
     if still_stale:
@@ -108,11 +118,11 @@ def test_failed_analyze_exit_code_is_narrated_but_verdict_decides(tmp_path, stil
 
 
 def test_inverted_store_destroys_first_exactly_one_analyze(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     (repo / ".gitnexus" / "meta.json").write_text(
         json.dumps({"branch": "feature/x", "lastCommit": "old"})
     )
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     v, said = _run(ctx, repo, reset=False)
     recorded = calls.read_text()
     assert recorded.index("clean --force") < recorded.index("analyze")
@@ -123,11 +133,11 @@ def test_inverted_store_destroys_first_exactly_one_analyze(tmp_path):
 
 
 def test_reset_leaves_a_leftover_docs_mirror_alone(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     docs = repo / ".omc" / "docs" / "gitnexus" / "docs"
     docs.mkdir(parents=True)
     (docs / "stale.md").write_text("x")
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     v, said = _run(ctx, repo, reset=True)
     recorded = calls.read_text()
     assert recorded.index("clean --force") < recorded.index("analyze")
@@ -136,8 +146,8 @@ def test_reset_leaves_a_leftover_docs_mirror_alone(tmp_path):
 
 
 def test_reset_with_failed_clean_aborts_before_analyze(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)  # fresh fixture: the FAILED clean is the story
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", clean_removes=False)
+    _, repo = repo_with_origin(tmp_path)  # fresh fixture: the FAILED clean is the story
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home", clean_removes=False)
     v, said = _run(ctx, repo, reset=True)
     assert any(s.startswith("✗ clean did not remove the index") for s in said)
     assert "analyze" not in calls.read_text()
@@ -155,12 +165,12 @@ def _seed_leftover_docs(repo):
 
 
 def test_shared_store_legacy_index_converges_locally(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     # Leave the local legacy index at its genuine ancestor while HEAD advances.
     (repo / "f.txt").write_text("two\n")
     _git("add", "f.txt", cwd=repo)
     _git("commit", "-qm", "c2", cwd=repo)
-    ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
     verdict, said = _run(ctx, repo, reset=False)
     assert verdict.fresh, said
     metadata = json.loads((repo / ".gitnexus" / "meta.json").read_text())
@@ -204,10 +214,10 @@ def _commands(calls):
     "gc_exit,gc_output", [(0, "skipped locked slot"), (17, "x" * 500 + " failure")]
 )
 def test_pointer_converges_and_gc_is_best_effort(tmp_path, gc_exit, gc_output):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     shared = _pointer(repo, tmp_path)
-    ctx, calls = _ctx_with_shared_store_node_stub(
+    ctx, calls = ctx_with_shared_store_node_stub(
         tmp_path, tmp_path / "home", gc_exit=gc_exit, gc_output=gc_output
     )
     v, said = _run(ctx, repo, reset=False)
@@ -224,22 +234,22 @@ def test_pointer_converges_and_gc_is_best_effort(tmp_path, gc_exit, gc_output):
 
 
 def test_already_fresh_pointer_does_not_run_gc(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _pointer(repo, tmp_path)
-    ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
     v, said = _run(ctx, repo, reset=False)
     assert v.fresh and not calls.exists()
     assert POINTER_NOTICE not in said
 
 
 def test_pointer_analyze_failure_before_registration_preserves_stale_legacy(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     (repo / "f.txt").write_text("two\n")
     _git("add", "f.txt", cwd=repo)
     _git("commit", "-qm", "c2", cwd=repo)
     old = (repo / ".gitnexus/meta.json").read_text()
     _pointer(repo, tmp_path)
-    ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home", analyze_fails=True)
+    ctx, calls = ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home", analyze_fails=True)
     v, said = _run(ctx, repo, reset=False)
     assert v.codes() == ["index-behind"]
     assert (repo / ".gitnexus/meta.json").read_text() == old
@@ -254,8 +264,8 @@ def test_pointer_analyze_failure_before_registration_preserves_stale_legacy(tmp_
 def test_require_base_refuses_detached_or_unreadable(tmp_path, monkeypatch, observed):
     import omc.gitnexus as gn
 
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     monkeypatch.setattr(gn, "current_branch", lambda *args: observed)
     with pytest.raises(gn.CheckoutMoved) as exc:
         gn._require_base(ctx, repo, "main")
@@ -268,11 +278,11 @@ def test_require_base_refuses_detached_or_unreadable(tmp_path, monkeypatch, obse
 def test_detached_writer_preserves_snapshot(tmp_path, writer):
     import omc.gitnexus as gn
 
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     docs = _seed_leftover_docs(repo)
     meta = repo / ".gitnexus/meta.json"
     before = meta.read_bytes()
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     _git("checkout", "--detach", cwd=repo)
     with pytest.raises(gn.CheckoutMoved):
         if writer == "reset":
@@ -285,12 +295,12 @@ def test_detached_writer_preserves_snapshot(tmp_path, writer):
 
 
 def test_custom_base_pins_analyze(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _git("switch", "-c", "trunk", cwd=repo)
     _stale_index(repo)
     meta = repo / ".gitnexus/meta.json"
     meta.write_text(meta.read_text().replace('"main"', '"trunk"'))
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     v = refresh_knowledge(ctx, Config(), repo, "trunk", reset=False)
     assert v.fresh
     assert calls.read_text().split()[1:] == [
@@ -438,7 +448,7 @@ def _embedding_fixture(
     `embeddings install` populates the runtime prefix (install_rc == 0).
     `embeddings sync <path>` rewrites stats.embeddings = sync_count keeping
     lastCommit (sync_rc == 0) or exits sync_rc writing nothing."""
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, home)
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, home)
     node = tmp_path / "bin" / "node"
     rt = home / "dependencies" / "gitnexus-embeddings" / "runtime"
     git, mkdir, rm = (shlex.quote(host_bin(t)) for t in ("git", "mkdir", "rm"))
@@ -507,7 +517,7 @@ EMBED = [*PLAIN, "--embeddings"]
 
 @pytest.mark.real_embeddings
 def test_default_refresh_with_a_ready_runtime_embeds(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     v, said = _run(ctx, repo, reset=False)
@@ -519,7 +529,7 @@ def test_default_refresh_with_a_ready_runtime_embeds(tmp_path):
 
 @pytest.mark.real_embeddings
 def test_default_refresh_installs_a_missing_runtime_then_embeds(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", runtime_ready=False)
     v, said = _run(ctx, repo, reset=False)
@@ -532,7 +542,7 @@ def test_default_refresh_installs_a_missing_runtime_then_embeds(tmp_path):
 
 @pytest.mark.real_embeddings
 def test_failing_runtime_install_indexes_keyword_only(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", runtime_ready=False, install_rc=1)
     v, said = _run(ctx, repo, reset=False)
@@ -543,7 +553,7 @@ def test_failing_runtime_install_indexes_keyword_only(tmp_path):
 
 @pytest.mark.real_embeddings
 def test_embedding_analyze_failure_retries_once_keyword_only_before_any_clean(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", analyze_embed_rc=5)
     v, said = _run(ctx, repo, reset=False)
@@ -560,7 +570,7 @@ def test_embedding_analyze_failure_retries_once_keyword_only_before_any_clean(tm
 
 @pytest.mark.real_embeddings
 def test_embedding_retry_that_stays_stale_escalates_and_rebuild_also_embeds(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     _foreign_stamping_stub(tmp_path)  # every analyze stamps a foreign repoPath: stale forever
@@ -575,7 +585,7 @@ def test_embedding_retry_that_stays_stale_escalates_and_rebuild_also_embeds(tmp_
 
 @pytest.mark.real_embeddings
 def test_rebuild_path_embedding_failure_retries_keyword_only(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     (repo / ".gitnexus" / "meta.json").write_text(
         json.dumps({"branch": "feature/x", "lastCommit": "old"})
     )
@@ -596,7 +606,7 @@ def test_rebuild_after_an_embedding_fallback_runs_keyword_only(tmp_path):
     retry --embeddings (another stall budget under the busy lock). The plain
     incremental analyze stamps a foreign repoPath while the keep-stale marker
     exists; clean --force removes it, so the rebuild heals."""
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     (repo / ".gitnexus" / "keep-stale").write_text("")
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", analyze_embed_rc=5)
@@ -628,7 +638,7 @@ def test_rebuild_after_an_embedding_fallback_runs_keyword_only(tmp_path):
 
 @pytest.mark.real_embeddings
 def test_embedding_analyze_phase_lines_are_narrated_once_without_pino(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, _ = _embedding_fixture(tmp_path, tmp_path / "home", phase_lines=True)
     v, said = _run(ctx, repo, reset=False)
@@ -668,7 +678,7 @@ def test_silent_embedding_analyze_lives_on_store_writes_and_dies_on_the_embed_bu
 
     monkeypatch.setattr(gn, "_EMBED_STALL_SECONDS", 0.5)
     monkeypatch.setattr(gn, "_STALL_SECONDS", 0.1)
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     if touches_store:
@@ -711,7 +721,7 @@ def _with_nodes(repo, nodes=5):
 
 @pytest.mark.real_embeddings
 def test_fresh_index_without_vectors_is_backfilled_once(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)  # fresh index, nodes but no vectors
+    _, repo = repo_with_origin(tmp_path)  # fresh index, nodes but no vectors
     _with_nodes(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     head = _git_out(repo, "rev-parse", "HEAD")
@@ -730,7 +740,7 @@ def test_fresh_index_without_vectors_is_backfilled_once(tmp_path):
 
 @pytest.mark.real_embeddings
 def test_zero_count_also_backfills_but_positive_count_does_not(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     meta = repo / ".gitnexus/meta.json"
     data = json.loads(meta.read_text())
@@ -746,7 +756,7 @@ def test_zero_count_also_backfills_but_positive_count_does_not(tmp_path):
 def test_index_with_no_embeddable_nodes_is_never_synced(tmp_path):
     """sync over a zero-node index exits 0 with 0 embeddings: re-running it every
     refresh would print ✗ forever and suppress ✓ knowledge is current."""
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     meta = repo / ".gitnexus/meta.json"
     data = json.loads(meta.read_text())
@@ -765,7 +775,7 @@ def test_index_over_the_gitnexus_node_cap_is_never_backfilled(tmp_path):
     """analyze applies GitNexus's 50 000-node cap and skips embedding over it;
     `embeddings sync` never checks it. The backfill mirrors the cap (spec
     2026-11-16 §5.2: over the cap the index stays keyword-only)."""
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     _with_nodes(repo, nodes=50_001)
     v, said = _run(ctx, repo, reset=False)
@@ -780,7 +790,7 @@ def test_index_over_the_gitnexus_node_cap_is_never_backfilled(tmp_path):
 
 @pytest.mark.real_embeddings
 def test_backfill_after_a_stale_index_heals_runs_once_after_the_clean_verdict(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     v, _ = _run(ctx, repo, reset=False)
@@ -791,7 +801,7 @@ def test_backfill_after_a_stale_index_heals_runs_once_after_the_clean_verdict(tm
 
 @pytest.mark.real_embeddings
 def test_backfill_failure_is_narrated_and_leaves_the_verdict_alone(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _with_nodes(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", sync_rc=4)
     before = (repo / ".gitnexus/meta.json").read_bytes()
@@ -832,7 +842,7 @@ def test_silent_embeddings_sync_lives_on_store_writes_and_dies_on_the_embed_budg
 
     monkeypatch.setattr(gn, "_EMBED_STALL_SECONDS", 0.5)
     monkeypatch.setattr(gn, "_STALL_SECONDS", 0.1)
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _with_nodes(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     before = (repo / ".gitnexus/meta.json").read_bytes()
@@ -864,7 +874,7 @@ def test_embedding_fallback_skips_the_backfill_this_run_and_the_next_run_retries
     fell back keyword-only: a sync would fail the same way (or hold the busy
     lock for the whole stall budget). Skip it, narrate once; the next refresh
     (index already fresh, no analyze) backfills normally."""
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", analyze_embed_rc=5)
     v, said = _run(ctx, repo, reset=False)

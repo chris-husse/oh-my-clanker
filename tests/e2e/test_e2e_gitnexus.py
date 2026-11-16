@@ -340,3 +340,110 @@ def test_default_refresh_embeds_the_real_repo(container):
     assert rc == 0, out
     assert "✓ knowledge is current" in out, out
     assert "embedding the existing index" not in out, out
+
+
+_REPO_META = (
+    "import json, sys; from pathlib import Path; root=Path(sys.argv[1])/'.gitnexus'; "
+    "meta=root/'gitnexus.json'; meta=meta if meta.exists() else root/'meta.json'; "
+    "print(meta.read_text())"
+)
+
+_SOURCES = r"""
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+files = {
+    "app/__init__.py": "",
+    "app/greeting.py": "def greeting(name):\n    return f'hello {name}'\n",
+    "app/cli.py": "from app.greeting import greeting\n\n\ndef main():\n"
+    "    print(greeting('world'))\n",
+    "src/proto/gen/user_pb2.py": "class User:\n    def SerializeToString(self):\n"
+    "        return b''\n",
+    ".gitnexusignore": "src/proto/gen/\n",
+}
+for name, text in files.items():
+    (root / name).parent.mkdir(parents=True, exist_ok=True)
+    (root / name).write_text(text)
+"""
+
+
+def _repo_meta(container, repo) -> dict:
+    rc, meta_text = run_in(container, ["python3", "-c", _REPO_META, repo], timeout=5)
+    assert rc == 0, meta_text
+    return json.loads(meta_text)
+
+
+def test_refresh_backfills_a_keyword_only_index_and_honors_gitnexusignore(container):
+    """Real GitNexus, no LLM: an index built keyword-only (before embedding was always
+    on) gains its vectors once through the one-time backfill (`embeddings sync`),
+    without moving lastCommit; the File nodes honor `.gitnexusignore`; a second
+    refresh has nothing to do.
+
+    Runs under the mechanical 300 s pytest-timeout ceiling: every run_in carries an
+    explicit budget and they sum to 290 s — 10 (configure) + 5 (repo) + 10 (sources
+    and push) + 5 (HEAD) + 45 (the keyword-only analyze of five files) + 2 x 5 (meta)
+    + 150 (first refresh: the pre-baked model loads, a few dozen nodes embed) + 25
+    (cypher) + 30 (second refresh: one JSON read, but GitNexus's CLI still boots). The
+    first refresh gets the slack, as in test_default_refresh_embeds_the_real_repo."""
+    # As test_default_refresh_embeds_the_real_repo: `llm.default` alone, no model probe.
+    rc, out = run_in(container, ["omc", "configure", "--set", "llm.default=claude"], timeout=10)
+    assert rc == 0, out
+    repo = make_work_repo(container, "/work/ignored-repo", timeout=5)
+    rc, out = run_in(container, ["python3", "-c", _SOURCES, repo], timeout=5)
+    assert rc == 0, out
+    rc, out = run_in(
+        container,
+        ["bash", "-c", "git add -A && git commit -qm 'app and generated code' && git push -q"],
+        cwd=repo,
+        timeout=5,
+    )
+    assert rc == 0, out
+    rc, head = run_in(container, ["git", "-C", repo, "rev-parse", "HEAD"], timeout=5)
+    assert rc == 0, head
+    # Keyword-only: the same analyze lifecycle_helpers._fixture runs, without --embeddings.
+    rc, out = run_in(
+        container,
+        ["node", _CLI, "analyze", "--skip-agents-md", "--skip-skills"],
+        cwd=repo,
+        timeout=45,
+    )
+    assert rc == 0, f"keyword-only analyze failed:\n{out[-1800:]}"
+    before = _repo_meta(container, repo)
+    assert before["lastCommit"] == head.strip(), before
+    assert not before.get("stats", {}).get("embeddings"), before  # no vectors yet
+
+    rc, out = run_in(container, ["omc", "internal", "gitnexus", "refresh"], cwd=repo, timeout=150)
+    assert rc == 0, out
+    assert "embedding the existing index (one-time)" in out, out  # the backfill, no analyze
+    assert "✓ index embedded" in out, out
+    after = _repo_meta(container, repo)
+    assert isinstance(after.get("stats", {}).get("embeddings"), int), after
+    assert after["stats"]["embeddings"] > 0, after
+    assert after["lastCommit"] == head.strip(), after
+
+    # Keep the CLI banner and freshness notice on stderr out of the JSON payload.
+    rc, files_json = run_in(
+        container,
+        [
+            "bash",
+            "-c",
+            "omc internal gitnexus cypher 'MATCH (f:File) RETURN f.filePath' "
+            "2>/tmp/ignore-cypher.stderr; rc=$?; "
+            'if [ "$rc" -ne 0 ]; then cat /tmp/ignore-cypher.stderr >&2; fi; exit "$rc"',
+        ],
+        cwd=repo,
+        timeout=25,
+    )
+    assert rc == 0, files_json
+    files = json.loads(files_json)
+    rows = files["markdown"].splitlines()
+    assert rows[:2] == ["| f.filePath |", "| --- |"], files
+    paths = {row[2:-2] for row in rows[2:]}
+    assert {"app/greeting.py", "app/cli.py"} <= paths, paths
+    ignored = sorted(path for path in paths if path.startswith("src/proto/gen/"))
+    assert not ignored, f".gitnexusignore'd File nodes: {ignored}"
+
+    rc, out = run_in(container, ["omc", "internal", "gitnexus", "refresh"], cwd=repo, timeout=30)
+    assert rc == 0, out
+    assert "✓ knowledge is current" in out, out
+    assert "embedding the existing index" not in out, out

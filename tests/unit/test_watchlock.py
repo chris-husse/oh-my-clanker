@@ -19,39 +19,7 @@ from omc.watchlock import (
     watch_locks,
 )
 
-_HOLDER = (
-    "import sys, time\n"
-    "from filelock import FileLock\n"
-    # Bind the lock: an unreferenced FileLock is GC'd right after acquire() and
-    # filelock's __del__ releases the flock before the sleep, so the child would
-    # never actually hold it. The whole point (see module docstring) is a real
-    # holder for the duration of `seconds`.
-    "_lock = FileLock(sys.argv[1])\n"
-    "_lock.acquire()\n"
-    "print('held', flush=True)\n"
-    "if sys.argv[2] == 'until-stdin':\n"
-    "    sys.stdin.readline()\n"
-    "else:\n"
-    "    time.sleep(float(sys.argv[2]))\n"
-)
-
-
-def _hold_in_subprocess(path, seconds):
-    """Acquire `path` in a child process; None holds until stdin closes."""
-    p = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            _HOLDER,
-            str(path),
-            "until-stdin" if seconds is None else str(seconds),
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    assert p.stdout.readline().strip() == "held"
-    return p
+from ._mutexproc import hold_in_subprocess
 
 
 def _git(*args, cwd):
@@ -135,7 +103,7 @@ def test_acquire_instance_free_then_taken(tmp_path):
 def test_acquire_instance_refused_when_subprocess_holds(tmp_path):
     repo = _make_repo(tmp_path)
     instance, _ = watch_locks(_ctx(), cwd=str(repo))
-    p = _hold_in_subprocess(instance.lock_file, 30)
+    p = hold_in_subprocess(instance.lock_file, 30)
     try:
         assert acquire_instance(instance, clear=False) is False
     finally:
@@ -146,7 +114,7 @@ def test_acquire_instance_refused_when_subprocess_holds(tmp_path):
 def test_acquire_instance_clear_steals_from_a_live_holder(tmp_path):
     repo = _make_repo(tmp_path)
     instance, _ = watch_locks(_ctx(), cwd=str(repo))
-    p = _hold_in_subprocess(instance.lock_file, 30)
+    p = hold_in_subprocess(instance.lock_file, 30)
     try:
         assert acquire_instance(instance, clear=True) is True  # unlink + fresh file
         instance.release()
@@ -167,7 +135,7 @@ def test_wait_until_idle_free_is_silent_and_leaves_lock_free(tmp_path):
 def test_wait_until_idle_blocks_until_holder_exits_and_narrates_once(tmp_path):
     repo = _make_repo(tmp_path)
     lock = busy_lock(_ctx(), cwd=str(repo))
-    p = _hold_in_subprocess(lock.lock_file, 1.5)  # holder self-releases
+    p = hold_in_subprocess(lock.lock_file, 1.5)  # holder self-releases
     said = []
     wait_until_idle(lock, say=said.append)  # must block ~1.5s then return
     p.wait()
@@ -201,7 +169,7 @@ def test_acquire_busy_narrated_waits_and_narrates_once(tmp_path):
 
     repo = _make_repo(tmp_path)
     lock = busy_lock(_ctx(), cwd=str(repo))
-    p = _hold_in_subprocess(lock.lock_file, 1.5)
+    p = hold_in_subprocess(lock.lock_file, 1.5)
     said = []
     with acquire_busy_narrated(lock, said.append):
         pass

@@ -41,6 +41,7 @@ _USAGE = (
     " | gate [record] review|verify | models | global-instructions PROVIDER"
     " | gitnexus <ensure|status|refresh|query|context|impact|cypher> [args…]"
     " | skills list NAME"
+    " | stage <start STAGE [-- ARGS…]|wait STAGE|kill STAGE|template>"
     " | build-progress LOGFILE | herdr-cwd}"
 )
 
@@ -452,6 +453,46 @@ def _models(ctx: ToolContext) -> int:
     return 0 if payload["ok"] else 2
 
 
+def _stage(ctx: ToolContext, rest: list[str]) -> int:
+    """`stage start|wait|kill|template`: one OMC_STAGE_RUN line per answer (design 6.4).
+
+    rc 0 for every answer but `refused` (2). Any OmcError, a Refusal included, or OSError
+    prints `error:`, no verdict, and exits 1: rc 2 belongs to the `refused` verdict line alone.
+    The hook inherits this process's environment as-is: the supervisor's spawn passes
+    ctx.env on (no GitNexus overlay), and the supervisor passes its own on to the hook."""
+    from .stagedef import STAGE_TEMPLATE, STAGES
+    from .stagerun import kill_run, start_run, wait_run
+
+    verb, *args = rest or [""]
+    if verb == "template" and not args:
+        print(STAGE_TEMPLATE, end="")
+        return 0
+    if verb not in ("start", "wait", "kill") or not args or args[0] not in STAGES:
+        print(_USAGE, file=sys.stderr)
+        return 2
+    stage, *tail = args
+    if verb == "start" and tail[:1] == ["--"]:
+        tail = tail[1:]
+    elif tail:
+        print(_USAGE, file=sys.stderr)
+        return 2
+    try:
+        if verb == "start":
+            answer = start_run(ctx, stage, tail)
+        elif verb == "wait":
+            answer = wait_run(ctx, stage)
+        else:
+            answer = kill_run(ctx, stage)
+    except OmcError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:  # a stage root or worktree file it cannot write, …
+        print(f"error: {exc.strerror} ({exc.filename})", file=sys.stderr)
+        return 1
+    print(f"OMC_STAGE_RUN {json.dumps(answer.to_json())}", flush=True)
+    return 2 if answer.state == "refused" else 0
+
+
 def run_internal(argv: list[str]) -> int:
     if not argv:
         print(_USAGE, file=sys.stderr)
@@ -515,6 +556,8 @@ def run_internal(argv: list[str]) -> int:
             print(_USAGE, file=sys.stderr)
             return 2
         return _skills_list(ToolContext.from_env(), rest[1])
+    if cmd == "stage":
+        return _stage(ToolContext.from_env(), rest)
     if cmd == "build-progress":
         parser = argparse.ArgumentParser(prog="omc internal build-progress", add_help=False)
         parser.add_argument("logfile")

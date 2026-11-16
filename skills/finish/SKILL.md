@@ -84,7 +84,7 @@ Any other reason → invoke the **`build`** skill, then the **`check`** skill:
 `build` → `check`. Read only `reason` here; the verify question itself is
 `create-mr`'s. A question that prints no `OMC_GATE` line decided nothing:
 report the error and stop; nothing is pushed. Each stage is a proxy for the
-project's own `.omc/skills/<stage>/SKILL.md`.
+project's stage hook `.omc/bin/<stage>`.
 
 **Stage-running rules.** They hold for every stage run in this flow, the MR
 gate's included; audit and `create-mr` cite them as finish's stage-running

@@ -13,7 +13,7 @@ import time
 import pytest
 
 from ..conversation import ClaudeConversation
-from ..harness import run_in
+from ..harness import run_in, stop_real_watch
 from ..lifecycle_helpers import (
     IMPLEMENT_TURN_BUDGET,
     _assert_audited_artifacts,
@@ -45,7 +45,7 @@ class Flow:
     def __init__(self, container):
         self.container = container
         self.model, self.judge_model, self.metadata = _configure_claude_conversation(container)
-        self.repo = _fixture(container)
+        self.repo = _fixture(container, watch="real")
         self.session = ClaudeConversation(container, self.model).__enter__()
         self.evidence = {"provider": "claude", "model_requested": self.model, "turns": []}
         self.reached = None
@@ -79,7 +79,10 @@ class Flow:
 def flow(module_container):
     f = Flow(module_container)
     yield f
-    f.session.close()
+    try:
+        f.session.close()
+    finally:
+        stop_real_watch(f.container, f.repo)
 
 
 def _require(flow: Flow, stage: str) -> None:

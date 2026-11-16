@@ -41,7 +41,8 @@ def _record(calls, *, fail_holder_with: str | None = None):
         if argv[:2] == ["docker", "run"] and fail_holder_with is not None:
             exc = subprocess.CalledProcessError(125, argv, output="", stderr=fail_holder_with)
             raise exc
-        return subprocess.CompletedProcess(argv, 0, stdout="sha256:abc\n", stderr="")
+        out = "[]\n" if stages.LIVE_RUNS_PY in argv else "sha256:abc\n"  # no live stage run
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
 
     return run
 
@@ -52,15 +53,16 @@ def test_snapshot_holds_the_committed_image(monkeypatch):
     calls: list[list[str]] = []
     monkeypatch.setattr(stages.subprocess, "run", _record(calls))
 
-    tag = stages.snapshot(_Container("c1"), {"provider": "claude", "stage": "start"})
+    tag = stages.snapshot(_Container("c1"), {"provider": "claude", "stage": "start", "repo": "/r"})
 
     assert tag == "omc-e2e-stage:claude-start-deadbeef0001"
     assert [c[:2] for c in calls] == [
-        ["docker", "exec"],
+        ["docker", "exec"],  # the live-run check
+        ["docker", "exec"],  # the manifest
         ["docker", "commit"],
         ["docker", "run"],
     ]
-    assert calls[2] == [
+    assert calls[3] == [
         "docker",
         "run",
         "-d",
@@ -86,12 +88,12 @@ def test_snapshot_tolerates_an_existing_holder_only(monkeypatch):
         "run",
         _record(calls, fail_holder_with='Conflict. The container name "/x" is already in use'),
     )
-    stages.snapshot(_Container("c1"), {"provider": "claude", "stage": "start"})
+    stages.snapshot(_Container("c1"), {"provider": "claude", "stage": "start", "repo": "/r"})
 
     calls.clear()
     monkeypatch.setattr(stages.subprocess, "run", _record(calls, fail_holder_with="no space left"))
     with pytest.raises(subprocess.CalledProcessError):
-        stages.snapshot(_Container("c1"), {"provider": "claude", "stage": "start"})
+        stages.snapshot(_Container("c1"), {"provider": "claude", "stage": "start", "repo": "/r"})
 
 
 def test_runner_holds_the_base_image_before_the_golden_path(tmp_path):
@@ -322,6 +324,17 @@ def test_runner_prunes_before_image_inspection_in_every_mode(tmp_path, mode):
     assert calls[2][:2] == ["image", "inspect"]
 
 
+def test_manual_prune_with_nothing_to_remove_calls_no_removal(tmp_path):
+    # GNU xargs runs its command once on empty input unless -r; BSD xargs never does.
+    result, calls = _runner_with_docker_stub(tmp_path, "prune", "empty")
+
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        ["ps", "-aq", "--filter", "label=omc.e2e=holder"],
+        ["images", "--format", "{{.Repository}}:{{.Tag}}"],
+    ]
+
+
 @pytest.mark.parametrize("no_docker,collect_only", [(True, False), (False, True)])
 def test_runner_no_docker_never_calls_docker(tmp_path, no_docker, collect_only):
     result, calls = _runner_with_docker_stub(
@@ -442,3 +455,42 @@ def test_runner_all_with_a_selection_still_fails_on_a_parallel_failure(tmp_path)
     )
 
     assert result.returncode == 1, result.stderr
+
+
+def _uv_runs_without_frozen(text: str) -> list[str]:
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if re.search(r"\buv run\b", line) and "uv run --frozen" not in line
+    ]
+
+
+def test_runner_never_lets_uv_rewrite_the_lock():
+    # The source id hashes the working tree: a `uv run` that rewrites uv.lock
+    # during the golden pass gives the parallel pass another id, and its stage
+    # snapshots are then "absent" (observed on the 0.1.53 baseline run).
+    assert _uv_runs_without_frozen((REPO / "scripts" / "e2e.sh").read_text()) == []
+
+
+def test_e2e_recipes_never_let_uv_rewrite_the_lock():
+    justfile = (REPO / "justfile").read_text()
+    recipes = re.split(r"\n(?=[a-z0-9-]+(?: [^\n]*)?:\n)", justfile)
+    e2e = [r for r in recipes if r.split(":", 1)[0].split()[0].endswith(("e2e-tests", "-gate"))]
+    assert e2e, recipes
+    assert _uv_runs_without_frozen("\n".join(e2e)) == []
+
+
+@pytest.mark.parametrize("mode", ["golden", "rest", "all"])
+def test_runner_invokes_uv_frozen_in_every_mode(tmp_path, mode):
+    log = tmp_path / "uv.log"
+    result, _ = _runner_with_docker_stub(
+        tmp_path,
+        mode,
+        "default",
+        no_docker=True,
+        uv_body=f'#!/bin/sh\necho "$@" >> {log}\nexit 0\n',
+    )
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines()
+    assert calls, result.stderr
+    assert all(call.startswith("run --frozen ") for call in calls), calls

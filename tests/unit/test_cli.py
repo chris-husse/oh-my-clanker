@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -437,7 +438,7 @@ def test_readme_documents_verify_after_audit_review_and_mr_gate():
     # red verify reruns only its failed pieces only with a subset section
     subset_repair = (
         "a red verify first reruns only its failed pieces after build and check, "
-        'then one full verify, when the project\'s verify skill has a "Running a subset" '
+        'then one full verify, when the verify stage\'s instructions have a "Rerunning a subset" '
         "section; otherwise fix → build → check → one full verify"
     )
     for needle in (
@@ -495,13 +496,41 @@ def test_readme_documents_verify_after_audit_review_and_mr_gate():
     ):
         assert stale not in readme, f"README still says {stale!r}"
     verify_row = next(
-        (line for line in readme.splitlines() if line.startswith("| `.omc/skills/verify`")), ""
+        (line for line in readme.splitlines() if line.startswith("| `.omc/bin/verify`")), ""
     )
-    assert "subset" in verify_row, verify_row
+    assert "Rerunning a subset" in verify_row, verify_row
+    assert "node id" in verify_row, verify_row
     development = readme.split("## Development", 1)[1].split("\n## ", 1)[0]
     assert any(
         line.startswith("| `.omc/hooks/needs_verify`") for line in development.splitlines()
     ), "README Development table has no .omc/hooks/needs_verify row"
+    flat_readme = " ".join(readme.split())
+    for needle in (
+        "OMC_STAGE_RUN",
+        "A stage run needs a running `omc watch` for the project",
+        "A failed verify can be held",
+        "`/omc:verify kill` ends it",
+        f"names all {_layer_contract_count()} of its contracts as sacred",
+        'The one exception to "no daemon" is a stage run',
+        "| `.omc/bin/check` |",
+        "| `.omc/bin/build` |",
+        # the yes/no project hooks and the stage hooks stay apart
+        "the stage hooks under `.omc/bin/` are the stages themselves",
+    ):
+        assert needle in flat_readme, f"README missing {needle!r}"
+
+
+_NUMBER_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+_NUMBER_WORDS += ("ten", "eleven", "twelve")
+
+
+def _layer_contract_count() -> str:
+    """How many contracts the behavior layer calls sacred, as the README spells it."""
+    layer = (Path(__file__).resolve().parents[2] / "src/omc/distribution/AGENTS.md").read_text()
+    contracts = layer.split("**Machine contracts are sacred**", 1)[1].split("verdicts are", 1)[0]
+    names = set(re.findall(r"`(OMC_[A-Z_]+)`", contracts))
+    assert "OMC_STAGE_RUN" in names and "OMC_HOOK" in names, sorted(names)
+    return _NUMBER_WORDS[len(names)]
 
 
 def test_readme_documents_squash_before_rebase():
