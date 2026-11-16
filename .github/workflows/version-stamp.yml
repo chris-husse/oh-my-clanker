@@ -2,9 +2,10 @@
 #
 # The human owns MAJOR.MINOR in pyproject.toml; GitHub owns the patch and sets
 # it to this workflow's run_number. scripts/stamp_version.py reads MAJOR.MINOR
-# from pyproject.toml and writes MAJOR.MINOR.<run_number> into all four version
-# files; this job then commits the result back to main with `[skip ci]` so the
-# stamp commit does not re-trigger CI or this workflow (the loop guard).
+# from pyproject.toml and writes MAJOR.MINOR.<run_number> into all five version
+# files (uv.lock's `omc` entry included); this job then commits the result back
+# to main with `[skip ci]` so the stamp commit does not re-trigger CI or this
+# workflow (the loop guard). `git commit -am` stages every stamped file.
 #
 # To bump MAJOR or MINOR: edit `version` in pyproject.toml in a normal PR. The
 # patch you type there is irrelevant — it is replaced on merge.

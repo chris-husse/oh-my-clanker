@@ -1,6 +1,6 @@
-"""Advisory watch locks: `omc watch` mutual exclusion + busy/idle signaling.
+"""Advisory watch locks: `omc watch` mutual exclusion, busy/idle and alive signaling.
 
-Two flock-based locks (via filelock) live in the repo's SHARED .git dir
+Three flock-based locks live in the repo's SHARED .git dir
 (`git rev-parse --git-common-dir` — the primary's, even from a worktree):
 
 - omc-watch.lock (INSTANCE): held by `omc watch` for its entire lifetime.
@@ -9,6 +9,13 @@ Two flock-based locks (via filelock) live in the repo's SHARED .git dir
   knowledge — a watch tick or `omc internal gitnexus refresh`. Free ⇔ nobody
   is mutating. `omc design` probes it before cutting a worktree so it never
   snapshots a half-updated primary.
+- omc-watch-alive.lock (ALIVE): held EXCLUSIVE by `omc watch` for its entire
+  lifetime, taken right after the instance lock. A stage run probes it to tell
+  that a watch is running for its project. Raw fcntl.flock, not filelock: the
+  probe takes it SHARED and non-blocking, and watch takes it BLOCKING, so a
+  probe in flight delays a starting watch instead of making it bail (the
+  instance lock is non-blocking), and two probes never see each other as a
+  watch.
 
 The kernel releases flock locks when their holder dies, so a crashed or
 SIGKILLed watch never wedges anything and a watch RESTART always finds the
@@ -18,6 +25,8 @@ local dev tool.
 
 from __future__ import annotations
 
+import fcntl
+import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -28,6 +37,7 @@ from .toolctx import ToolContext
 
 INSTANCE_LOCK = "omc-watch.lock"
 BUSY_LOCK = "omc-watch-busy.lock"
+ALIVE_LOCK = "omc-watch-alive.lock"
 
 WATCH_BAIL_MSG = "Another `omc watch` instance may be running. Pass `--clear-mutex` to bypass"
 START_WAIT_MSG = (
@@ -63,6 +73,54 @@ def busy_lock(ctx: ToolContext, cwd: str | None = None) -> FileLock | None:
     """The busy lock alone — all `omc design` ever probes; None outside a repo."""
     d = locks_dir(ctx, cwd)
     return None if d is None else FileLock(str(d / BUSY_LOCK))
+
+
+def alive_lock_path(ctx: ToolContext, cwd: str | None = None) -> Path | None:
+    """The alive lock's path; None outside a repo."""
+    d = locks_dir(ctx, cwd)
+    return None if d is None else d / ALIVE_LOCK
+
+
+def hold_alive(path: Path, *, clear: bool) -> int:
+    """Take the alive lock EXCLUSIVE, blocking, and return its fd (watch holds
+    it until exit). Blocking because a probe holds it shared for an instant.
+    `clear` unlinks the file first, as acquire_instance does: a fresh inode
+    beside an older holder's."""
+    if clear:
+        path.unlink(missing_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def release_alive(fd: int) -> None:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+
+def lock_held(path: Path) -> bool:
+    """True while another open file holds an exclusive flock on `path`: the watch's
+    alive lock, or a stage supervisor's stage.lock (filelock's exclusive flock). The
+    probe takes it SHARED and non-blocking, then releases it at once, so two probes
+    never see each other as a holder. A lock whose directory is gone (or no longer a
+    directory) has no holder; any other failure to open it raises."""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def acquire_instance(lock: FileLock, *, clear: bool) -> bool:

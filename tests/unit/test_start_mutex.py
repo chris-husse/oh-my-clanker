@@ -15,9 +15,15 @@ from omc.config.schema import Config
 from omc.start import run_start
 from omc.toolctx import ToolContext
 
-from ._mutexproc import install_slow_hook, spawn_watch, wait_for
+from ._mutexproc import (
+    ctx_with_node_stub,
+    install_slow_hook,
+    push_remote_commit,
+    repo_with_origin,
+    spawn_watch,
+    wait_for,
+)
 from ._stubs import HEALTHY_PLUGINS, make_claude_stub
-from .test_watch import _ctx_with_node_stub, _push_remote_commit, _repo_with_origin
 
 OK_VERDICT = 'OMC_SLUG {"ok": true, "slug": "proj-1-fix-login"}'
 WAIT_LINE = (
@@ -93,7 +99,7 @@ def _start_env(tmp_path, repo, *, wt_probes_lock=False):
 
 
 def test_probe_is_released_before_the_worktree_is_created(tmp_path, capsys, monkeypatch):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     monkeypatch.chdir(repo)
     env = _start_env(tmp_path, repo, wt_probes_lock=True)
     rc = run_start(ToolContext.from_env(env), Config(), "PROJ-1", headless=True)
@@ -102,7 +108,7 @@ def test_probe_is_released_before_the_worktree_is_created(tmp_path, capsys, monk
 
 
 def test_start_waits_for_a_held_busy_lock_and_narrates(tmp_path, capsys, monkeypatch):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     monkeypatch.chdir(repo)
     env = _start_env(tmp_path, repo)
     holder = _hold(repo / ".git" / "omc-watch-busy.lock", 1.5)  # self-releases
@@ -115,7 +121,7 @@ def test_start_waits_for_a_held_busy_lock_and_narrates(tmp_path, capsys, monkeyp
 
 
 def test_no_mutex_skips_the_probe_entirely(tmp_path, capsys, monkeypatch):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     monkeypatch.chdir(repo)
     env = _start_env(tmp_path, repo)
     holder = _hold(repo / ".git" / "omc-watch-busy.lock", 60)  # held THROUGHOUT
@@ -132,8 +138,8 @@ def test_parallel_starts_all_work_while_watch_runs(tmp_path, capsys, monkeypatch
     """REQUIRED: multiple `omc start` in parallel must all work while
     `omc watch` is running (start never holds the lock, so they cannot
     exclude each other)."""
-    origin, repo = _repo_with_origin(tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    origin, repo = repo_with_origin(tmp_path)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     err1 = tmp_path / "watch.err"
     p1 = spawn_watch(repo, {**os.environ, **ctx.env}, interval=60, stderr_path=err1)
     monkeypatch.chdir(repo)
@@ -158,9 +164,9 @@ def test_parallel_starts_all_work_while_watch_runs(tmp_path, capsys, monkeypatch
 
 def test_start_waits_out_a_busy_watch_then_proceeds(tmp_path, capsys, monkeypatch):
     """End-to-end contention against a REAL busy watch (slow post-watch hook)."""
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     marker = tmp_path / "hook-started"
     install_slow_hook(repo, marker, 3)
     err1 = tmp_path / "watch.err"

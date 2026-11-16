@@ -284,12 +284,78 @@ def test_finish_skill_contract():
 
 
 def test_stage_proxy_contract():
-    for stage in ("check", "build", "verify", "review"):
+    for stage in ("check", "build", "verify"):
         text = (ROOT / "skills" / stage / "SKILL.md").read_text()
-        for needle in (f".omc/skills/{stage}", "OMC_STAGE", '"configured"'):
+        # the hook stages read the project's hook, never a project skill
+        assert ".omc/skills/" not in text, f"{stage} proxy still reads a project skill"
+        for needle in (f".omc/bin/{stage}", "OMC_STAGE", '"configured"'):
             assert needle in text, f"{stage} proxy missing {needle!r}"
-        # the project half of an unconfigured stage is a pass (review's grug half still runs)
+        # an unconfigured stage is a pass
         assert "nothing to do" in text
+    text = (ROOT / "skills" / "review" / "SKILL.md").read_text()
+    for needle in (".omc/skills/review", "OMC_STAGE", '"configured"'):
+        assert needle in text, f"review proxy missing {needle!r}"
+    # the project half of an unconfigured review is a pass (its grug half still runs)
+    assert "nothing to do" in text
+
+
+def _proxy_loop(stage):
+    text = (ROOT / "skills" / stage / "SKILL.md").read_text()
+    assert "\n## The loop\n" in text, f"{stage} proxy has no '## The loop' section"
+    section = text.split("\n## The loop\n", 1)[1]
+    # the loop ends at the next section or at the OMC_STAGE paragraph
+    section = re.split(r"\n## |\n\*\*Always\*\* end with", section, maxsplit=1)[0]
+    return re.sub(rf"\b{stage}\b", "<stage>", section)
+
+
+def test_stage_proxies_share_the_loop():
+    loops = {stage: _proxy_loop(stage) for stage in ("check", "build", "verify")}
+    for stage, loop in loops.items():
+        for needle in (
+            "omc internal stage start <stage>",
+            "omc internal stage wait <stage>",
+            "600 s",
+            "no sleep, no kill",
+            "CRITICAL STOP:",
+            "superseded by another run",
+            "instructions",
+            "act on its `state` and `run`, nothing else",
+            'Every outcome other than `unconfigured` is `"configured": true`',
+            "`warnings` is non-empty",
+            "any other state → say one line naming the run (`started <stage> run <run>`)",
+            "if you have not read it yet",
+            "(`run`, `elapsed` and the last line of `tail`)",
+            "is in your `started <stage> run <run>` line or your last progress line",
+            # A3: any red summary carries the stage's own bound, whatever it is
+            'Every `"passed": false` summary built from an answer also says '
+            "`fix cycles: <n>` when its `fix_cycles` is not 0 (0: no run, or the stage "
+            "sets no `Fix cycles` of its own), whatever the `state`",
+        ):
+            assert needle in " ".join(loop.split()), f"{stage} loop missing {needle!r}"
+        # an answer without a run is handled first, then a superseded run is caught
+        # before any state is acted on
+        step2 = " ".join(loop.split("2. `omc internal stage wait <stage>`", 1)[1].split())
+        order = [
+            "No `OMC_STAGE_RUN` line (any exit) → as in step 1.",
+            "Otherwise, first compare `run` with the one `start` returned.",
+            "Otherwise, by `state`:",
+            "- `running` →",
+        ]
+        positions = [step2.find(needle) for needle in order]
+        assert -1 not in positions and positions == sorted(positions), (
+            f"{stage} step 2 is out of order: {dict(zip(order, positions, strict=True))}"
+        )
+        flat = " ".join(loop.split())
+        for needle in (
+            '- no `OMC_STAGE_RUN` line (any exit) → `"passed": false` with the `error:` '
+            "or usage line as the summary. End.",
+            # the fix brief reads `## Fixing failures` from the instructions path
+            "gives the `log` and `instructions` paths and says `held` when the run is held",
+            "the summary is the `reason` and the `log` and `instructions` paths",
+        ):
+            assert needle in flat, f"{stage} loop missing {needle!r}"
+    # one text in all three, apart from the stage name
+    assert loops["check"] == loops["build"] == loops["verify"]
 
 
 def test_hook_proxy_contract():
@@ -355,12 +421,18 @@ def test_verify_proxy_runs_after_audit_review_and_in_the_mr_gate():
     assert "`verify` (audit and the MR gate only)" in " ".join(check.split())
     # the optional "rerun only: <pieces>" input, read like write-plan's
     assert "## User Input" in verify and "$ARGUMENTS" in verify
-    assert verify.index("## User Input") < verify.index("## Steps")
+    assert verify.index("## User Input") < verify.index("## The loop")
     assert "The whole input selects the mode:" in body
     for needle in (
         "rerun only: <pieces>",
-        "Empty, or anything not starting with `rerun only:`",
-        "Running a subset",
+        "Empty, or anything else",
+        "Rerunning a subset",
+        "--show-instructions",
+        "omc internal stage kill verify",
+        "no conductor calls it",
+        "--show-instructions` from the project root (`git rev-parse --show-toplevel`)",
+        'With no `OMC_STAGE_RUN` line (any exit) → `"passed": false` with the `error:` or '
+        "usage line",
         "Without that section, run the full stage and say so;",
         "asks for no targeted rerun then, so this fallback only serves a direct call",
         "`rerun only:` with no pieces runs the full stage",
@@ -2145,6 +2217,7 @@ def test_finish_publishes_and_skips_a_verified_tree():
         # D5: a file a fix created is staged by path, or the pushed tree lacks it
         "files a fix created are staged by path (`git add <new paths>`)",
         "untracked artifacts a stage itself leaves behind",
+        "`.omc/bin/<stage>`",  # check, build and verify proxy the project's stage hooks
     ):
         assert needle in flat3, f"finish Step 3 missing {needle!r}"
     # the one statement of the changed-tree rebuild that audit and create-mr cite
@@ -2253,13 +2326,41 @@ def test_integrate_skill_describes_global_section():
     assert "omc configure" in text
 
 
+_STALE_HOOK_NAME = re.compile(r"\.omc/bin/[a-z<>{},|]+\.sh")
+
+
+def test_no_shipped_surface_names_a_sh_stage_hook():
+    # U14: the stage hooks are `.omc/bin/<stage>`; only the rename refusal names `.sh`
+    surfaces = [
+        *sorted((ROOT / "skills").rglob("*.md")),
+        *sorted((ROOT / "src" / "omc").rglob("*.py")),
+        *sorted((ROOT / "src" / "omc" / "distribution").rglob("*.md")),
+        ROOT / "README.md",
+        ROOT / ".claude" / "skills" / "regenerate-readme" / "SKILL.md",
+        ROOT / ".omc" / "config" / "AGENTS.md",
+        ROOT / ".omc" / "skills" / "explain-context" / "SKILL.md",
+    ]
+    stale = [
+        f"{path.relative_to(ROOT)}:{n}: {line.strip()}"
+        for path in surfaces
+        for n, line in enumerate(path.read_text().splitlines(), 1)
+        if _STALE_HOOK_NAME.search(line) and "have no extension" not in line
+    ]
+    assert stale == [], "\n".join(stale)
+
+
 def test_integrate_skill_contract():
     text = (ROOT / "skills" / "integrate" / "SKILL.md").read_text()
     for needle in (
-        ".omc/skills/build",
-        ".omc/skills/check",
+        ".omc/bin/check",
+        ".omc/bin/build",
+        ".omc/bin/verify",
+        "omc internal stage template",
+        "omc internal stage start",
+        "Unmigrated stage",
+        "omc watch",
+        "Rerunning a subset",
         "Migration trigger",
-        ".omc/skills/verify",
         ".omc/skills/review",
         ".omc/skills/explain-context",
         ".omc/skills/investigation-context",
@@ -2276,17 +2377,70 @@ def test_integrate_skill_contract():
     assert "zero writes" in text.lower() or "no writes" in text.lower()
     assert "--defaults" in text  # the do-NOT-reset-config warning
     # the verify stage paragraph: finish-only, and a subset section worth writing
-    para = text.split("### `.omc/skills/verify`", 1)[1].split("### ", 1)[0]
-    assert "Running a subset" in para
+    para = text.split("### `.omc/bin/verify`", 1)[1].split("### ", 1)[0]
+    assert "Rerunning a subset" in para
     assert "major milestones" not in para
     assert "two places only" in " ".join(para.split())
     assert "only within `/omc:finish`" not in " ".join(para.split())
+    # an unmigrated stage skill is converted into a hook pair, then deleted on approval
+    flat = " ".join(text.split())
+    unmigrated = flat.split("**Unmigrated stage**", 1)[1]
+    for needle in (
+        "`.omc/skills/<stage>/SKILL.md`",
+        "`## Limits` (data: `Timeout`, `Quiet timeout`, optional `Fix cycles`) "
+        "plus the agent-read sections",
+        "approves the pair",
+        "A hook still named `<stage>.sh` is unmigrated too: `git mv` it to `.omc/bin/<stage>`",
+    ):
+        assert needle in unmigrated, f"integrate unmigrated-stage paragraph missing {needle!r}"
+    # the inventory names the unmigrated state
+    inventory = " ".join(text.split("## Phase 1", 1)[1].split("## Phase 2", 1)[0].split())
+    assert "an old `.omc/skills/<stage>` without a hook is **unmigrated**" in inventory
+    # the conventional hook (design 6.2) and its contract, ahead of the stage slots
+    phase2 = text.split("## Phase 2", 1)[1]
+    contract = " ".join(
+        phase2.split("**Hook contract**", 1)[1].split("### `.omc/bin/", 1)[0].split()
+    )
+    for needle in (
+        'if [ "$#" -eq 1 ] && [ "$1" = "--show-instructions" ]; then',
+        'exec cat "$(dirname "$0")/<stage>.instructions.md"',
+        'exec <command> "$@"',
+        "`chmod +x` the hook: a hook that is not executable is a CRITICAL STOP",
+        # U14: omc execs the extensionless hook by path, so the kernel reads the shebang
+        "omc runs the hook directly by its path, so its first line must be a shebang",
+        "or the file a binary",
+        "A hook that cannot start is a CRITICAL STOP",
+        "never `<stage>.sh`",
+        '`"$@"` carries the arguments of the `## Rerunning a subset` section',
+        "The exit code is the verdict",
+        "`$OMC_STAGE_RESULT` is only for a verify that keeps a system up after a failure",
+        # the shipped template is refused verbatim: its `## Limits` prose is marked
+        "`## Limits` keeps only its `Timeout:`, `Quiet timeout:` and `Fix cycles:` lines; "
+        "the template's paragraph there is guidance to delete, and any other line is a "
+        "CRITICAL STOP",
+    ):
+        assert needle in contract, f"integrate hook contract missing {needle!r}"
+    # validation: interactive, after approval, watch first; verify is not run unasked
+    validate = contract.split("**Validating a pair**", 1)[1]
+    for needle in (
+        "interactive only, after the user approves the pair; never in headless mode",
+        "Stages need a running `omc watch` in the primary checkout, so first confirm",
+        "`omc internal stage start <stage>`, then `omc internal stage wait <stage>` "
+        "until the run ends",
+        "means the pair is defective: fix the pair",
+        "run `.omc/bin/verify --show-instructions`",
+        "Offer the full run to the user",
+        "`/omc:verify kill`",
+    ):
+        assert needle in validate, f"integrate pair validation missing {needle!r}"
     # Phase 3: what is now active names audit, finish and the MR gate's hooks
     wrap = " ".join(text.split("## Phase 3", 1)[1].split())
     assert (
         "`/omc:audit` and `/omc:finish` run the stage gates you just designed; "
         "the MR gate asks your hooks"
     ) in wrap
+    # stages refuse to start without a watch, so the wrap-up says so
+    assert "stages need a running `omc watch` in the primary checkout" in wrap
 
 
 HOOK_SLOT_VERDICTS = {
@@ -2364,6 +2518,14 @@ def test_integrate_seeds_gitnexus_ignore_before_the_first_index():
         assert needle in step, f"integrate index-scope step missing {needle!r}"
     phase3 = _flat(text.split("## Phase 3", 1)[1])
     assert "gitnexus-ignore-context" in phase3 and "`.gitnexusignore`" in phase3
+
+
+def test_conductors_never_kill_stage_runs():
+    # A5: a held verify survives finish and audit; only the verify proxy's `kill` ends it.
+    for name in ("finish", "audit"):
+        text = (ROOT / "skills" / name / "SKILL.md").read_text()
+        for kill in ("stage kill", "/omc:verify kill"):
+            assert kill not in text, f"{name} kills a stage run: {kill!r}"
 
 
 def test_distribution_agents_task_model_policy():
@@ -2484,14 +2646,14 @@ def test_distribution_agents_validation_cadence():
     )
     for needle in (
         "`/omc:verify rerun only: <pieces>`",
-        "briefed with verify's failure output",
+        "briefed as above, with verify's failure output",
         "pieces that are red now",
         "nothing before it is rerun",
         "never returns to review",
     ):
         assert needle in gate, f"stage-gate verify clause missing {needle!r}"
     # no subset section: no targeted rerun, so one full verify per cycle
-    skip = 'Without a "Running a subset" section in the project\'s verify skill'
+    skip = 'Without a "Rerunning a subset" section in the verify stage\'s instructions'
     assert gate.index("rerun only the failed pieces") < gate.index(skip)
     for needle in (
         "the targeted rerun is skipped",
@@ -2513,13 +2675,47 @@ def test_distribution_agents_validation_cadence():
     # a fix never repairs the stage or the hook itself
     for needle in (
         "a fix repairs the code under test, never the stage's own definition",
-        "`.omc/skills/<stage>/`",
+        "`.omc/bin/<stage>` and its instructions",
+        "`.omc/skills/review/`",
         "`.omc/hooks/<name>/`",
         "the script or command it runs",
         "a stage that only passes by editing itself is the CRITICAL question",
         "asked at once, without spending the remaining cycles",
     ):
         assert needle in gate, f"stage-gate rule missing definition guard {needle!r}"
+    # the fix brief: summary, log path and the stage's own fixing section
+    for needle in (
+        "briefed with the failed stage's `summary`, its log path",
+        "the stage's `## Fixing failures` section from the instructions path in the summary",
+        # a held verify: look at the live system first; the build after the fix ends the hold
+        "For a held verify (its summary says `held`)",
+        "the system is still up",
+        "/omc:investigate local",
+        "the `/omc:build` that follows the fix ends the hold",
+        "look first and build afterwards",
+    ):
+        assert needle in gate, f"stage-gate rule missing fix-brief {needle!r}"
+    # a broken stage definition goes to the user, no fix and no cycle
+    for needle in ("`CRITICAL STOP:` is the CRITICAL question at once", "no cycle is spent"):
+        assert needle in gate, f"stage-gate rule missing CRITICAL STOP {needle!r}"
+    # a stage may lower the ten for itself; the counter stays one counter
+    for needle in (
+        "or `<n>` while the red stage's summary carries `fix cycles: <n>`",
+        "at most 10, so a stage only ever lowers the ten",
+        "with the counter at 3, spent on stages without a bound of their own, a stage whose "
+        "summary carries `fix cycles: 3` that turns red is the CRITICAL question",
+        "or the `<n>`th under a stage's own bound",
+    ):
+        assert needle in gate, f"stage-gate rule missing per-stage bound {needle!r}"
+    # A2/A5: nobody but the user kills a held verify
+    for needle in (
+        "No conductor kills a stage run",
+        "leaves a held verify up",
+    ):
+        assert needle in gate, f"stage-gate rule missing hold {needle!r}"
+    contracts = prose.split("**Machine contracts are sacred**", 1)[1].split("- **", 1)[0]
+    for contract in ("`OMC_STAGE_RUN`", "`OMC_GATE`", "`OMC_HOOK`"):
+        assert contract in contracts, f"layer contracts missing {contract}"
     # the bound (D17): ten progress-gated cycles, one shared budget
     for needle in (
         "up to ten fix cycles per conductor run",

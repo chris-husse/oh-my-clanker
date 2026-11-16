@@ -32,7 +32,7 @@ Claude Code users can skip step 3: `omc configure`, `omc update`, `omc design`, 
 
 [Superpowers](https://github.com/obra/superpowers) is required for brainstorming. omc installs it for Claude Code (manual equivalent: `/plugin install superpowers@claude-plugins-official`); Codex users install it themselves. The plugin manifest deliberately omits a dependency declaration because of the [cross-marketplace dependency pitfall](docker/PLUGIN-NOTES.md).
 
-Inside your project, run `/omc:integrate` in a session. It walks through check/build/verify/review, explain-context and investigation-context skills and the five optional project hooks using your codebase. Before it offers the first index, it also proposes the `gitnexus-ignore-context` skill and a first `.gitnexusignore` from a survey of the tree, so generated, vendored and bulk-data files stay out of the graph from the start. Rerun it after updates or when the integration feels off.
+Inside your project, run `/omc:integrate` in a session. It walks through check/build/verify (as `.omc/bin/<stage>` stage hooks), review, explain-context and investigation-context skills and the five optional project hooks using your codebase, and migrates old `.omc/skills/{check,build,verify}` repos to stage hooks. Before it offers the first index, it also proposes the `gitnexus-ignore-context` skill and a first `.gitnexusignore` from a survey of the tree, so generated, vendored and bulk-data files stay out of the graph from the start. Rerun it after updates or when the integration feels off.
 
 On macOS with fish and iTerm2, omc pins each tab's title to its branch, and inside herdr it keeps the sidebar's worktree folder and branch current; see [Shell integration](docs/shell-integration.md).
 
@@ -91,7 +91,7 @@ Implementation plan tasks carry a `Complexity: simple | medium | high` label; a 
 
 Embeddings are always on, with no setting. omc installs GitNexus's local embedding runtime and downloads its model under `~/.omc` once, embeds on every index refresh and backfills each existing index once. When the runtime or a download fails, indexing falls back to keyword-only; that never fails `omc update`, `omc watch` or a refresh. A stale `gitnexus` section from an older config loads silently and is dropped on the next save.
 
-Configured models are checked against the provider's current model list before `omc design`, `omc implement` and `omc review` launch (Orchestrator and task models) and on watch ticks that use them; a blank choice is checked as the provider default. A current listing costs no remap turn and writes nothing. For Codex, omc reads `codex debug models` on the binary it launches and immediately remaps a still-stale value. For Claude, refresh turns happen only when its model list is missing, past its own refresh time, or without one, and only at a command's start (and on `omc watch`'s first tick): one or two quick no-model turns with nonessential traffic enabled, so a user setting that disables it cannot freeze the list. A still-stale value is then remapped, and a list still missing after two turns stops the command. The provider CLI's default model picks a listed full model id, omc saves it to `~/.omc/config.yaml` and prints one line per remap. A failed remap stops the command and saves nothing.
+Configured models are checked against the provider's current model list before `omc design`, `omc implement` and `omc review` launch (Orchestrator and task models); a blank choice is checked as the provider default. A current listing costs no remap turn and writes nothing. For Codex, omc reads `codex debug models` on the binary it launches and immediately remaps a still-stale value. For Claude, refresh turns happen only when its model list is missing, past its own refresh time, or without one, and only at a command's start: one or two quick no-model turns with nonessential traffic enabled, so a user setting that disables it cannot freeze the list. A still-stale value is then remapped, and a list still missing after two turns stops the command. The provider CLI's default model picks a listed full model id, omc saves it to `~/.omc/config.yaml` and prints one line per remap. A failed remap stops the command and saves nothing.
 
 For scripts, use `--defaults` or repeat `--set`:
 
@@ -118,26 +118,24 @@ Stale primary knowledge makes `/omc:explain` answer from an old primary graph.
 omc watch --auto-build
 ```
 
-That addition costs LLM work and is opt-in. A normal tick:
+That addition is opt-in; auto-build runs the build hook with no LLM. A normal tick:
 
 1. Checks that the primary is on its base branch, then fetches that branch only.
 2. Warns and skips unsafe syncs: off-branch, dirty (tracked changes) or diverged checkouts stay untouched by default.
 3. Fast-forwards the checkout when new commits arrive.
 4. Refreshes the GitNexus index directly, with no LLM cost; up-to-date ticks also heal stale knowledge.
-5. Runs the project's post-watch hook on action ticks, then optionally runs its build stage.
-
-With `--auto-build`, each tick first checks the Orchestrator model and remaps it when the provider no longer lists it, as described under [Configure](#configure).
+5. Runs the project's post-watch hook on action ticks, then optionally runs its build stage (`--auto-build` runs `.omc/bin/build` through the stage runner with no LLM).
 
 | Option | Effect |
 |---|---|
 | `--interval` | Seconds between ticks; default **30**. |
 | `--once` | One tick: check now, repair stale knowledge, then exit; current knowledge is reported as current. The hook and auto-build also run on this forced refresh. |
-| `--auto-build` | Run the project's build stage after action ticks via the default LLM; absent stages skip immediately. |
+| `--auto-build` | Run the project's `.omc/bin/build` after action ticks without an LLM; absent stages skip immediately. Stage runs need a running watch, which this option's own process provides. |
 | `--rebase` | Opt into `git rebase --autostash` instead of skipping dirty/diverged checkouts. |
 | `--reset-gitnexus` | Force-clear the GitNexus store (`.gitnexus/`) and rebuild it; primary must be on the base branch. The reset waits for a tick that can refresh. |
 | `--clear-mutex` | Bypass the single-instance guard; normally unnecessary because crash locks are kernel-released. |
 
-Watch is foreground-only: no daemon, one instance per primary, Ctrl-C to stop. A second watcher refuses unless you bypass its guard. Off-branch checkouts remain untouched even with `--rebase`.
+Watch is foreground-only: no daemon, one instance per primary, Ctrl-C to stop. The one exception to "no daemon" is a stage run: a detached supervisor bound to one hook run, never restarted or scheduled, that ends when its hook ends or is killed and never outlives a running `omc watch` for its project, or its worktree. A second watcher refuses unless you bypass its guard. Off-branch checkouts remain untouched even with `--rebase`.
 
 A conflicting rebase is aborted to restore the checkout. If restoring autostashed edits conflicts, watch warns, leaves conflict markers and keeps the edits safe in `git stash`; resolve them before further syncs. A repair that leaves knowledge stale is not retried while its stale reasons stay identical, so the terminal stays quiet until something changes.
 
@@ -145,7 +143,7 @@ A conflicting rebase is aborted to restore the checkout. If restoring autostashe
 
 A project can commit `.omc/hooks/post-watch.sh`. Watch runs it with bash from the repo root after syncs or forced `--once` refreshes, setting `OMC_WATCH_OUTCOME` to `synced` or `refreshed`; pure knowledge healing fires no hook. Failed or hung hooks (600 s limit) warn and link their captured log, then the loop continues.
 
-Hook and build log paths appear when they start. Auto-build streams output with a progress bar and elapsed time; use `tail -f <logfile>` or `omc internal build-progress <logfile>` to follow it elsewhere. Build failures link the transcript. There is **no build timeout**: long builds remain observable and Ctrl-C stops them.
+Hook and build log paths appear when they start. Auto-build streams output with a progress bar and elapsed time; use `tail -f <logfile>` or `omc internal build-progress <logfile>` to follow it elsewhere. Build failures link the log. The build's own `## Limits` apply, and Ctrl-C stops a running build.
 
 ## The lifecycle: `omc design`, `omc implement`, `omc review`
 
@@ -238,11 +236,13 @@ Finish squashes the branch to one commit, folding in uncommitted changes, then r
 3. The describe amend: the commit message becomes the MR/PR description generated from the diff.
 4. The project's `pre_push` hook, which judges the final commit.
 
-Both questions come from `omc internal gate review|verify`, one `OMC_GATE` line each. Every push passes through the gate, review-comment re-pushes included, and a `pre_push` fix resumes at the verify question, never the review question. Tracked files a stage changes, and new files it stages (such as review's `.gitnexusignore`), are amended into the commit. A red stage, or a red `post_rebase` or `pre_push`, is repaired forward under the stage-gate rule: up to ten fix cycles per conductor run, each bringing progress or a new idea and stated in one line (fix → build → check → rerun; a red verify first reruns only its failed pieces after build and check, then one full verify, when the project's verify skill has a "Running a subset" section; otherwise fix → build → check → one full verify). A cycle that brings neither, or a tenth that ends red, is one CRITICAL question, and nothing is pushed. An agent starts verify only in audit and in the MR gate.
+Both questions come from `omc internal gate review|verify`, one `OMC_GATE` line each. Every push passes through the gate, review-comment re-pushes included, and a `pre_push` fix resumes at the verify question, never the review question. Tracked files a stage changes, and new files it stages (such as review's `.gitnexusignore`), are amended into the commit. A red stage, or a red `post_rebase` or `pre_push`, is repaired forward under the stage-gate rule: up to ten fix cycles per conductor run, each bringing progress or a new idea and stated in one line (fix → build → check → rerun; a red verify first reruns only its failed pieces after build and check, then one full verify, when the verify stage's instructions have a "Rerunning a subset" section; otherwise fix → build → check → one full verify; a stage's own `Fix cycles` may lower the ten for itself). A cycle that brings neither, or a tenth that ends red, is one CRITICAL question, and nothing is pushed. An agent starts verify only in audit and in the MR gate.
 
 A compare URL is printed, and **you open the MR/PR**. Finish then moves the ticket to In Review on a best-effort basis and offers to close the worktree (the unmerged branch survives), address review comments with amend/re-push, or discuss the change. Finish also works without an audit: a direct finish gets the MR gate and no review unless `needs_review` asks for one. Stacked branches are refused.
 
-Project stages live in `.omc/skills/<stage>/SKILL.md`: check is the frequent unit gate, build builds the world without tests, verify is full E2E, run by agents only in audit and in the MR gate (you or the project may run it any time), and review judges the diff. Build runs before check wherever both run. Each can run as `/omc:<stage>`; unconfigured project stages are no-ops. Review always adds omc's grug complexity lens and human-review lens for human MR review rules. Important findings from either need a fix or a waiver in the design record's “Deliberate complexity” section; Minor findings are advisory. An unresolved finding, unavailable lens or failed gate stops publication.
+Check, build and verify are executable stage hooks, `.omc/bin/<stage>`, with no extension: omc runs each by path, so its shebang picks the interpreter and a project may write it in any language. Each has a sibling `<stage>.instructions.md`; review stays a skill. omc runs a hook detached under a supervisor and polls it with one loop (`omc internal stage start|wait|kill|template`), printing an `OMC_STAGE_RUN` line per answer; the `/omc:check`, `/omc:build` and `/omc:verify` proxies drive that loop and end with the unchanged `OMC_STAGE` verdict. The hook's `--show-instructions` prints Markdown in a validated template: `## Limits` holds Timeout, Quiet timeout and Fix cycles (the only section omc reads as data), followed by Done when, Passed when, Fixing failures and the optional Rerunning a subset. A stage run needs a running `omc watch` for the project and is refused without one; it ends if that watch stops or the worktree is removed. A failed verify can be held, its system left up for `/omc:investigate local`, and `/omc:verify kill` ends it. Repos still on `.omc/skills/{check,build,verify}` migrate with `/omc:integrate`.
+
+Project stages live in those stage hooks and in `.omc/skills/review`: check is the frequent unit gate, build builds the world without tests, verify is full E2E, run by agents only in audit and in the MR gate (you or the project may run it any time), and review judges the diff. Build runs before check wherever both run. Each can run as `/omc:<stage>`; unconfigured project stages are no-ops. Review always adds omc's grug complexity lens and human-review lens for human MR review rules. Important findings from either need a fix or a waiver in the design record's “Deliberate complexity” section; Minor findings are advisory. An unresolved finding, unavailable lens or failed gate stops publication.
 
 Project hooks live in `.omc/hooks/<name>/SKILL.md`. omc's internal hook proxy runs each one as a black box and relays its one `OMC_HOOK` line:
 
@@ -254,19 +254,19 @@ Project hooks live in `.omc/hooks/<name>/SKILL.md`. omc's internal hook proxy ru
 | `post_rebase` | After a rebase moved the branch onto a new base | Ok or red; `before_implementation` skips the post-conflict check. |
 | `pre_push` | After the describe amend, before the push | Ok or red; nothing is pushed while it is red. |
 
-Absence is the correct default for every hook. A fix repairs the code, never a hook's own file.
+Absence is the correct default for every hook. A fix repairs the code, never a hook's own file. These project hooks answer yes/no questions; the stage hooks under `.omc/bin/` are the stages themselves.
 
 Review also keeps the repo-root `.gitnexusignore` current through omc's internal `gitnexus-ignore` flow, guided by the project's `.omc/skills/gitnexus-ignore-context/SKILL.md` context skill: it judges the diff's files by content and ignores generated, vendored and bulk-data code. It never gates the stage. The first finish in a repo without the file surveys the whole tree, and the file arrives in the MR diff for review.
 
 ## How omc is put together
 
-The CLI is a uv-installed Python tool. The harness installs skills straight from this repo, while omc installs fenced global behavior guidance; there is no separate skill-sync step. Each project supplies its own stage skills and optional hooks under `.omc/`.
+The CLI is a uv-installed Python tool. The harness installs skills straight from this repo, while omc installs fenced global behavior guidance; there is no separate skill-sync step. Each project supplies its own stage hooks, skills, optional project hooks and watch hook under `.omc/`.
 
 ```mermaid
 flowchart LR
     Behavior["Global behavior layer"] --> Harness["Claude Code / Codex"]
     Harness --> Skills["omc skills plugin"]
-    Project["Project .omc/ skills and hooks"] --> Skills
+    Project["Project .omc/ stage hooks, skills, project hooks and watch hook"] --> Skills
     Skills --> Internal["omc internal"]
     Internal --> CLI["Python CLI / uv tool"]
     CLI --> Tools["ToolContext"]
@@ -293,9 +293,9 @@ flowchart LR
 
 [GitNexus](https://github.com/chris-husse/GitNexus) installs from its approved source under `~/.omc/dependencies/gitnexus`; the checkout tracks that repository's `main` and `omc update` rebuilds it. Its graph provides symbols and execution flows, and a project's explain-context skill establishes where its truth lives.
 
-The embedding runtime and model cache live beside the clone under `~/.omc/dependencies/gitnexus-embeddings/{runtime,hf}` (`GITNEXUS_EMBEDDING_RUNTIME_DIR` and `HF_HOME`, set by `gitnexus_env` for every omc child alongside `GITNEXUS_SHARED_STORE=off`), so an update of the clone never touches them. Once the runtime is installed and the index is embedded, `/omc:explain` queries are semantic and the keyword-only warning disappears.
+The embedding runtime and model cache live beside the clone under `~/.omc/dependencies/gitnexus-embeddings/{runtime,hf}` (`GITNEXUS_EMBEDDING_RUNTIME_DIR` and `HF_HOME`, set by `gitnexus_env` for every omc child alongside `GITNEXUS_SHARED_STORE=off`, except a stage hook, which sees its caller's environment as-is), so an update of the clone never touches them. Once the runtime is installed and the index is embedded, `/omc:explain` queries are semantic and the keyword-only warning disappears.
 
-Internal commands expose deterministic operations to skills: `rebase-main`, `wt-template`, `design-record`, `gate`, `models`, `global-instructions`, `gitnexus` (ensure/status/refresh and the query verbs), `skills list` and `build-progress`. For example, the record gate returns a single prefixed JSON line, and the skill uses it to continue or refuse:
+Internal commands expose deterministic operations to skills: `rebase-main`, `wt-template`, `design-record`, `gate`, `models`, `global-instructions`, `gitnexus` (ensure/status/refresh and the query verbs), `skills list`, `stage` (start, wait, kill and template for the stage hooks) and `build-progress`. For example, the record gate returns a single prefixed JSON line, and the skill uses it to continue or refuse:
 
 ```mermaid
 sequenceDiagram
@@ -306,9 +306,9 @@ sequenceDiagram
     Note over Skill: Continue on success or surface refusal
 ```
 
-The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_REBASE_MAIN`, `OMC_SLUG`, `OMC_MODELS`, `OMC_GATE`, `OMC_HOOK` and `OMC_TICKET`. The CLI emits knowledge, design-record, rebase-main, models and gate verdicts (`omc internal models` resolves every task's model and effort and carries the provider-selection-per-step flag; `omc internal gate review|verify` answers the MR gate's two questions); stage, slug, hook and ticket-sync verdicts come from skills (`OMC_HOOK` is the hook proxy's), and the behavior layer names all nine as sacred. Finish's squash count travels in the CLI's rebase-main verdict as `squashed`; no skill emits a squash verdict. A stage verdict reads `OMC_STAGE {"stage", "configured", "passed", "summary"}`. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
+The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_STAGE_RUN`, `OMC_REBASE_MAIN`, `OMC_SLUG`, `OMC_MODELS`, `OMC_GATE`, `OMC_HOOK` and `OMC_TICKET`. The CLI emits knowledge, design-record, rebase-main, models, gate and stage-run verdicts (`omc internal models` resolves every task's model and effort and carries the provider-selection-per-step flag; `omc internal gate review|verify` answers the MR gate's two questions); stage, slug, hook and ticket-sync verdicts come from skills (`OMC_HOOK` is the hook proxy's), and the behavior layer names all ten of its contracts as sacred. The stage proxies read `OMC_STAGE_RUN` before they emit `OMC_STAGE`. Finish's squash count travels in the CLI's rebase-main verdict as `squashed`; no skill emits a squash verdict. A stage verdict reads `OMC_STAGE {"stage", "configured", "passed", "summary"}`. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
 
-The CLI handles mechanics and launches model work for slugging, auto-build and sessions. Skills supply judgment and may run git or project commands directly. `ToolContext` centralizes the Python CLI's subprocess and network calls; provider adapters supply each harness's argv and settings. See [Development](#development) for this repo's project integration.
+The CLI handles mechanics and launches model work for slugging and sessions (auto-build runs the build hook with no LLM). Skills supply judgment and may run git or project commands directly. `ToolContext` centralizes the Python CLI's subprocess and network calls; provider adapters supply each harness's argv and settings. See [Development](#development) for this repo's project integration.
 
 ## Prerequisites
 
@@ -350,16 +350,16 @@ Remove exact `omc internal notify --provider claude` entries from old worktrees'
 
 ## Development
 
-omc is developed with omc: keep watch running in the primary checkout and start changes with `omc design "<change>"`. The lifecycle runs this repository's stage skills at the right moments; agents call the `just` recipes for you.
+omc is developed with omc: keep watch running in the primary checkout and start changes with `omc design "<change>"`. The lifecycle runs this repository's stage hooks (plus the review skill) at the right moments; agents call the `just` recipes for you.
 
 | Surface | What it ensures here |
 |---|---|
 | `.omc/config.yaml` (committed) | Branches are `feature/<slug>`, cut from `main`. |
 | `.config/wt.toml` | Copies ignored files such as `.env`, `.venv` and local caches into worktrees, excluding `.gitnexus/` and `target/`; sets up submodules and direnv before landing. |
 | `.omc/config/AGENTS.md` | Red → green on every change, tests run or fail and never skip, ToolContext process boundary, no unasked installs, generated README. |
-| `.omc/skills/check` | Frequent quick gate: the unit suite. |
-| `.omc/skills/build` | World build in audit and finish, before check: format check, lint and package build, without tests. |
-| `.omc/skills/verify` | Docker golden lifecycle, then variations and smoke in parallel; 300 s per test. Codex gate when Codex code changed; tokens from gitignored `.env`, never public runners. Docker is required. Its "Running a subset" section reruns failed pieces by pytest node id (never `-k`), after the golden path reruns in full. |
+| `.omc/bin/check` | Frequent quick gate: the unit suite. |
+| `.omc/bin/build` | World build in audit and finish, before check: format check, lint and package build, without tests. |
+| `.omc/bin/verify` | Docker golden lifecycle, then variations and smoke in parallel; 300 s per test. Codex gate when Codex code changed; tokens from gitignored `.env`, never public runners. Docker is required. Its instructions' "Rerunning a subset" section reruns failed pieces by pytest node id (never `-k`), after the golden path reruns in full. |
 | `.omc/skills/review` | Branch diff checked against this repo's rules, plus omc's grug and human-review lenses. |
 | `.omc/skills/explain-context` | Where truth lives and the order sources take precedence. |
 | `.omc/hooks/needs_verify` | Docs-only changes need no verify: it answers no exactly when every changed path is under `docs/` or is `README.md` (`skills/` is product). |

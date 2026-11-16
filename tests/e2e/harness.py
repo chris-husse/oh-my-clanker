@@ -8,8 +8,12 @@ import json
 import os
 import re
 import shlex
+import time
 
 import pytest
+
+from omc.stagedef import parse_instructions
+from omc.watchlock import ALIVE_LOCK
 
 # Env vars that can authenticate each provider's CLI, in preference order.
 # claude accepts an Anthropic API key as well as a `claude setup-token` OAuth token.
@@ -292,11 +296,6 @@ def _write_skill(container, repo, kind, name, description, body):
     assert rc == 0, out
 
 
-def add_stage(container, repo, stage, body):
-    """Write the project stage `.omc/skills/<stage>/SKILL.md` (uncommitted)."""
-    _write_skill(container, repo, "skills", stage, f"test project {stage} stage", body)
-
-
 def add_hook(container, repo, name, body):
     """Write the project hook `.omc/hooks/<name>/SKILL.md` (uncommitted)."""
     _write_skill(container, repo, "hooks", name, f"test project {name} hook", body)
@@ -353,3 +352,242 @@ with open(path, "w") as f:
     else:
         raise ValueError(provider)
     assert rc == 0, f"MCP wiring failed for {provider}:\n{out}"
+
+
+# --- stage hooks (design 6.2/6.3) ---
+
+
+def hook_script(stage: str, body: str) -> str:
+    """The conventional hook: `--show-instructions` prints its instructions file, else `body`.
+
+    Runs in the container (and in its unit test on the host's PATH), so it calls
+    `cat` and `dirname` by name, as a real project hook does."""
+    return (
+        "#!/bin/sh\n"
+        'if [ "$#" -eq 1 ] && [ "$1" = "--show-instructions" ]; then\n'
+        f'    exec cat "$(dirname "$0")/{stage}.instructions.md"\n'
+        "fi\n"
+        f"{body}\n"
+    )
+
+
+def hook_instructions(
+    *, done: str, passed: str, fixing: str, timeout: str = "10m", quiet: str = "5m"
+) -> str:
+    """Instructions with the four §6.3 sections; validated by omc's own parser."""
+    text = (
+        f"## Limits\nTimeout: {timeout}\nQuiet timeout: {quiet}\n\n"
+        f"## Done when\n{done}\n\n"
+        f"## Passed when\n{passed}\n\n"
+        f"## Fixing failures\n{fixing}\n"
+    )
+    parse_instructions(text)
+    return text
+
+
+_WRITE_HOOK = """\
+import sys
+from pathlib import Path
+
+repo, stage, script, instructions = sys.argv[1:]
+bindir = Path(repo) / ".omc" / "bin"
+bindir.mkdir(parents=True, exist_ok=True)
+(bindir / f"{stage}.instructions.md").write_text(instructions)
+hook = bindir / stage
+hook.write_text(script)
+hook.chmod(0o755)
+"""
+
+
+def add_stage_hook(container, repo: str, stage: str, body: str, instructions: str) -> None:
+    """Write `.omc/bin/<stage>` (executable), its instructions and the template; uncommitted."""
+    parse_instructions(instructions)
+    rc, out = run_in(
+        container,
+        ["python3", "-c", _WRITE_HOOK, repo, stage, hook_script(stage, body), instructions],
+    )
+    assert rc == 0, f"writing the {stage} hook failed:\n{out}"
+    rc, out = run_in(
+        container,
+        ["bash", "-c", "omc internal stage template > .omc/bin/INSTRUCTIONS.template.md"],
+        cwd=repo,
+    )
+    assert rc == 0, f"omc internal stage template failed:\n{out}"
+
+
+# --- a watch for the container's primary checkout (design 6.4, A1) ---
+
+STAND_IN_READY = "/tmp/omc-watch-stand-in.ready"
+WATCH_PID = "/tmp/omc-watch.pid"
+WATCH_LOG = "/tmp/omc-watch.log"
+
+# argv[1] is the repo; `lock` is the alive lock in its git common dir, as watchlock resolves it.
+_ALIVE_LOCK_PATH = f"""\
+import fcntl, os, subprocess, sys
+repo = sys.argv[1]
+common = subprocess.run(
+    ["git", "-C", repo, "rev-parse", "--git-common-dir"],
+    check=True, capture_output=True, text=True,
+).stdout.strip()
+lock = os.path.join(repo, common, {ALIVE_LOCK!r})
+"""
+
+_PROBE = (
+    _ALIVE_LOCK_PATH
+    + """\
+fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("running")
+else:
+    print("not running")
+"""
+)
+
+
+def watch_stand_in_script(ready: str = STAND_IN_READY) -> str:
+    """Hold the alive lock as `omc watch` does, then write `ready` (its pid) and sleep.
+
+    Its stderr goes to `<ready>.log`: a detached exec has no output to read."""
+    return (
+        f"import sys\nsys.stderr = open({f'{ready}.log'!r}, 'w', buffering=1)\n"
+        + _ALIVE_LOCK_PATH
+        + f"""\
+import time
+fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+with open({ready + ".tmp"!r}, "w") as fh:
+    fh.write(str(os.getpid()))
+os.replace({ready + ".tmp"!r}, {ready!r})
+while True:
+    time.sleep(3600)
+"""
+    )
+
+
+def _watch_state(container, repo: str) -> str:
+    rc, out = run_in(container, ["python3", "-c", _PROBE, repo])
+    if rc != 0 or out.strip() not in ("running", "not running"):
+        pytest.fail(f"the watch probe failed in {repo} (exit {rc}):\n{out}")
+    return out.strip()
+
+
+def hold_watch_stand_in(container, repo: str) -> None:
+    """The lock-holding helper the unit tests use, in place of a real `omc watch`.
+
+    A no-op while a watch (stand-in or real) already holds the lock: one per container."""
+    if _watch_state(container, repo) == "running":
+        return
+    run_in(container, ["rm", "-f", STAND_IN_READY, f"{STAND_IN_READY}.log"])
+    container.get_wrapped_container().exec_run(
+        ["python3", "-c", watch_stand_in_script(), repo], detach=True
+    )
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        rc, _ = run_in(container, ["test", "-f", STAND_IN_READY])
+        if rc == 0:
+            return
+        time.sleep(0.5)
+    _, log = run_in(container, ["bash", "-c", f"cat {STAND_IN_READY}.log 2>&1"])
+    pytest.fail(f"the watch stand-in did not take the alive lock in {repo} within 30 s:\n{log}")
+
+
+def add_stage(container, repo: str, stage: str, body: str, passed: str) -> None:
+    """A `.omc/bin/<stage>` hook running `body`, its instructions (`passed` is its
+    `## Passed when` section), and a watch for the repo's stage runs; uncommitted."""
+    instructions = hook_instructions(
+        timeout="5m",
+        quiet="2m",
+        done=f"The hook exits once its {stage} command has run. Nothing is held.",
+        passed=passed,
+        fixing="Read the end of the log. Never edit `.omc/bin/*`: that is the stage itself.",
+    )
+    add_stage_hook(container, repo, stage, body, instructions)
+    hold_watch_stand_in(container, repo)
+
+
+def _watch_log_tail(container) -> str:
+    _, tail = run_in(container, ["bash", "-c", f"tail -n 40 {WATCH_LOG} 2>&1"])
+    return tail
+
+
+def start_real_watch(container, repo: str, *, within: float = 240) -> None:
+    """Start `omc watch` in the primary checkout, detached; return once it holds the alive
+    lock. It takes the lock at boot, before its first tick; `within` bounds the wait."""
+    command = (
+        f"cd {shlex.quote(repo)} && echo $$ > {WATCH_PID} && "
+        f"exec omc watch --interval 30 > {WATCH_LOG} 2>&1"
+    )
+    run_in(container, ["rm", "-f", WATCH_PID])
+    container.get_wrapped_container().exec_run(["bash", "-lc", command], detach=True)
+    deadline = time.monotonic() + within
+    while True:
+        if _watch_state(container, repo) == "running":
+            return
+        rc, _ = run_in(
+            container, ["bash", "-c", f'test -s {WATCH_PID} && ! kill -0 "$(cat {WATCH_PID})"']
+        )
+        if rc == 0:
+            pytest.fail(
+                f"omc watch exited before it held the alive lock:\n{_watch_log_tail(container)}"
+            )
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                f"omc watch did not hold the alive lock within {within:g} s:\n"
+                f"{_watch_log_tail(container)}"
+            )
+        time.sleep(2)
+
+
+def stop_real_watch(container, repo: str, *, within: float = 30) -> None:
+    """Ctrl-C the watch start_real_watch started; return once its alive lock is free."""
+    rc, out = run_in(container, ["bash", "-c", f'kill -INT "$(cat {WATCH_PID})"'])
+    if rc != 0:
+        pytest.fail(f"could not signal omc watch: {out}\n{_watch_log_tail(container)}")
+    deadline = time.monotonic() + within
+    while _watch_state(container, repo) == "running":
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                f"omc watch still held the alive lock {within:g} s after SIGINT:\n"
+                f"{_watch_log_tail(container)}"
+            )
+        time.sleep(1)
+
+
+# The Codex long-poll E2E (test_e2e_stage_poll) waits with this command.
+STAGE_WAIT = "omc internal stage wait check"
+
+# Counts the tool calls in one Codex session's rollout (under CODEX_HOME) whose
+# command contains argv[2]. The conversation server's sanitized events drop the
+# arguments, so the rollout on disk is the artifact. The session's own file is
+# picked by its name or its first line (session_meta) before anything is parsed.
+COUNT_CALLS = """\
+import json, os, pathlib, sys
+session, needle = sys.argv[1:]
+home = pathlib.Path(os.environ.get("CODEX_HOME") or pathlib.Path.home() / ".codex")
+
+
+def is_session(path):
+    if session in path.name:
+        return True
+    with path.open() as fh:
+        first = json.loads(fh.readline() or "{}")
+    return first.get("type") == "session_meta" and first.get("payload", {}).get("id") == session
+
+
+paths = [path for path in sorted((home / "sessions").rglob("*.jsonl")) if is_session(path)]
+if len(paths) != 1:
+    sys.exit(f"expected one rollout for session {session}, found {paths}")
+count = 0
+for line in paths[0].read_text().splitlines():
+    record = json.loads(line) if line.strip() else {}
+    payload = record.get("payload")
+    if record.get("type") != "response_item" or not isinstance(payload, dict):
+        continue
+    if payload.get("type") in ("function_call", "custom_tool_call", "local_shell_call"):
+        call = {k: payload.get(k) for k in ("arguments", "input", "action")}
+        if needle in json.dumps(call):
+            count += 1
+print(count)
+"""

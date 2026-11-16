@@ -45,11 +45,17 @@ e2e-rest *args:
 codex-gate *args:
     CODEX_AUTH_VOLUME=${CODEX_AUTH_VOLUME:-omc-e2e-codex-auth} bash scripts/e2e.sh rest -m "e2e and codex_gate and not expensive" -n 1 {{args}}
 
-# The monolithic lifecycle cases, the auto-advance chain from `agreed` and both cross-provider handoffs (expensive tier):
+# The monolithic lifecycle cases, the auto-advance chain from `agreed`, both cross-provider handoffs
+# and the expensive variations from `recorded` and `implemented` (expensive tier):
 # evidence runs, never a gate. Serial through the E2E runner (prebuilt image, Ryuk
 # off); needs the Codex account volume (`just codex-login`).
 lifecycle-full *args:
-    CODEX_AUTH_VOLUME=${CODEX_AUTH_VOLUME:-omc-e2e-codex-auth} bash scripts/e2e.sh rest -m "e2e and expensive" -n 1 tests/e2e/test_e2e_lifecycle_full.py tests/e2e/variations/test_codex_handoff.py tests/e2e/variations/test_from_agreed.py {{args}}
+    CODEX_AUTH_VOLUME=${CODEX_AUTH_VOLUME:-omc-e2e-codex-auth} bash scripts/e2e.sh rest -m "e2e and expensive" -n 1 tests/e2e/test_e2e_lifecycle_full.py tests/e2e/variations/test_codex_handoff.py tests/e2e/variations/test_from_agreed.py tests/e2e/variations/test_from_implemented.py tests/e2e/variations/test_from_recorded.py {{args}}
+
+# Codex stage poll, never a gate: serial on the account volume (needs `just codex-login`).
+# evidence run: one stage run that outlasts a single 540 s wait; expensive tier
+codex-stage-poll *args:
+    CODEX_AUTH_VOLUME=${CODEX_AUTH_VOLUME:-omc-e2e-codex-auth} bash scripts/e2e.sh rest -m "e2e and expensive and codex_gate" -n 1 tests/e2e/test_e2e_stage_poll.py {{args}}
 
 # Interactive device login into the dedicated Codex E2E Docker volume.
 codex-login:
@@ -58,7 +64,7 @@ codex-login:
 # LLM-heavy E2E (whole-lifecycle evidence runs). Costs real money - run only with
 # explicit user agreement.
 expensive-e2e-tests *args:
-    uv run pytest -m "e2e and expensive and not golden and not variation" -q {{args}}
+    uv run --frozen pytest -m "e2e and expensive and not golden and not variation" -q {{args}}
 
 # Install omc from this checkout (dev snapshot). Re-run after edits.
 install:

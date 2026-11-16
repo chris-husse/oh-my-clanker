@@ -110,6 +110,7 @@ def test_review_integrate_flags_drifted_build_stage(container):
     configure_omc(container, "claude")
     repo = make_work_repo(container)
     _seed_project(container, repo)
+    # The old stage skill without a hook: an unmigrated repo (design 6.7).
     stale = (
         "---\\nname: build\\ndescription: project build stage\\n---\\n\\n"
         "Run `make test`. Non-zero exit means the build FAILED.\\n"
@@ -143,6 +144,7 @@ def test_review_integrate_flags_drifted_build_stage(container):
             "the output flags the drift: the build stage's `make test` does not "
             "match the project's actual justfile/pytest entry point",
             "it proposes a corrected build stage citing the real command",
+            "it proposes converting the stage to `.omc/bin/build` with its instructions",
             "it does not claim to have edited the file (approval-gated writes)",
         ],
         artifacts=out,

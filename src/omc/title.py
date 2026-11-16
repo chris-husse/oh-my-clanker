@@ -13,13 +13,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
-import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 from .errors import OmcError, Refusal
+from .fsutil import write_atomic
 from .iterm2_title import worker_argv
 from .terminal_title import validate_title
 from .terminals import iterm2_session_id
@@ -75,22 +74,6 @@ def _session(ctx: ToolContext) -> str:
     return session_id
 
 
-def _write_atomic(path: Path, text: str) -> None:
-    """Temp sibling + os.replace, as awscreds.py does."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def _cooldown_left(marker: Path, now: float) -> float:
     """Seconds of cooldown remaining on the failure marker; 0 when absent or expired."""
     try:
@@ -106,7 +89,7 @@ def _fail(marker: Path, reason: str) -> str:
     line = f"omc: iTerm2 tab title update failed: {reason} ({RETRY_HINT})"
     stamp = time.strftime("%Y-%m-%d %H:%M:%S %z")
     try:
-        _write_atomic(marker, f"{line}\nat {stamp}\n")
+        write_atomic(marker, f"{line}\nat {stamp}\n")
     except OSError as exc:
         line += f"; marker not written ({type(exc).__name__})"
     print(line, file=sys.stderr)
@@ -194,7 +177,7 @@ def _apply_pass(ctx: ToolContext, session_id: str, request: Path, *, may_wait: b
         outcome = _perform(ctx, session_id, action, title, throttle=True)
         if outcome == APPLIED:
             try:
-                _write_atomic(applied, text)
+                write_atomic(applied, text)
             except OSError as exc:
                 raise OmcError(
                     f"omc title: cannot record {applied} ({type(exc).__name__})"

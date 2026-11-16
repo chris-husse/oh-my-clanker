@@ -145,7 +145,7 @@ def test_critical_answer_resumes_authorized_implementation(container, provider):
 def test_failing_build_blocks_publication(container, provider):
     session, judge, judge_model, evidence = _scenario_setup(container, provider)
     repo = _fixture(container, failing_stage="build")
-    rc, original_stage = run_in(container, ["cat", f"{repo}/.omc/stage-scripts/build.sh"])
+    rc, original_stage = run_in(container, ["cat", f"{repo}/.omc/bin/build"])
     assert rc == 0, "fixture build stage missing"
     try:
         with session:
@@ -172,11 +172,11 @@ def test_failing_build_blocks_publication(container, provider):
             evidence["events"] = session.events()
             rc, markers = run_in(container, ["cat", "/tmp/omc-lifecycle-stages"])
             assert rc == 0 and "build" in markers.splitlines(), "failing build never executed"
-            rc, stage = run_in(container, ["cat", f"{worktree}/.omc/stage-scripts/build.sh"])
+            rc, stage = run_in(container, ["cat", f"{worktree}/.omc/bin/build"])
             assert rc == 0 and stage == original_stage, "agent changed external build gate"
             rc, _ = run_in(container, ["test", "-e", "/tmp/omc-external-build-unavailable"])
             assert rc == 0, "external build failure was removed"
-            rc, _ = run_in(container, ["sh", ".omc/stage-scripts/build.sh"], cwd=worktree)
+            rc, _ = run_in(container, ["sh", ".omc/bin/build"], cwd=worktree)
             assert rc != 0, "build stage no longer fails under external condition"
             assert after["remote_refs"] == baseline["remote_refs"], "failing stage published"
             rc, _ = run_in(

@@ -142,7 +142,7 @@ wheels = [
 
 [[package]]
 name = "omc"
-version = "0.1.50"
+version = "0.1.53"
 source = { editable = "." }
 dependencies = [
     { name = "filelock" },

@@ -355,6 +355,104 @@ class ToolContext:
             raise error[0]
         return rc
 
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | os.PathLike[str],
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        """Start argv in its own session with every stdio stream on DEVNULL and
+        return at once; nothing is waited for. pgid == pid (start_new_session).
+        The env is the caller's as-is plus `extra_env`, without child_env()'s
+        GitNexus overlay: a stage hook sees the caller's environment (§6.2)."""
+        return subprocess.Popen(  # noqa: S603 - argv list, no shell
+            list(argv),
+            cwd=cwd,
+            env={**self.env, **(extra_env or {})},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def spawn_logged(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | os.PathLike[str],
+        log_path: Path,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        """Start argv in its own session (pgid == pid) with stdout and stderr
+        both appended to ``log_path`` through one fd; stdin is DEVNULL. The
+        parent's copy of the fd is closed once the child holds it. The env is
+        the caller's as-is plus `extra_env`, as in spawn_detached."""
+        with open(log_path, "ab") as log:
+            return subprocess.Popen(  # noqa: S603 - argv list, no shell
+                list(argv),
+                cwd=cwd,
+                env={**self.env, **(extra_env or {})},
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                start_new_session=True,
+            )
+
+    def signal_pid(self, pid: int, sig: int) -> bool:
+        """os.kill; False when the process is gone or not ours. Signal 0 probes liveness.
+
+        A pid of 1 or less is refused (False, nothing sent): kill(0) signals our own
+        group and kill(-1) every process the user owns, so a zeroed or corrupt
+        recorded pid must never reach the kernel."""
+        if pid <= 1:
+            return False
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    def signal_group(self, pgid: int, sig: int) -> bool:
+        """os.killpg; False when the group is gone or not ours. Signal 0 probes liveness.
+
+        A pgid of 1 or less is refused (False, nothing sent): killpg(0) signals our
+        own group and killpg(1) is kill(-1), every process the user owns."""
+        if pgid <= 1:
+            return False
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    def procfs(self) -> bool:
+        """Whether this system has Linux's /proc (macOS has none)."""
+        return Path("/proc/self/stat").exists()
+
+    def process_start(self, pid: int) -> int | None:
+        """When process `pid` started, in clock ticks since boot: field 22 of
+        /proc/<pid>/stat. A recycled pid has another start time, and so does a pid
+        in another container's namespace. None when the process is gone, the file
+        does not parse, or there is no /proc (macOS). A file read, not a subprocess."""
+        try:
+            text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        fields = text.rsplit(")", 1)[-1].split()  # the name, field 2, may hold spaces
+        try:
+            return int(fields[19])
+        except (IndexError, ValueError):
+            return None
+
+    def boot_time(self) -> float:
+        """Epoch seconds of this boot: wall clock minus time since boot.
+
+        Linux ``CLOCK_BOOTTIME`` counts suspend; on macOS ``CLOCK_MONOTONIC``
+        counts sleep. The result is stable to well under 60 s within one boot."""
+        clock = getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC)
+        return time.time() - time.clock_gettime(clock)
+
     def http_get(
         self,
         url: str,

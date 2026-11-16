@@ -188,10 +188,12 @@ def module_container(request, e2e_image):
 def stage_session(request, e2e_provider):
     """A container forked from the golden stage named by
     @pytest.mark.variation("<stage>"), with a conversation bound to its
-    resumable session. Yields (container, session, manifest)."""
+    resumable session, and the watch stand-in holding the alive lock for its
+    primary checkout. Yields (container, session, manifest)."""
     from testcontainers.core.container import DockerContainer
 
     from .conversation import ClaudeConversation, Conversation
+    from .harness import hold_watch_stand_in
     from .stages import read_manifest, stage_image
 
     marker = request.node.get_closest_marker("variation")
@@ -205,6 +207,8 @@ def stage_session(request, e2e_provider):
     )
     with codex_account(c, _finish_container_setup, use_account=use_codex_account):
         manifest = read_manifest(c)
+        # The golden path's real watch did not survive the snapshot (design 7).
+        hold_watch_stand_in(c, manifest["repo"])
         session = (
             ClaudeConversation(c, manifest["model"]) if provider == "claude" else Conversation(c)
         )

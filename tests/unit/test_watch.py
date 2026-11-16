@@ -5,16 +5,28 @@ import shlex
 import stat
 import subprocess
 import sys
-from contextlib import contextmanager, nullcontext
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from omc.config.schema import Config
+from omc.errors import OmcError
 from omc.toolctx import ToolContext
 from omc.watch import run_watch
 
-from ._stubs import DEFAULT_CODEX_CATALOG, host_bin, make_codex_stub
+from . import _mutexproc, _stagekit
+from ._mutexproc import (
+    ctx_with_healing_node_stub,
+    ctx_with_node_stub,
+    ctx_with_shared_store_node_stub,
+    hold_in_subprocess,
+    push_remote_commit,
+    repo_with_origin,
+    stub_tools,
+)
+from ._stubs import host_bin
 
 
 @pytest.fixture(autouse=True)
@@ -26,32 +38,12 @@ def _fast_poll(monkeypatch):
     monkeypatch.setattr(gitnexus_mod, "_POLL_SECONDS", 0.05)
 
 
-@pytest.fixture(autouse=True)
-def _current_models(monkeypatch):
-    """Existing watch tests exercise git/knowledge behavior, not model catalogs."""
+@pytest.mark.parametrize("auto_build", [False, True])
+def test_watch_runs_tick_hook_and_build_inside_each_locked_tick(tmp_path, monkeypatch, auto_build):
     import omc.watch as watch_mod
 
-    monkeypatch.setattr(
-        watch_mod,
-        "reconcile",
-        lambda ctx, cfg, groups, *, say, dry_run, report_current, command_start: cfg,
-        raising=False,
-    )
-
-
-@pytest.mark.parametrize(
-    ("auto_build", "groups"),
-    [(False, set()), (True, {"orchestrator"})],
-)
-def test_watch_reconciles_selected_models_at_each_locked_tick(
-    tmp_path, monkeypatch, auto_build, groups
-):
-    import omc.watch as watch_mod
-
-    initial = Config()
-    remapped = [Config(), Config()]
+    cfg = Config()
     events = []
-    calls = []
     locked = False
 
     class Instance:
@@ -67,6 +59,7 @@ def test_watch_reconciles_selected_models_at_each_locked_tick(
     monkeypatch.setattr(watch_mod, "ensure_gitnexus", lambda ctx: 0)
     monkeypatch.setattr(watch_mod, "ensure_wt_config", lambda ctx, root: None)
     monkeypatch.setattr(watch_mod, "watch_locks", lambda ctx, *, cwd: (instance, object()))
+    monkeypatch.setattr(watch_mod, "alive_lock_path", lambda ctx, *, cwd: tmp_path / "alive.lock")
     monkeypatch.setattr(watch_mod, "acquire_instance", lambda instance, *, clear: True)
 
     @contextmanager
@@ -83,31 +76,16 @@ def test_watch_reconciles_selected_models_at_each_locked_tick(
 
     monkeypatch.setattr(watch_mod, "acquire_busy_narrated", busy_lock)
 
-    def fake_reconcile(ctx, cfg, leaves, *, say, dry_run, report_current, command_start):
-        assert locked and not dry_run
-        assert leaves == groups
-        assert report_current is (not calls)
-        assert command_start is (not calls)
-        assert cfg is (initial if not calls else remapped[0])
-        assert cfg.llm.default == "claude"  # auto-build's orchestrator provider
-        calls.append((cfg, leaves))
-        events.append("reconcile")
-        return remapped[len(calls) - 1]
-
-    monkeypatch.setattr(watch_mod, "reconcile", fake_reconcile)
-
-    def tick(ctx, cfg, root, **kwargs):
-        assert locked
-        expected = remapped[len(calls) - 1] if groups else initial
-        assert cfg is expected
+    def tick(ctx, current, root, **kwargs):
+        assert locked and current is cfg
         events.append("tick")
         return "synced"
 
     monkeypatch.setattr(watch_mod, "_tick", tick)
     monkeypatch.setattr(watch_mod, "_post_watch_hook", lambda *args: events.append("hook"))
 
-    def build(ctx, cfg, root):
-        assert locked and cfg is remapped[len(calls) - 1]
+    def build(ctx, root):
+        assert locked
         events.append("build")
 
     monkeypatch.setattr(watch_mod, "_auto_build", build)
@@ -119,184 +97,10 @@ def test_watch_reconciles_selected_models_at_each_locked_tick(
             raise KeyboardInterrupt
 
     monkeypatch.setattr(watch_mod.time, "sleep", stop_after_two_ticks)
-    assert (
-        watch_mod.run_watch(
-            object(),
-            initial,
-            interval=1,
-            auto_build=auto_build,
-        )
-        == 0
-    )
-    one_tick = [
-        "lock",
-        *(["reconcile"] if groups else []),
-        "tick",
-        "hook",
-        *(["build"] if auto_build else []),
-        "unlock",
-    ]
+    assert watch_mod.run_watch(object(), cfg, interval=1, auto_build=auto_build) == 0
+    one_tick = ["lock", "tick", "hook", *(["build"] if auto_build else []), "unlock"]
     assert events == one_tick * 2
-    assert len(calls) == (2 if groups else 0)
     assert sleeps == [1, 1]
-    assert not instance.is_locked
-
-
-def _fake_watch_boot(monkeypatch, tmp_path):
-    """Stub every boot check and lock so run_watch goes straight to its loop."""
-    import omc.watch as watch_mod
-
-    class Instance:
-        is_locked = True
-
-        def release(self):
-            self.is_locked = False
-
-    instance = Instance()
-    monkeypatch.setattr(watch_mod, "repo_root", lambda ctx: str(tmp_path))
-    monkeypatch.setattr(watch_mod, "primary_root", lambda ctx: str(tmp_path))
-    monkeypatch.setattr(watch_mod, "require_tools", lambda ctx, cfg: None)
-    monkeypatch.setattr(watch_mod, "ensure_gitnexus", lambda ctx: 0)
-    monkeypatch.setattr(watch_mod, "ensure_wt_config", lambda ctx, root: None)
-    monkeypatch.setattr(watch_mod, "watch_locks", lambda ctx, *, cwd: (instance, object()))
-    monkeypatch.setattr(watch_mod, "acquire_instance", lambda instance, *, clear: True)
-    monkeypatch.setattr(watch_mod, "acquire_busy_narrated", lambda busy, say: nullcontext())
-    monkeypatch.setattr(watch_mod, "_post_watch_hook", lambda *args: None)
-    return instance
-
-
-def test_watch_first_tick_reconcile_failure_fails_loud(tmp_path, monkeypatch):
-    """The first tick is the command's entry: a reconcile failure propagates."""
-    import omc.watch as watch_mod
-    from omc.errors import ConfigError
-
-    instance = _fake_watch_boot(monkeypatch, tmp_path)
-
-    def failing_reconcile(ctx, cfg, groups, *, say, dry_run, report_current, command_start):
-        assert report_current
-        assert command_start
-        raise ConfigError("catalog unreachable")
-
-    monkeypatch.setattr(watch_mod, "reconcile", failing_reconcile)
-    ticks = []
-    monkeypatch.setattr(watch_mod, "_tick", lambda *a, **k: ticks.append(1) or "synced")
-    with pytest.raises(ConfigError, match="catalog unreachable"):
-        watch_mod.run_watch(object(), Config(), interval=1, auto_build=True)
-    assert ticks == []
-    assert not instance.is_locked
-
-
-def test_watch_later_tick_reconcile_failure_warns_and_keeps_previous_cfg(
-    tmp_path, monkeypatch, capsys
-):
-    """Later ticks are warn-and-skip: one ✗ line, previous cfg kept, loop goes on."""
-    import omc.modelprobe as modelprobe
-    import omc.watch as watch_mod
-
-    _fake_watch_boot(monkeypatch, tmp_path)
-    initial = Config()
-    first = Config()
-    third = Config()
-    outcomes = [first, modelprobe.ProbeFailed("GET /v1/models returned 503"), third]
-
-    def flaky_reconcile(ctx, cfg, groups, *, say, dry_run, report_current, command_start):
-        assert command_start is (len(outcomes) == 3)
-        outcome = outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
-
-    monkeypatch.setattr(watch_mod, "reconcile", flaky_reconcile)
-    seen = []
-    monkeypatch.setattr(watch_mod, "_tick", lambda ctx, cfg, root, **k: seen.append(cfg) or None)
-    sleeps = []
-
-    def stop_after_three_ticks(seconds):
-        sleeps.append(seconds)
-        if len(sleeps) == 3:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(watch_mod.time, "sleep", stop_after_three_ticks)
-    assert watch_mod.run_watch(object(), initial, interval=1, auto_build=True) == 0
-    assert len(seen) == 3
-    assert seen[0] is first
-    assert seen[1] is first  # failed reconcile keeps the previous cfg
-    assert seen[2] is third
-    err = capsys.readouterr().err
-    assert err.count("✗ model reconciliation failed: GET /v1/models returned 503") == 1
-
-
-def test_watch_reports_current_on_entry_and_recovery_only(tmp_path, monkeypatch, capsys):
-    import omc.modelprobe as modelprobe
-    import omc.watch as watch_mod
-
-    instance = _fake_watch_boot(monkeypatch, tmp_path)
-    initial, first, third, fourth = Config(), Config(), Config(), Config()
-    outcomes = [first, modelprobe.ProbeFailed("GET /v1/models returned 503"), third, fourth]
-    requested = []
-    starts = []
-    inputs = []
-
-    def recording_reconcile(ctx, cfg, groups, *, say, dry_run, report_current, command_start):
-        assert groups == {"orchestrator"} and not dry_run
-        requested.append(report_current)
-        starts.append(command_start)
-        inputs.append(cfg)
-        outcome = outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
-
-    monkeypatch.setattr(watch_mod, "reconcile", recording_reconcile)
-    seen = []
-    monkeypatch.setattr(watch_mod, "_tick", lambda ctx, cfg, root, **k: seen.append(cfg) or None)
-    sleeps = []
-
-    def stop_after_four_ticks(seconds):
-        sleeps.append(seconds)
-        if len(sleeps) == 4:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(watch_mod.time, "sleep", stop_after_four_ticks)
-    assert watch_mod.run_watch(object(), initial, interval=1, auto_build=True) == 0
-    assert requested == [True, False, True, False]
-    assert starts == [True, False, False, False]  # recovery re-reports; it never re-refreshes
-    assert all(
-        actual is expected
-        for actual, expected in zip(inputs, [initial, first, first, third], strict=True)
-    )
-    assert all(
-        actual is expected
-        for actual, expected in zip(seen, [first, first, third, fourth], strict=True)
-    )
-    assert sleeps == [1, 1, 1, 1]
-    assert (
-        capsys.readouterr().err.count("✗ model reconciliation failed: GET /v1/models returned 503")
-        == 1
-    )
-    assert not instance.is_locked
-
-
-def test_watch_once_requests_current_report(tmp_path, monkeypatch):
-    import omc.watch as watch_mod
-
-    instance = _fake_watch_boot(monkeypatch, tmp_path)
-    cfg = Config()
-    requested = []
-
-    def recording_reconcile(ctx, current, groups, *, say, dry_run, report_current, command_start):
-        assert current is cfg and groups == {"orchestrator"} and not dry_run
-        assert command_start
-        requested.append(report_current)
-        return current
-
-    monkeypatch.setattr(watch_mod, "reconcile", recording_reconcile)
-    seen = []
-    monkeypatch.setattr(watch_mod, "_tick", lambda ctx, current, root, **k: seen.append(current))
-
-    assert watch_mod.run_watch(object(), cfg, once=True, auto_build=True) == 0
-    assert requested == [True]
-    assert len(seen) == 1 and seen[0] is cfg
     assert not instance.is_locked
 
 
@@ -308,58 +112,6 @@ def _git_out(repo, *args):
     return subprocess.run(
         ["git", *args], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
-
-
-def _repo_with_origin(tmp_path):
-    origin = tmp_path / "origin.git"
-    origin.mkdir()
-    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
-    # bare HEAD -> main so later clones check out main (init.defaultBranch-proof)
-    subprocess.run(
-        ["git", "-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/main"], check=True
-    )
-    repo = tmp_path / "repo"
-    subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
-    _git("config", "user.email", "t@t", cwd=repo)
-    _git("config", "user.name", "t", cwd=repo)
-    (repo / "f.txt").write_text("one\n")
-    _git("add", ".", cwd=repo)
-    _git("commit", "-qm", "c1", cwd=repo)
-    _git("branch", "-M", "main", cwd=repo)  # independent of init.defaultBranch
-    _git("push", "-q", "-u", "origin", "main", cwd=repo)
-    # The generated dirs are gitignored in real projects; excluding them here
-    # keeps the tests' `git add .` from ever committing a seeded snapshot.
-    (repo / ".git" / "info").mkdir(exist_ok=True)
-    (repo / ".git" / "info" / "exclude").write_text(".gitnexus/\n.omc/docs/\n")
-    _seed_fresh_index(repo)
-    return origin, repo
-
-
-def _seed_fresh_index(repo, branch="main"):
-    """A metadata file that snapshot_freshness judges fresh at HEAD (index side)."""
-    d = repo / ".gitnexus"
-    d.mkdir(exist_ok=True)
-    (d / "meta.json").write_text(
-        json.dumps(
-            {
-                "branch": branch,
-                "lastCommit": _git_out(repo, "rev-parse", "HEAD"),
-                "repoPath": str(repo),
-            }
-        )
-    )
-
-
-def _push_remote_commit(origin, tmp_path):
-    """Advance origin/main from a second clone (simulates a teammate's push)."""
-    other = tmp_path / "other"
-    subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
-    _git("config", "user.email", "o@o", cwd=other)
-    _git("config", "user.name", "o", cwd=other)
-    (other / "new.txt").write_text("new\n")
-    _git("add", ".", cwd=other)
-    _git("commit", "-qm", "remote change", cwd=other)
-    _git("push", "-q", "origin", "main", cwd=other)
 
 
 def _push_remote_edit(origin, tmp_path):
@@ -374,47 +126,17 @@ def _push_remote_edit(origin, tmp_path):
     _git("push", "-q", "origin", "main", cwd=other)
 
 
-def _stub_tools():
-    """Real git/mkdir/rm by resolved absolute path (stubs may run on a restricted PATH)."""
-    return (shlex.quote(host_bin(t)) for t in ("git", "mkdir", "rm"))
-
-
-def _ctx_with_node_stub(tmp_path, home):
-    """Real git on PATH + recording `node`/`wt`/`claude` stubs + a fake built CLI."""
-    bindir = tmp_path / "bin"
-    bindir.mkdir(parents=True, exist_ok=True)
-    calls = bindir / "node.calls"
-    node = bindir / "node"
-    # Side effects mirror what GitNexus really does, so refresh_knowledge's
-    # recomputed verdict can flip to fresh. Restricted PATH: shell builtins and
-    # absolute paths only; `echo ok` stays unconditional so ensure_gitnexus's
-    # --version probe passes.
-    git, mkdir, rm = _stub_tools()
-    node.write_text(
-        "#!/bin/sh\n"
-        f'echo "$@" >> "{calls}"\n'
-        'case "$*" in\n'
-        f'  *" clean --force") {rm} -rf .gitnexus ;;\n'
-        f'  *" analyze --skip-agents-md --skip-skills"*) {mkdir} -p .gitnexus; '
-        'printf \'{"branch":"main","lastCommit":"%s","repoPath":"%s"}\' '
-        f'"$({git} rev-parse HEAD)" "$PWD" > .gitnexus/meta.json ;;\n'
-        "esac\n"
-        "echo ok\nexit 0\n"
-    )
-    node.chmod(node.stat().st_mode | stat.S_IXUSR)
-    for name in ("wt", "claude"):
-        stub = bindir / name
-        stub.write_text(f'#!/bin/sh\necho "{name} 1.0"\nexit 0\n')
-        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
-    cli = home / "dependencies" / "gitnexus" / "gitnexus" / "dist" / "cli" / "index.js"
-    cli.parent.mkdir(parents=True)
-    cli.write_text("// fake built CLI")
-    env = {
-        "HOME": str(tmp_path),
-        "OMC_HOME": str(home),
-        "PATH": f"{bindir}:{os.environ['PATH']}",
-    }
-    return ToolContext.from_env(env), calls
+def _push_remote_file(origin, tmp_path, name, content):
+    """Advance origin/main by ADDING a new file `name`, a repo-relative path (a teammate's push)."""
+    other = tmp_path / f"other-{name.replace('/', '-')}"
+    subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+    _git("config", "user.email", "o@o", cwd=other)
+    _git("config", "user.name", "o", cwd=other)
+    (other / name).parent.mkdir(parents=True, exist_ok=True)
+    (other / name).write_text(content)
+    _git("add", ".", cwd=other)
+    _git("commit", "-qm", f"remote adds {name}", cwd=other)
+    _git("push", "-q", "origin", "main", cwd=other)
 
 
 def _run_once(repo, ctx, *, rebase=False):
@@ -435,8 +157,8 @@ def _run_once(repo, ctx, *, rebase=False):
 def test_loop_tick_up_to_date_does_not_reindex(tmp_path, capsys):
     from omc.watch import _tick
 
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     _tick(ctx, Config(), str(repo), force_refresh=False, last=None)
     assert "up to date" in capsys.readouterr().err
     assert not calls.exists()  # loop mode: nothing new -> no reindex
@@ -445,7 +167,7 @@ def test_loop_tick_up_to_date_does_not_reindex(tmp_path, capsys):
 def test_once_refreshes_index_even_when_up_to_date(tmp_path, capsys):
     """--once on an index that is BEHIND repairs it even though the checkout is
     already at origin (nothing to sync)."""
-    origin, repo = _repo_with_origin(tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
     first = _git_out(repo, "rev-parse", "HEAD")
     (repo / "g.txt").write_text("two\n")
     _git("add", ".", cwd=repo)
@@ -454,7 +176,7 @@ def test_once_refreshes_index_even_when_up_to_date(tmp_path, capsys):
     (repo / ".gitnexus" / "meta.json").write_text(
         json.dumps({"branch": "main", "lastCommit": first, "repoPath": str(repo)})
     )
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     err = capsys.readouterr().err
     assert "up to date" in err
@@ -462,9 +184,9 @@ def test_once_refreshes_index_even_when_up_to_date(tmp_path, capsys):
 
 
 def test_once_on_fresh_snapshot_narrates_current_and_calls_nothing(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" > hook-ran.txt\n')
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     err = capsys.readouterr().err
     assert "✓ knowledge is current" in err
@@ -474,9 +196,9 @@ def test_once_on_fresh_snapshot_narrates_current_and_calls_nothing(tmp_path, cap
 
 
 def test_tick_syncs_and_reindexes(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     err = capsys.readouterr().err
     assert "synced main" in err
@@ -486,11 +208,28 @@ def test_tick_syncs_and_reindexes(tmp_path, capsys):
     assert "wiki" not in recorded  # watch never runs the wiki
 
 
+def test_tick_syncs_over_a_local_project_id_another_clone_committed(tmp_path, capsys):
+    """The primary created its own untracked .omc/project.id; another clone then
+    committed one. The ff-merge would refuse to overwrite it: the committed ID wins."""
+    origin, repo = repo_with_origin(tmp_path)
+    (repo / ".omc").mkdir()
+    (repo / ".omc" / "project.id").write_text(f"{uuid.uuid4()}\n")
+    committed = f"{uuid.uuid4()}\n"
+    _push_remote_file(origin, tmp_path, ".omc/project.id", committed)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "synced main" in err, err
+    assert "→ removing the local untracked .omc/project.id" in err
+    assert (repo / ".omc" / "project.id").read_text() == committed
+    assert _git_out(repo, "ls-files", ".omc/project.id") == ".omc/project.id"
+
+
 def test_tick_refuses_off_branch(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
     _git("switch", "-qc", "feature/other", cwd=repo)
-    _push_remote_commit(origin, tmp_path)
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    push_remote_commit(origin, tmp_path)
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     err = capsys.readouterr().err
     assert "not on main" in err
@@ -501,10 +240,10 @@ def test_tick_refuses_off_branch(tmp_path, capsys):
 
 
 def test_tick_refuses_dirty_tree(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
     (repo / "f.txt").write_text("uncommitted edit\n")
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     assert "dirty" in capsys.readouterr().err
     # node IS invoked once now (ensure_gitnexus's health probe), but never for
@@ -525,11 +264,29 @@ def _tick_rebase(ctx, repo, last=None):
     )
 
 
+def test_tick_rebase_syncs_over_a_local_project_id_another_clone_committed(tmp_path, capsys):
+    """The --rebase twin: `git rebase --autostash` refuses before starting over the
+    untracked .omc/project.id another clone committed; the committed ID wins, and the
+    retried rebase syncs."""
+    origin, repo = repo_with_origin(tmp_path)
+    (repo / ".omc").mkdir()
+    (repo / ".omc" / "project.id").write_text(f"{uuid.uuid4()}\n")
+    committed = f"{uuid.uuid4()}\n"
+    _push_remote_file(origin, tmp_path, ".omc/project.id", committed)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _tick_rebase(ctx, repo) == "synced", capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "rebased main" in err, err
+    assert "→ removing the local untracked .omc/project.id" in err
+    assert (repo / ".omc" / "project.id").read_text() == committed
+    assert _git_out(repo, "ls-files", ".omc/project.id") == ".omc/project.id"
+
+
 def test_tick_rebase_syncs_dirty_tree(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)  # remote adds new.txt — no overlap with f.txt
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)  # remote adds new.txt — no overlap with f.txt
     (repo / "f.txt").write_text("uncommitted edit\n")
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _tick_rebase(ctx, repo) == "synced"
     assert "rebased main" in capsys.readouterr().err
     assert (repo / "new.txt").exists()  # sync actually happened
@@ -538,12 +295,12 @@ def test_tick_rebase_syncs_dirty_tree(tmp_path, capsys):
 
 
 def test_tick_rebase_replays_local_commits(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
     (repo / "local.txt").write_text("local\n")
     _git("add", ".", cwd=repo)
     _git("commit", "-qm", "local work", cwd=repo)  # diverged: ahead 1, behind 1
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _tick_rebase(ctx, repo) == "synced"
     assert (repo / "new.txt").exists() and (repo / "local.txt").exists()
     subjects = subprocess.run(
@@ -553,14 +310,14 @@ def test_tick_rebase_replays_local_commits(tmp_path, capsys):
 
 
 def test_tick_rebase_conflict_aborts_and_restores(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
     _push_remote_edit(origin, tmp_path)  # remote edits f.txt
     (repo / "f.txt").write_text("conflicting local\n")
     _git("add", ".", cwd=repo)
     _git("commit", "-qm", "local conflicting", cwd=repo)
     (repo / "g.txt").write_text("dirt\n")
     _git("add", "g.txt", cwd=repo)  # tracked dirt on top — must survive the abort
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     head_before = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
     ).stdout
@@ -575,10 +332,10 @@ def test_tick_rebase_conflict_aborts_and_restores(tmp_path, capsys):
 
 
 def test_tick_rebase_autostash_conflict_warns_and_skips_refresh(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
     _push_remote_edit(origin, tmp_path)  # remote edits f.txt
     (repo / "f.txt").write_text("dirty conflicting edit\n")  # UNCOMMITTED same-file edit
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _tick_rebase(ctx, repo) == "autostash-conflict"
     assert "safe in git stash" in capsys.readouterr().err
     unmerged = subprocess.run(
@@ -592,28 +349,16 @@ def test_tick_rebase_autostash_conflict_warns_and_skips_refresh(tmp_path, capsys
     assert not calls.exists()  # NOT an action tick — no index refresh
 
 
-def _push_remote_file(origin, tmp_path, name, content):
-    """Advance origin/main by ADDING a new file `name` (a teammate's push)."""
-    other = tmp_path / f"other-{name}"
-    subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
-    _git("config", "user.email", "o@o", cwd=other)
-    _git("config", "user.name", "o", cwd=other)
-    (other / name).write_text(content)
-    _git("add", ".", cwd=other)
-    _git("commit", "-qm", f"remote adds {name}", cwd=other)
-    _git("push", "-q", "origin", "main", cwd=other)
-
-
 def test_tick_rebase_pre_start_refusal_quiets_and_leaves_untracked_file(tmp_path, capsys):
     """Canonical pre-start refusal: remote adds a file that already exists
     UNTRACKED locally. `git rebase --autostash` refuses before starting (exit
     1, HEAD unmoved, no rebase in progress) so no abort is attempted; the tick
     quiets to `rebase-failed` and the untracked content is untouched. A second
     tick with last='rebase-failed' must narrate NOTHING (quiet-token)."""
-    origin, repo = _repo_with_origin(tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
     _push_remote_file(origin, tmp_path, "collide.txt", "from remote\n")
     (repo / "collide.txt").write_text("my untracked work\n")  # untracked, would be clobbered
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     head_before = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
     ).stdout
@@ -632,12 +377,12 @@ def test_tick_rebase_pre_start_refusal_quiets_and_leaves_untracked_file(tmp_path
 
 
 def test_tick_rebase_conflicted_tree_skips_quietly(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
     _push_remote_edit(origin, tmp_path)
     (repo / "f.txt").write_text("dirty conflicting edit\n")
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _tick_rebase(ctx, repo) == "autostash-conflict"
-    _push_remote_commit(origin, tmp_path)  # behind again, tree still conflicted
+    push_remote_commit(origin, tmp_path)  # behind again, tree still conflicted
     capsys.readouterr()
     assert _tick_rebase(ctx, repo, last="autostash-conflict") == "conflicted"
     assert "unmerged paths" in capsys.readouterr().err  # token changed -> narrates once
@@ -646,19 +391,19 @@ def test_tick_rebase_conflicted_tree_skips_quietly(tmp_path, capsys):
 
 
 def test_tick_rebase_clean_tree_still_syncs(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _tick_rebase(ctx, repo) == "synced"
     assert "rebased main" in capsys.readouterr().err
     assert (repo / "new.txt").exists()  # rebase fast-forwards a clean checkout
 
 
 def test_watch_rebase_flag_threads_through(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
     (repo / "f.txt").write_text("uncommitted edit\n")
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx, rebase=True) == 0
     assert "rebased main" in capsys.readouterr().err
     assert (repo / "new.txt").exists()
@@ -668,7 +413,7 @@ def test_watch_rebase_flag_threads_through(tmp_path, capsys):
 def test_watch_installs_gitnexus_when_missing(tmp_path, monkeypatch):
     import omc.watch as watch_mod
 
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     # Stub git/wt/claude/node for require_tools + the loop's own gitnexus
     # calls; no gitnexus CLI on disk.
     bindir = tmp_path / "bin"
@@ -701,7 +446,7 @@ def test_watch_aborts_when_gitnexus_install_fails(tmp_path, monkeypatch):
 
     from ._mutexproc import flock_free
 
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     for name in ("wt", "claude"):
@@ -765,8 +510,8 @@ def _run_loop(repo, ctx, ticks, between=None, cfg=None, **kw):
 
 
 def test_loop_says_up_to_date_once_then_waits_quietly(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     rc = _run_loop(repo, ctx, ticks=3)
     assert rc == 0  # Ctrl-C is a clean stop, not a crash
     err = capsys.readouterr().err
@@ -775,12 +520,12 @@ def test_loop_says_up_to_date_once_then_waits_quietly(tmp_path, capsys):
 
 
 def test_quiet_line_reappears_after_a_sync(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    origin, repo = repo_with_origin(tmp_path)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
 
     def between(i):
         if i == 1:  # a teammate pushes between tick 1 and tick 2
-            _push_remote_commit(origin, tmp_path)
+            push_remote_commit(origin, tmp_path)
 
     rc = _run_loop(repo, ctx, ticks=3, between=between)  # quiet, synced, quiet-again
     assert rc == 0
@@ -790,8 +535,8 @@ def test_quiet_line_reappears_after_a_sync(tmp_path, capsys):
 
 
 def test_watch_leaves_root_and_global_instructions_untouched(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "omc-home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "omc-home")
     (repo / "AGENTS.md").write_bytes(b"project-owned\n")
     (repo / ".gitignore").write_bytes(b"custom ignore\n")
     assert _run_once(repo, ctx) == 0
@@ -809,9 +554,9 @@ def _seed_hook(repo, body):
 
 
 def test_once_runs_post_watch_hook_after_forced_refresh(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" > hook-ran.txt\n')
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     err = capsys.readouterr().err
     assert "→ running project post-watch hook (.omc/hooks/post-watch.sh)" in err
@@ -821,34 +566,34 @@ def test_once_runs_post_watch_hook_after_forced_refresh(tmp_path, capsys):
 
 
 def test_hook_sees_synced_outcome(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
     _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" > hook-ran.txt\n')
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     assert (repo / "hook-ran.txt").read_text().strip() == "synced"
 
 
 def test_quiet_loop_tick_does_not_run_hook(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _seed_hook(repo, "touch hook-ran.txt\n")
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_loop(repo, ctx, ticks=2) == 0  # loop mode: both ticks are quiet up-to-date
     assert not (repo / "hook-ran.txt").exists()
     assert "post-watch" not in capsys.readouterr().err
 
 
 def test_absent_hook_is_silent(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     assert "post-watch" not in capsys.readouterr().err
 
 
 def test_hook_failure_links_log_and_keeps_once_rc_zero(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _seed_hook(repo, "echo boom-out\necho boom-err >&2\nexit 3\n")
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0  # hook failure never changes --once's exit code
     err = capsys.readouterr().err
     m = re.search(r"✗ post-watch hook failed \(exit 3\) — log: (\S+)", err)
@@ -863,13 +608,13 @@ def test_hook_timeout_is_a_failure_and_loop_survives(tmp_path, capsys, monkeypat
     import omc.watch as watch_mod
 
     monkeypatch.setattr(watch_mod, "_HOOK_TIMEOUT", 1)
-    origin, repo = _repo_with_origin(tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
     _seed_hook(repo, "echo partial-out\necho partial-err >&2\nsleep 5\n")
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
 
     def between(i):
         if i == 1:  # teammate pushes between tick 1 and 2 -> tick 2 syncs -> hook fires
-            _push_remote_commit(origin, tmp_path)
+            push_remote_commit(origin, tmp_path)
 
     assert _run_loop(repo, ctx, ticks=3, between=between) == 0
     err = capsys.readouterr().err
@@ -883,9 +628,9 @@ def test_hook_timeout_is_a_failure_and_loop_survives(tmp_path, capsys, monkeypat
 
 
 def test_hook_binary_output_never_crashes_the_loop(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _seed_hook(repo, "printf '\\xff\\xfe'\n")
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0  # undecodable output must never crash the loop
     err = capsys.readouterr().err
     assert "✗ post-watch hook failed (undecodable output) — log:" in err
@@ -893,7 +638,7 @@ def test_hook_binary_output_never_crashes_the_loop(tmp_path, capsys):
 
 def _stub_claude(tmp_path, transcript, rc=0):
     """A fake `claude` on the stub PATH: records argv, prints transcript."""
-    bindir = tmp_path / "bin"  # same dir _ctx_with_node_stub already put on PATH
+    bindir = tmp_path / "bin"  # same dir ctx_with_node_stub already put on PATH
     calls = bindir / "claude.calls"
     stub = bindir / "claude"
     stub.write_text(
@@ -904,10 +649,15 @@ def _stub_claude(tmp_path, transcript, rc=0):
     return calls
 
 
-def _seed_build_stage(repo):
-    d = repo / ".omc" / "skills" / "build"
-    d.mkdir(parents=True)
-    (d / "SKILL.md").write_text("# build\nrun make\n")
+def _seed_build_hook(repo, body, **kw):
+    return _stagekit.write_hook(repo, "build", body=body, **kw)
+
+
+@pytest.fixture
+def reap_runs(tmp_path):
+    """SIGKILL and reap every stage run still live in the test repo, pass or fail."""
+    yield
+    _stagekit.Stage(tmp_path, tmp_path / "repo").cleanup()
 
 
 def _run_once_auto_build(repo, ctx, cfg=None):
@@ -919,208 +669,152 @@ def _run_once_auto_build(repo, ctx, cfg=None):
         os.chdir(old)
 
 
-def test_auto_build_passes_on_stage_verdict(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_build_stage(repo)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    calls = _stub_claude(
-        tmp_path,
-        'building...\nOMC_STAGE {"stage": "build", "configured": true, "passed": true, '
-        '"summary": "ok"}',
-    )
+def test_auto_build_runs_real_build_hook(tmp_path, capsys, reap_runs):
+    _, repo = repo_with_origin(tmp_path)
+    _seed_build_hook(repo, "echo building; exit 0")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once_auto_build(repo, ctx) == 0
     err = capsys.readouterr().err
-    assert "→ running project build stage via claude (LLM-heavy)" in err
+    assert "→ running project build stage (.omc/bin/build)\n" in err
     assert "✓ auto-build passed" in err
-    recorded = calls.read_text()
-    assert "-p" in recorded  # headless print-mode invocation
-
-
-def test_auto_build_uses_orchestrator_model_and_effort(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_build_stage(repo)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    calls = _stub_claude(
-        tmp_path,
-        'OMC_STAGE {"stage": "build", "configured": true, "passed": true, "summary": "ok"}',
-    )
-    cfg = Config()
-    cfg.llm.providers["claude"].model = "opus:high"
-    assert _run_once_auto_build(repo, ctx, cfg) == 0
-    assert "✓ auto-build passed" in capsys.readouterr().err
-    assert "--model opus --effort high" in calls.read_text()
-
-
-def test_codex_auto_build_uses_resolved_orchestrator_argv(tmp_path, capsys, monkeypatch):
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_build_stage(repo)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    make_codex_stub(
-        tmp_path / "bin",
-        catalog=DEFAULT_CODEX_CATALOG,
-        stdout='OMC_STAGE {"stage":"build","configured":true,"passed":true,"summary":"ok"}',
-    )
-    cfg = Config()
-    cfg.llm.default = "codex"
-    calls = []
-    real_stream = type(ctx).stream
-
-    def capture(self, argv, **kwargs):
-        calls.append(list(argv))
-        return real_stream(self, argv, **kwargs)
-
-    monkeypatch.setattr(type(ctx), "stream", capture)
-    assert _run_once_auto_build(repo, ctx, cfg) == 0
-    assert "✓ auto-build passed" in capsys.readouterr().err
-    assert len(calls) == 1
-    assert calls[0][:7] == [
-        "codex",
-        "exec",
-        "--skip-git-repo-check",
-        "-m",
-        "gpt-6-sol",
-        "-c",
-        "model_reasoning_effort=high",
-    ]
-    assert calls[0][-1].startswith("\n# omc build (project-stage proxy)")
-
-
-@pytest.mark.parametrize("catalog_state", ["unavailable", "malformed"])
-def test_auto_build_model_resolution_failure_does_not_stop_watch_loop(
-    tmp_path, capsys, catalog_state
-):
-    origin, repo = _repo_with_origin(tmp_path)
-    _seed_build_stage(repo)
-    _push_remote_commit(origin, tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    if catalog_state == "malformed":
-        make_codex_stub(tmp_path / "bin", catalog="{broken")
-    else:
-        make_codex_stub(tmp_path / "bin", catalog="catalog unavailable", catalog_rc=1)
-    cfg = Config()
-    cfg.llm.default = "codex"
-    assert _run_loop(repo, ctx, ticks=2, cfg=cfg, auto_build=True) == 0
-    err = capsys.readouterr().err
-    assert "✗ auto-build failed" in err
-    assert any(
-        "codex debug models" in line for line in err.splitlines() if "auto-build failed" in line
-    )
-    assert "· stopped" in err
-
-
-def test_auto_build_failure_links_log_and_keeps_rc_zero(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_build_stage(repo)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    _stub_claude(
-        tmp_path,
-        'OMC_STAGE {"stage": "build", "configured": true, "passed": false, '
-        '"summary": "make exploded"}',
-    )
-    assert _run_once_auto_build(repo, ctx) == 0  # failures never change --once's exit code
-    err = capsys.readouterr().err
-    m = re.search(r"✗ auto-build failed \(make exploded\) — log: (\S+)", err)
-    assert m, f"missing failure narration:\n{err}"
-    assert "OMC_STAGE" in Path(m.group(1)).read_text()  # full transcript logged
-
-
-def test_auto_build_no_verdict_is_a_failure(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_build_stage(repo)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    _stub_claude(tmp_path, "rambling with no verdict line")
-    assert _run_once_auto_build(repo, ctx) == 0
-    assert "✗ auto-build failed (no verdict)" in capsys.readouterr().err
-
-
-def test_auto_build_unconfigured_skips_llm_entirely(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)  # no .omc/skills/build
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    calls = _stub_claude(tmp_path, "should never run")
-    assert _run_once_auto_build(repo, ctx) == 0
-    assert "· no project build stage configured — skipping auto-build" in capsys.readouterr().err
-    # claude IS invoked once now (require_tools's --version probe), but never
-    # for an actual build (which always passes -p).
-    assert "-p" not in (calls.read_text() if calls.exists() else "")
-
-
-def test_no_auto_build_flag_means_no_build(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_build_stage(repo)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    calls = _stub_claude(tmp_path, "should never run")
-    assert _run_once(repo, ctx) == 0  # plain --once, no auto_build
-    assert "auto-build" not in capsys.readouterr().err
-    # claude IS invoked once now (require_tools's --version probe), but never
-    # for an actual build (which always passes -p).
-    assert "-p" not in (calls.read_text() if calls.exists() else "")
-
-
-def test_auto_build_announces_log_path_up_front(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_build_stage(repo)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    _stub_claude(
-        tmp_path,
-        'OMC_STAGE {"stage": "build", "configured": true, "passed": true, "summary": "ok"}',
-    )
-    assert _run_once_auto_build(repo, ctx) == 0
-    err = capsys.readouterr().err
-    m = re.search(r"→ running project build stage via claude \(LLM-heavy\) — log: (\S+)", err)
-    assert m, f"missing up-front log announcement:\n{err}"
+    m = re.search(r"^— log: (\S+)$", err, re.MULTILINE)
+    assert m, f"missing log announcement:\n{err}"
+    # Announced before the outcome, so it can be followed while the build runs.
+    assert err.index(m.group(0)) < err.index("✓ auto-build passed")
     log = Path(m.group(1))
-    assert log.is_file()
+    assert log.is_relative_to(tmp_path / "stages")
     content = log.read_text()
-    assert "OMC_STAGE" in content  # decoded transcript logged
+    assert "building\n" in content
     assert re.search(r"^--- omc: stage finished \(rc 0\) ---$", content, re.MULTILINE)
 
 
-def test_auto_build_decodes_stream_json_lines(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_build_stage(repo)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    # stub emits stream-json: a tool result with a cargo counter, then the
-    # final result event carrying the verdict — the log must hold DECODED text
-    _stub_claude(
-        tmp_path,
-        '{"type":"user","message":{"content":[{"type":"tool_result",'
-        '"content":"Compiling foo (12/1288)"}]}}\n'
-        '{"type":"result","result":"OMC_STAGE {\\"stage\\": \\"build\\", '
-        '\\"configured\\": true, \\"passed\\": true, \\"summary\\": \\"ok\\"}"}',
-    )
+def test_auto_build_reports_exit_code(tmp_path, capsys, reap_runs):
+    _, repo = repo_with_origin(tmp_path)
+    _seed_build_hook(repo, "exit 3")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once_auto_build(repo, ctx) == 0  # failures never change --once's exit code
+    err = capsys.readouterr().err
+    m = re.search(r"✗ auto-build failed \(failed: exit 3\) — log: (\S+)", err)
+    assert m, f"missing failure narration:\n{err}"
+    assert Path(m.group(1)).is_file()
+
+
+def test_auto_build_os_error_warns_and_watch_goes_on(tmp_path, capsys, reap_runs):
+    """A stage root that cannot be written (another user's, a file) is a warning."""
+    _, repo = repo_with_origin(tmp_path)
+    _seed_build_hook(repo, "exit 0")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+    (tmp_path / "stages").write_text("not a directory\n")
+    assert _run_once_auto_build(repo, ctx) == 0
+    assert re.search(r"^✗ auto-build failed \(.+\)$", capsys.readouterr().err, re.MULTILINE)
+
+
+def test_auto_build_hook_inherits_cargo_progress_env(tmp_path, capsys, reap_runs):
+    _, repo = repo_with_origin(tmp_path)
+    _seed_build_hook(repo, 'echo "cargo=$CARGO_TERM_PROGRESS_WHEN/$CARGO_TERM_PROGRESS_WIDTH"')
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once_auto_build(repo, ctx) == 0
     err = capsys.readouterr().err
     assert "✓ auto-build passed" in err
-    m = re.search(r"— log: (\S+)", err)
-    content = Path(m.group(1)).read_text()
-    assert "Compiling foo (12/1288)" in content  # decoded, not raw JSON
-    assert '"type":"user"' not in content  # raw event NOT in log
-    assert re.search(r"^OMC_STAGE ", content, re.MULTILINE)
+    log = Path(re.search(r"^— log: (\S+)$", err, re.MULTILINE).group(1))
+    assert "cargo=always/80\n" in log.read_text()
 
 
-def test_auto_build_stream_call_has_no_timeout(tmp_path, monkeypatch):
-    """The no-timeout requirement, pinned: _auto_build must call ctx.stream
-    (which has no timeout parameter), never ctx.run with a timeout."""
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_build_stage(repo)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    _stub_claude(
-        tmp_path,
-        'OMC_STAGE {"stage": "build", "configured": true, "passed": true, "summary": "ok"}',
-    )
-    calls = {}
-    real_stream = type(ctx).stream
-
-    def spy(self, argv, **kwargs):
-        calls["kwargs"] = kwargs
-        return real_stream(self, argv, **kwargs)
-
-    monkeypatch.setattr(type(ctx), "stream", spy)
+def test_auto_build_asks_no_provider_for_a_model(tmp_path, capsys, reap_runs):
+    _, repo = repo_with_origin(tmp_path)
+    _seed_build_hook(repo, "exit 0")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+    calls = _stub_claude(tmp_path, "should never run")
     assert _run_once_auto_build(repo, ctx) == 0
-    assert "kwargs" in calls, "auto-build no longer uses ctx.stream"
-    assert "timeout" not in calls["kwargs"]
-    assert calls["kwargs"]["extra_env"]["CARGO_TERM_PROGRESS_WHEN"] == "always"
-    assert calls["kwargs"]["extra_env"]["CARGO_TERM_PROGRESS_WIDTH"] == "80"
+    assert "✓ auto-build passed" in capsys.readouterr().err
+    # claude IS invoked once (require_tools's --version probe), but never headless.
+    assert "-p" not in (calls.read_text() if calls.exists() else "")
+
+
+def test_auto_build_unconfigured_skips(tmp_path, capsys):
+    _, repo = repo_with_origin(tmp_path)  # no .omc/bin/build
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+    calls = _stub_claude(tmp_path, "should never run")
+    assert _run_once_auto_build(repo, ctx) == 0
+    assert "· no project build stage configured — skipping auto-build" in capsys.readouterr().err
+    assert "-p" not in (calls.read_text() if calls.exists() else "")
+    assert not (repo / ".cache").exists()  # no run was started
+
+
+def test_auto_build_refused_instructions_report_critical_stop(tmp_path, capsys, reap_runs):
+    _, repo = repo_with_origin(tmp_path)
+    _seed_build_hook(
+        repo, "exit 0", instructions=_stagekit.VALID_INSTRUCTIONS + "\n## Extra\nNo.\n"
+    )
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once_auto_build(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert '✗ auto-build failed (refused: CRITICAL STOP: unknown heading "## Extra")' in err
+    assert "✓ auto-build passed" not in err
+
+
+def test_auto_build_unmigrated_skill_is_refused_not_skipped(tmp_path, capsys):
+    _, repo = repo_with_origin(tmp_path)
+    skill = repo / ".omc" / "skills" / "build" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# build\nrun make\n")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once_auto_build(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "✗ auto-build failed (refused: CRITICAL STOP: migrate this stage" in err
+    assert "skipping auto-build" not in err
+
+
+def test_auto_build_stage_error_is_reported(tmp_path, capsys, monkeypatch):
+    import omc.watch as watch_mod
+
+    _, repo = repo_with_origin(tmp_path)
+    _seed_build_hook(repo, "exit 0")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+
+    def broken(ctx, stage, **kw):
+        raise OmcError("another start won: run abc (build)")
+
+    monkeypatch.setattr(watch_mod.stagerun, "run_foreground", broken)
+    assert _run_once_auto_build(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "✗ auto-build failed (another start won: run abc (build))\n" in err
+
+
+def test_auto_build_ctrl_c_kills_the_run_and_stops_watch(tmp_path, capsys, monkeypatch, reap_runs):
+    import omc.watch as watch_mod
+
+    _, repo = repo_with_origin(tmp_path)
+    marker = tmp_path / "build.pid"
+    _seed_build_hook(
+        repo,
+        f"echo $$ > {shlex.quote(str(marker))}\necho first\n"
+        f"exec {shlex.quote(host_bin('sleep'))} 60",
+    )
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+
+    def interrupt(self, line):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(watch_mod.ProgressTracker, "feed", interrupt)
+    assert _run_once_auto_build(repo, ctx) == 0
+    err = capsys.readouterr().err
+    assert "· stopped" in err
+    assert "auto-build passed" not in err and "auto-build failed" not in err
+    record = json.loads((repo / ".cache" / "omc" / "last-build.json").read_text())
+    assert record["state"] == "killed"
+    assert record["reason"].startswith("kill")
+    pid = int(marker.read_text())
+    _mutexproc.wait_for(lambda: not ctx.signal_pid(pid, 0), 5)
+
+
+def test_no_auto_build_flag_means_no_build(tmp_path, capsys):
+    _, repo = repo_with_origin(tmp_path)
+    _seed_build_hook(repo, "printf built > build-ran.txt")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
+    assert _run_once(repo, ctx) == 0  # plain --once, no auto_build
+    assert "auto-build" not in capsys.readouterr().err
+    assert not (repo / "build-ran.txt").exists()
 
 
 def test_build_timeout_constant_is_gone():
@@ -1130,9 +824,9 @@ def test_build_timeout_constant_is_gone():
 
 
 def test_hook_announces_log_path_up_front(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _seed_hook(repo, "echo hello\n")
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     err = capsys.readouterr().err
     m = re.search(
@@ -1143,9 +837,9 @@ def test_hook_announces_log_path_up_front(tmp_path, capsys):
 
 
 def test_busy_lock_held_while_hook_runs_and_instance_held_while_idle(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     busy_path = repo / ".git" / "omc-watch-busy.lock"
     instance_path = repo / ".git" / "omc-watch.lock"
     probe_out = tmp_path / "probe.out"
@@ -1174,8 +868,8 @@ def test_busy_lock_held_while_hook_runs_and_instance_held_while_idle(tmp_path, c
 def test_busy_lock_free_but_instance_held_during_idle_sleep(tmp_path, capsys):
     from ._mutexproc import flock_free
 
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     seen = {}
 
     def between(i):
@@ -1191,8 +885,8 @@ def test_busy_lock_free_but_instance_held_during_idle_sleep(tmp_path, capsys):
 def test_instance_lock_released_after_clean_stop(tmp_path, capsys):
     from ._mutexproc import flock_free
 
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_loop(repo, ctx, ticks=1) == 0  # KeyboardInterrupt path
     assert flock_free(repo / ".git" / "omc-watch.lock")
     assert flock_free(repo / ".git" / "omc-watch-busy.lock")
@@ -1219,78 +913,11 @@ def _seed_docs_mirror(repo):
     return docs
 
 
-def _analyze_side_effects(*, move_to: str | None = None, rogue_stamp: str | None = None):
-    """GitNexus refuses a mismatched explicit label before writing anything."""
-    git, mkdir, _ = _stub_tools()
-    move = (
-        "if [ ! -f .git/analyze-moved ]; then : > .git/analyze-moved; "
-        f"{git} switch -q {shlex.quote(move_to)} || exit 90; fi; "
-        if move_to
-        else ""
-    )
-    return (
-        move + 'label=""; while [ "$#" -gt 0 ]; do '
-        'if [ "$1" = --branch ]; then shift; label="$1"; fi; shift; done; '
-        f"actual=$({git} rev-parse --abbrev-ref HEAD); "
-        'if [ -n "$label" ] && [ "$label" != "$actual" ]; then '
-        'printf \'%s\\n\' "--branch \\"$label\\" does not match the checked-out branch '
-        '\\"$actual\\". Check out \\"$label\\" before indexing it, or omit --branch '
-        'to index the current branch." >&2; exit 1; fi; '
-        "stamp=${label:-$actual}; "
-        + (f"stamp={shlex.quote(rogue_stamp)}; " if rogue_stamp else "")
-        + f"{mkdir} -p .gitnexus; "
-        'printf \'{"branch":"%s","lastCommit":"%s","repoPath":"%s"}\' '
-        f'"$stamp" "$({git} rev-parse HEAD)" "$PWD" > .gitnexus/meta.json'
-    )
-
-
-def _ctx_with_healing_node_stub(
-    tmp_path,
-    home,
-    *,
-    clean_removes=True,
-    move_to: str | None = None,
-    rogue_stamp: str | None = None,
-):
-    """Faithful pinned analyze, with one-shot checkout movement or rogue writes."""
-    bindir = tmp_path / "bin"
-    bindir.mkdir(parents=True, exist_ok=True)
-    calls = bindir / "node.calls"
-    _, _, rm = _stub_tools()
-    clean_cmd = f"{rm} -rf .gitnexus" if clean_removes else ":"
-    node = bindir / "node"
-    node.write_text(
-        "#!/bin/sh\n"
-        f'echo "$@" >> "{calls}"\n'
-        'case "$*" in\n'
-        f'  *" clean --force") {clean_cmd} ;;\n'
-        '  *" analyze --skip-agents-md --skip-skills"*) '
-        + _analyze_side_effects(move_to=move_to, rogue_stamp=rogue_stamp)
-        + " ;;\n"
-        "esac\n"
-        "echo ok\nexit 0\n"
-    )
-    node.chmod(node.stat().st_mode | stat.S_IXUSR)
-    for name in ("wt", "claude"):
-        stub = bindir / name
-        stub.write_text(f'#!/bin/sh\necho "{name} 1.0"\nexit 0\n')
-        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
-    cli = home / "dependencies" / "gitnexus" / "gitnexus" / "dist" / "cli" / "index.js"
-    cli.parent.mkdir(parents=True)
-    cli.write_text("// fake built CLI")
-    env = {
-        "HOME": str(tmp_path),
-        "OMC_HOME": str(home),
-        "PATH": f"{bindir}:{os.environ['PATH']}",
-    }
-    return ToolContext.from_env(env), calls
-
-
 def test_refresh_heals_inverted_store(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _seed_inverted_store(repo)
     docs = _seed_docs_mirror(repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     err = capsys.readouterr().err
     assert "owned by 'feature/omc-v1', not 'main' — destroying and rebuilding" in err
@@ -1309,9 +936,9 @@ def test_refresh_heals_inverted_store(tmp_path, capsys):
 
 
 def test_refresh_healthy_store_stays_incremental(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _seed_inverted_store(repo, owner="main")  # owner == base: NOT inverted
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     assert _run_once(repo, ctx) == 0
     recorded = calls.read_text()
     assert "clean --force" not in recorded
@@ -1319,46 +946,10 @@ def test_refresh_healthy_store_stays_incremental(tmp_path, capsys):
     assert "destroying and rebuilding" not in capsys.readouterr().err
 
 
-def _ctx_with_shared_store_node_stub(
-    tmp_path, home, *, gc_exit=0, gc_output="collected", analyze_fails=False
-):
-    """Simulate pointer routing and local registration on a restricted PATH."""
-    import shlex
-
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, home)
-    node = tmp_path / "bin" / "node"
-    shared = tmp_path / "shared-store"
-    git, mkdir, rm = _stub_tools()
-    node.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s|%s\\n" "$GITNEXUS_SHARED_STORE" "$*" >> "{calls}"\n'
-        'shift\ncase "$*" in\n'
-        '  "clean --gc --force") '
-        f'{rm} -rf "{shared}"; printf %s {shlex.quote(gc_output)}; exit {gc_exit} ;;\n'
-        '  "clean --force") '
-        'if [ "$GITNEXUS_SHARED_STORE" = off ] && [ ! -f .gitnexus/store.json ]; then '
-        f"{rm} -rf .gitnexus; else "
-        f'{rm} -rf "{shared}" .gitnexus/store.json; fi ;;\n'
-        '  "analyze --skip-agents-md --skip-skills"*) '
-        + ('echo "registration failed"; exit 9; ' if analyze_fails else "")
-        + f"{mkdir} -p .gitnexus; "
-        'if [ "$GITNEXUS_SHARED_STORE" = off ]; then '
-        f"{rm} -f .gitnexus/store.json; target=.gitnexus/meta.json; else "
-        f'{mkdir} -p "{shared}"; target="{shared}/meta.json"; '
-        f"printf '%s' '{{\"storePath\":\"{shared}\"}}' > .gitnexus/store.json; fi; "
-        'printf \'{"branch":"main","lastCommit":"%s","repoPath":"%s"}\' '
-        f'"$({git} rev-parse HEAD)" "$PWD" > "$target" ;;\n'
-        "esac\necho ok\n"
-    )
-    ctx.env = {**ctx.env, "PATH": str(tmp_path / "bin"), "GITNEXUS_SHARED_STORE": "on"}
-    ctx.git_bin = host_bin("git")
-    return ctx, calls
-
-
 def test_heal_clean_failure_warns_and_skips(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _seed_inverted_store(repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", clean_removes=False)
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home", clean_removes=False)
     assert _run_once(repo, ctx) == 0  # warn-and-skip: exit code stays 0
     err = capsys.readouterr().err
     assert "✗ clean did not remove the index" in err
@@ -1368,9 +959,9 @@ def test_heal_clean_failure_warns_and_skips(tmp_path, capsys):
 
 
 def test_heal_wrong_stamp_never_claims_success(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _seed_inverted_store(repo)
-    ctx, _ = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", rogue_stamp="feature/omc-v1")
+    ctx, _ = ctx_with_healing_node_stub(tmp_path, tmp_path / "home", rogue_stamp="feature/omc-v1")
     assert _run_once(repo, ctx) == 0
     err = capsys.readouterr().err
     assert "✗ rebuilt index is not owned by 'main' — not claiming success" in err
@@ -1391,10 +982,10 @@ def _foreign_stamping_stub(tmp_path):
 
 
 def test_up_to_date_tick_heals_stale_index_without_hook(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
     _seed_hook(repo, "touch hook-ran.txt\n")
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_node_stub(tmp_path, tmp_path / "home")
     assert _run_loop(repo, ctx, ticks=1) == 0
     err = capsys.readouterr().err
     assert err.index("· up to date") < err.index("→ refreshing GitNexus index (incremental)")
@@ -1406,9 +997,9 @@ def test_up_to_date_tick_heals_stale_index_without_hook(tmp_path, capsys):
 def test_healed_token_returned_by_tick(tmp_path, capsys):
     from omc.watch import _tick
 
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     tok = _tick(ctx, Config(), str(repo), force_refresh=False)
     assert tok == "healed"
 
@@ -1416,9 +1007,9 @@ def test_healed_token_returned_by_tick(tmp_path, capsys):
 def test_persistently_stale_verdict_is_not_retried_every_tick(tmp_path, capsys):
     from omc.watch import _tick
 
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _stale_index(repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     _foreign_stamping_stub(tmp_path)
     first = _tick(ctx, Config(), str(repo), force_refresh=False)
     assert first.startswith("knowledge-stale:") and "index-foreign" in first
@@ -1431,8 +1022,8 @@ def test_persistently_stale_verdict_is_not_retried_every_tick(tmp_path, capsys):
 def test_pending_reset_runs_on_fresh_up_to_date_tick(tmp_path, capsys):
     from omc.watch import _tick
 
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     tok = _tick(ctx, Config(), str(repo), force_refresh=False, reset=True)
     assert tok == "healed"
     recorded = calls.read_text()
@@ -1440,10 +1031,10 @@ def test_pending_reset_runs_on_fresh_up_to_date_tick(tmp_path, capsys):
 
 
 def test_reset_flag_consumed_after_sync_once(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
     docs = _seed_docs_mirror(repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     old = os.getcwd()
     os.chdir(repo)
     try:
@@ -1463,8 +1054,8 @@ def test_reset_flag_consumed_after_sync_once(tmp_path, capsys):
 def test_failed_reset_is_not_rerun_next_tick(tmp_path, capsys):
     """A reset whose rebuild stays stale was still attempted; the next tick
     must not reset and clean the snapshot again."""
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     _foreign_stamping_stub(tmp_path)
     after_first = {}
 
@@ -1481,10 +1072,10 @@ def test_failed_reset_is_not_rerun_next_tick(tmp_path, capsys):
 
 
 def test_loop_reset_pending_narrates_once_until_the_state_changes(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
     (repo / "f.txt").write_text("uncommitted edit\n")  # dirty → skip tick keeps it pending
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     assert _run_loop(repo, ctx, ticks=3, reset_gitnexus=True) == 0
     err = capsys.readouterr().err
     assert err.count("· reset pending — waiting for a tick that can refresh") == 1
@@ -1493,10 +1084,10 @@ def test_loop_reset_pending_narrates_once_until_the_state_changes(tmp_path, caps
 
 
 def test_once_reset_on_skip_tick_says_not_applied(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
+    push_remote_commit(origin, tmp_path)
     (repo / "f.txt").write_text("uncommitted edit\n")  # dirty → skip tick
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     old = os.getcwd()
     os.chdir(repo)
     try:
@@ -1513,9 +1104,9 @@ def test_once_reset_on_skip_tick_says_not_applied(tmp_path, capsys):
 
 
 def test_reset_refuses_off_base_branch_before_any_node_call(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _git("switch", "-qc", "feature/other", cwd=repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     old = os.getcwd()
     os.chdir(repo)
     try:
@@ -1535,12 +1126,10 @@ def test_reset_refuses_off_base_branch_before_any_node_call(tmp_path, capsys):
 def test_tick_narrates_busy_lock_contention_once(tmp_path, capsys):
     from omc.watchlock import busy_lock
 
-    from .test_watchlock import _hold_in_subprocess
-
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
+    _, repo = repo_with_origin(tmp_path)
+    ctx, _ = ctx_with_node_stub(tmp_path, tmp_path / "home")
     lock = busy_lock(ctx, cwd=str(repo))
-    p = _hold_in_subprocess(lock.lock_file, 1.5)
+    p = hold_in_subprocess(lock.lock_file, 1.5)
     assert _run_once(repo, ctx) == 0
     p.wait()
     err = capsys.readouterr().err
@@ -1600,11 +1189,11 @@ def test_watch_reset_gitnexus_flag_dispatches(monkeypatch):
 def test_shared_store_watch_convergence_and_quiet_failure(tmp_path, capsys, monkeypatch, policy):
     from omc.watch import _tick
 
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     (repo / "f.txt").write_text("two\n")
     _git("add", "f.txt", cwd=repo)
     _git("commit", "-qm", "c2", cwd=repo)
-    ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
+    ctx, calls = ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
     if not policy:
         monkeypatch.setattr(ctx, "child_env", lambda: dict(ctx.env))
     first = _tick(ctx, Config(), str(repo), force_refresh=False)
@@ -1623,7 +1212,7 @@ def test_shared_store_watch_convergence_and_quiet_failure(tmp_path, capsys, monk
 def _move_on_fetch(ctx, tmp_path, repo):
     wrapper = tmp_path / "bin" / "moving-git"
     marker = tmp_path / "fetch-moved"
-    git, _, _ = _stub_tools()
+    git, _, _ = stub_tools()
     wrapper.write_text(
         "#!/bin/sh\n"
         f'if [ "$1" = fetch ] && [ ! -f "{marker}" ]; then '
@@ -1635,12 +1224,12 @@ def _move_on_fetch(ctx, tmp_path, repo):
 
 
 def _movement_fixture(tmp_path, *, move_during_analyze=False):
-    _, repo = _repo_with_origin(tmp_path)
+    _, repo = repo_with_origin(tmp_path)
     _git("branch", "feature/x", cwd=repo)
     _seed_inverted_store(repo, owner="main")
     docs = _seed_docs_mirror(repo)
     _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" > hook-ran.txt\n')
-    ctx, calls = _ctx_with_healing_node_stub(
+    ctx, calls = ctx_with_healing_node_stub(
         tmp_path, tmp_path / "home", move_to="feature/x" if move_during_analyze else None
     )
     return repo, docs, ctx, calls
@@ -1711,20 +1300,13 @@ def test_reset_move_before_write_remains_pending(tmp_path, capsys):
 
 
 @pytest.mark.parametrize("rebase", [False, True])
-def test_synced_move_keeps_hook_and_auto_build(tmp_path, capsys, rebase):
-    origin, repo = _repo_with_origin(tmp_path)
+def test_synced_move_keeps_hook_and_auto_build(tmp_path, capsys, rebase, reap_runs):
+    origin, repo = repo_with_origin(tmp_path)
     _git("branch", "feature/x", cwd=repo)
-    _push_remote_commit(origin, tmp_path)
+    push_remote_commit(origin, tmp_path)
     _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" > hook-ran.txt\n')
-    _seed_build_stage(repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", move_to="feature/x")
-    _stub_claude(
-        tmp_path, 'OMC_STAGE {"stage":"build","configured":true,"passed":true,"summary":"ok"}'
-    )
-    claude = tmp_path / "bin/claude"
-    claude.write_text(
-        claude.read_text().replace("#!/bin/sh\n", "#!/bin/sh\nprintf built > build-ran.txt\n")
-    )
+    _seed_build_hook(repo, "printf built > build-ran.txt")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home", move_to="feature/x")
     old = os.getcwd()
     os.chdir(repo)
     try:
@@ -1739,25 +1321,20 @@ def test_synced_move_keeps_hook_and_auto_build(tmp_path, capsys, rebase):
 
 @pytest.mark.parametrize("rebase", [False, True])
 @pytest.mark.parametrize("once", [False, True])
-def test_synced_move_before_reset_keeps_reset_pending(tmp_path, capsys, monkeypatch, rebase, once):
+def test_synced_move_before_reset_keeps_reset_pending(
+    tmp_path, capsys, monkeypatch, rebase, once, reap_runs
+):
     import omc.watch as watch
 
-    origin, repo = _repo_with_origin(tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
     _git("branch", "feature/x", cwd=repo)
-    _push_remote_commit(origin, tmp_path)
+    push_remote_commit(origin, tmp_path)
     docs = _seed_docs_mirror(repo)
     meta = repo / ".gitnexus/meta.json"
     before = meta.read_bytes()
     _seed_hook(repo, 'echo "$OMC_WATCH_OUTCOME" >> hook-ran.txt\n')
-    _seed_build_stage(repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
-    _stub_claude(
-        tmp_path, 'OMC_STAGE {"stage":"build","configured":true,"passed":true,"summary":"ok"}'
-    )
-    claude = tmp_path / "bin/claude"
-    claude.write_text(
-        claude.read_text().replace("#!/bin/sh\n", "#!/bin/sh\nprintf built > build-ran.txt\n")
-    )
+    _seed_build_hook(repo, "printf built > build-ran.txt")
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     refresh = watch.refresh_knowledge
     moved = False
 
@@ -1801,11 +1378,11 @@ def test_synced_move_before_reset_keeps_reset_pending(tmp_path, capsys, monkeypa
 
 @pytest.mark.parametrize("sync", ["up-to-date", "merge", "rebase"])
 def test_move_after_reset_does_not_repeat_reset(tmp_path, capsys, sync):
-    origin, repo = _repo_with_origin(tmp_path)
+    origin, repo = repo_with_origin(tmp_path)
     _git("branch", "feature/x", cwd=repo)
     if sync != "up-to-date":
-        _push_remote_commit(origin, tmp_path)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", move_to="feature/x")
+        push_remote_commit(origin, tmp_path)
+    ctx, calls = ctx_with_healing_node_stub(tmp_path, tmp_path / "home", move_to="feature/x")
 
     def between(i):
         if i == 1:

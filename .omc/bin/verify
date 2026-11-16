@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# This repo's verify stage: the parallel Docker E2E suite, plus the Codex gate when
+# Codex code changed. A real project hook, so it runs with the user's PATH and may call
+# `cat`, `git` and `just` by name.
+set -euo pipefail
+
+if [ "$#" -eq 1 ] && [ "$1" = "--show-instructions" ]; then
+    exec cat "$(dirname "$0")/verify.instructions.md"
+fi
+
+# A subset run (`## Rerunning a subset`): `codex-gate <node ids>` or E2E node ids.
+if [ "$#" -gt 0 ]; then
+    if [ "$1" = "codex-gate" ]; then
+        shift
+        exec just codex-gate "$@"
+    fi
+    exec just e2e-tests "$@"
+fi
+
+# Codex code changed: a committed change on this branch or an uncommitted one. Read
+# before the suite runs, so a git failure stops the stage before the E2E suite.
+committed="$(git diff --name-only origin/main...HEAD)"
+uncommitted="$(git diff --name-only HEAD)"
+codex=no
+while IFS= read -r file; do
+    case "$file" in
+        # docker/setup-plugins.sh counts whole: its codex half is not detectable by name.
+        src/omc/providers/codex.py | tests/e2e/conversation.py | \
+            tests/e2e/codex_plugin_payload.py | tests/e2e/codex_auth.py | \
+            docker/conversation.py | docker/setup-plugins.sh)
+            codex=yes
+            ;;
+    esac
+done <<<"$committed
+$uncommitted"
+
+# Both run even when the first fails, so one run reports every red piece.
+status=0
+just e2e-tests || status=$?
+if [ "$codex" = yes ]; then
+    echo "codex code changed: running the Codex gate"
+    just codex-gate || status=$?
+fi
+exit "$status"

@@ -67,7 +67,7 @@ the bug).
   3 bail (`omc internal` only: "inconclusive, caller falls back to its own
   judgment").
 - **Skill machine contracts** are single JSON lines: `OMC_SLUG`, `OMC_STAGE`,
-  `OMC_REBASE_MAIN`, `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`,
+  `OMC_STAGE_RUN`, `OMC_REBASE_MAIN`, `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`,
   `OMC_MODELS`, `OMC_GATE`, `OMC_HOOK`. Parsers tolerate markdown
   wrapping; skills forbid it. Internal skills carry "not meant for direct
   invocation" in their frontmatter description.
@@ -77,7 +77,10 @@ the bug).
   them (`src/omc/providers/*.py`); they were live-verified — do not "clean
   up" flags without re-verifying against the real CLI.
 - Long-running behavior is foreground-only: omc never creates daemons,
-  LaunchAgents, or cron entries.
+  LaunchAgents, or cron entries. The one exception is a stage run: a detached
+  supervisor bound to one hook run; it ends when the hook ends or is killed, is
+  never restarted or scheduled, and never outlives a running `omc watch` for its
+  project, or its worktree.
 - **Never run `omc install` / `uv tool install` on your own initiative.**
   `omc install <path>` re-roots every future `omc update` at that path — an
   install pointed at a feature worktree has silently pinned the host omc to
@@ -105,5 +108,8 @@ the bug).
   only before replacing a tool the user runs at a different version; a
   version mismatch is solved by a minimum version in the tests, not a
   downgrade.
-- Project stages for this repo: `.omc/skills/{check,build,verify,review}`
-  (used by `/omc:audit`, `/omc:finish` and its MR gate).
+- Project stages for this repo: `.omc/bin/{check,build,verify}` (with their
+  `.instructions.md`) and `.omc/skills/review` (used by `/omc:audit`,
+  `/omc:finish` and its MR gate). `.omc/skills/{check,build,verify}` stay until
+  the installed omc reads stage hooks; remove them in a follow-up. Stage runs
+  need `omc watch` running in the primary checkout.
