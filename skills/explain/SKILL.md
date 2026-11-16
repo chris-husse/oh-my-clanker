@@ -29,9 +29,9 @@ lives at `.omc/skills/explain-context/SKILL.md`.
 ## Step 2 — graph evidence
 
 Invoke the internal **`gitnexus-explain`** skill with the question. It
-returns symbol/file citations, flows, and doc excerpts from the project's
-knowledge graph (or tells you the index is missing — relay its "run
-`/omc:index` first" guidance verbatim and stop).
+returns symbol/file citations and flows from the project's knowledge graph
+(or tells you the index is missing — relay its "run `/omc:index` first"
+guidance verbatim and stop).
 
 ## Step 2b — optional explain sources
 

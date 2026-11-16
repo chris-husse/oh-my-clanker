@@ -2,9 +2,9 @@
 """Live dependency layer: ensure (clone at commit + index, no LLM) then query
 through the --git proxy against a tiny public repo; plus a judged
 /omc:explain-dependency run against omc's OWN runtime dependency
-(mininterface), resolved from the repo's pyproject. The wiki/LLM docs path is
-NOT re-tested here — `dependency document` shares watch's wiki code path, and
-dependency-watch is covered by unit-level argv assertions (per the spec)."""
+(mininterface), resolved from the repo's pyproject. The dependency layer is
+graph-only: dependency-watch only spawns ensure and is covered by unit-level
+argv assertions (per the spec)."""
 
 from __future__ import annotations
 
@@ -71,8 +71,8 @@ def test_explain_own_dependency_judged(container):
     # The self-referential flow: /repo is the real omc codebase, whose sole
     # runtime dependency is mininterface (pyproject.toml). The skill must
     # resolve the bare name from the project's own manifests, ensure the
-    # dependency (clone + index, graph-only — docs stay unbuilt), query its
-    # graph, and answer with citations + the status table.
+    # dependency (clone + index, graph-only), query its graph, and answer with
+    # citations + the status table.
     require_token("claude")
     configure_omc(container, "claude")
 
@@ -86,7 +86,7 @@ def test_explain_own_dependency_judged(container):
     assert rc == 0, answer
 
     # Deterministic side effects: the dependency landed in the manifest with
-    # an index, without any LLM docs having been generated.
+    # an index.
     rc, manifest = run_in(container, ["omc", "internal", "dependency", "list"])
     assert rc == 0, manifest
     assert "/mininterface" in manifest, f"mininterface not adopted into manifest:\n{manifest[:800]}"
@@ -110,8 +110,8 @@ def test_explain_own_dependency_judged(container):
             "the answer explains nested dict form navigation through the text adaptor's "
             "run_dialog/_run_dialog and how Tag.update/_validate participates in an edit",
             "the answer cites at least one real mininterface file or symbol",
-            "the answer reports the dependency's indexed/documented status (a status table "
-            "or equivalent note that docs are not yet generated)",
+            "the answer reports the dependency's indexed status (a status table or "
+            "equivalent note)",
             "the answer is not a refusal, an error dump, or a generic essay about prompts",
         ],
         artifacts=answer,

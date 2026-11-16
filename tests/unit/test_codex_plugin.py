@@ -13,6 +13,7 @@ from omc.errors import OmcError
 from omc.toolctx import ToolContext
 
 from ._codex_plugin import CodexState, _source
+from ._stubs import host_bin
 
 
 def _update(state: CodexState, source: Path):
@@ -288,7 +289,11 @@ def test_remote_preflight_keeps_git_config_from_normal_home(tmp_path, monkeypatc
         '[url "file:///fixture-origin/"]\n\tinsteadOf = https://github.com/example/\n'
     )
     offered = _source(tmp_path / "offered", "skill")
-    ctx = ToolContext.from_env({"HOME": str(home), "CODEX_HOME": str(home / ".codex")})
+    # The probe runs the real git: PATH holds its resolved dir (no /usr/bin/git on NixOS).
+    git_dir = str(Path(host_bin("git")).parent)
+    ctx = ToolContext.from_env(
+        {"HOME": str(home), "CODEX_HOME": str(home / ".codex"), "PATH": git_dir}
+    )
     probed_homes = []
 
     def add_with_git_probe(probe, argv):

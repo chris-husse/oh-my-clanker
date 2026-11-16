@@ -8,6 +8,6 @@ description: (Re)index this project's code knowledge graph (GitNexus) so /omc:ex
 Delegate to the internal **`gitnexus-index`** skill and relay its report
 (what got indexed, where, freshness).
 
-The intended cadence: run `/omc:index` (and `/omc:document`) in the MAIN
+The intended cadence: run `/omc:index` in the MAIN
 checkout whenever the base branch has moved — worktrees all read the primary
 root's graph, so `/omc:explain` inside any worktree stays current.

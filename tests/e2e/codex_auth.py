@@ -17,8 +17,8 @@ CODEX_HOME = "/tmp/omc-codex-home"
 AUTH_MOUNT = "/codex-auth"
 DEFAULT_VOLUME = "omc-e2e-codex-auth"
 
-# The volume contains only Codex's account cache. Never mount the host home or
-# expose this mount under /artifacts, which is copied back into the repo.
+# The volume contains only Codex's account cache. Never mount the host home; the
+# token lives only in this named volume and the container's private CODEX_HOME.
 _COPY_IN = """\
 import json, os, shutil, sys
 src = '/codex-auth/auth.json'

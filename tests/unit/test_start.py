@@ -485,11 +485,8 @@ def _stale_verdict():
 
     return Freshness(
         fresh=False,
-        reasons=(
-            Reason("index-behind", "index is 31 commits behind origin/main", {"count": 31}),
-            Reason("wiki-behind", "docs are 31 commits behind the index", {"count": 31}),
-        ),
-        fix="omc watch --once --enable-documentation",
+        reasons=(Reason("index-behind", "index is 31 commits behind origin/main", {"count": 31}),),
+        fix="omc watch --once",
         run_in="/primary",
         basis="origin/main",
     )
@@ -540,8 +537,7 @@ def test_stale_verdict_prints_alert_block_and_seeds_it(tmp_path, capsys, monkeyp
     assert "→ fetching origin/main" in err
     assert "✗ knowledge snapshot is stale — /omc:explain will answer from old data" in err
     assert "  · index is 31 commits behind origin/main\n" in err
-    assert "  · docs are 31 commits behind the index\n" in err
-    assert "  → fix: omc watch --once --enable-documentation   (run in /primary)" in err
+    assert "  → fix: omc watch --once   (run in /primary)" in err
     assert err.index("✓ worktree:") < err.index("✗ knowledge snapshot is stale")
     assert err.index("✗ knowledge snapshot is stale") < err.index("→ running headless")
     assert "\nOMC_KNOWLEDGE " in seen["seed"]
@@ -601,7 +597,7 @@ def test_dry_run_shows_knowledge_row_without_fetch(tmp_path, capsys, monkeypatch
     ctx = full_env(tmp_path)
     assert run_start(ctx, Config(), "PROJ-1", dry_run=True) == 0
     out = capsys.readouterr().out
-    assert "knowledge:    stale (index-behind,wiki-behind) (computed without fetch)" in out
+    assert "knowledge:    stale (index-behind) (computed without fetch)" in out
     assert "OMC_KNOWLEDGE" in out  # the dry-run seed embeds the same verdict
     assert fetched == []
 

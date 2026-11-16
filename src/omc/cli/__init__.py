@@ -37,9 +37,9 @@ def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
 
 def _with_provider(cfg, override: str | None):
     """The effective config with llm.default swapped for this process. A
-    dataclasses.replace copy: it SHARES llm.providers and secrets with the
-    original. Reconciliation may update selected provider leaves in both
-    copies, but the runtime Config is never persisted as a whole."""
+    dataclasses.replace copy: it SHARES llm.providers with the original.
+    Reconciliation may update selected provider leaves in both copies, but
+    the runtime Config is never persisted as a whole."""
     if not override:
         return cfg
     return replace(cfg, llm=replace(cfg.llm, default=override))
@@ -115,11 +115,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--interval", type=int, default=30, help="Seconds between ticks")
     p_watch.add_argument("--once", action="store_true", help="Run a single tick and exit")
     p_watch.add_argument(
-        "--enable-documentation",
-        action="store_true",
-        help="Also regenerate the LLM documentation on changes (costly)",
-    )
-    p_watch.add_argument(
         "--auto-build",
         action="store_true",
         help="After each action tick, run the project's build stage via the default LLM",
@@ -138,22 +133,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument(
         "--reset-gitnexus",
         action="store_true",
-        help="Force-clear the GitNexus index, wiki and docs mirror and rebuild them "
-        "(primary must be on the base branch)",
+        help=(
+            "Force-clear the GitNexus store (`.gitnexus/`) and rebuild it"
+            " (primary must be on the base branch)"
+        ),
     )
 
     p_dep = sub.add_parser(
         "dependency", help="External dependency knowledge cache (~/.omc): watch, list"
     )
     dep_sub = p_dep.add_subparsers(dest="dep_command")
-    p_depw = dep_sub.add_parser(
-        "watch", help="Keep dependency checkouts indexed and their LLM docs generated"
-    )
+    p_depw = dep_sub.add_parser("watch", help="Keep dependency checkouts indexed")
     p_depw.add_argument("--interval", type=int, default=30, help="Seconds between ticks")
     p_depw.add_argument(
         "--once", action="store_true", help="Reconcile everything once, announce, exit"
     )
-    dep_sub.add_parser("list", help="Show cached dependencies: repo, commit, index/doc status")
+    dep_sub.add_parser("list", help="Show cached dependencies: repo, commit, index status")
 
     p_awscp = sub.add_parser(
         "aws-credential-process",
@@ -346,7 +341,6 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             cfg,
             interval=args.interval,
             once=args.once,
-            enable_documentation=args.enable_documentation,
             auto_build=args.auto_build,
             rebase=args.rebase,
             clear_mutex=args.clear_mutex,
@@ -354,10 +348,6 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
         )
     if args.command == "dependency":
         if args.dep_command == "watch":
-            cfg = _load_cfg_or_bail(ctx)
-            if cfg is None:
-                return 2
-            reconcile(ctx, cfg, {"docs"}, say=_say, dry_run=False)
             from ..depwatch import run_dependency_watch
 
             return run_dependency_watch(ctx, interval=args.interval, once=args.once)

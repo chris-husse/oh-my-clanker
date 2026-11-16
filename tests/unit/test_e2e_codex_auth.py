@@ -170,7 +170,7 @@ def test_account_rejects_corrupt_json_without_echoing_it(monkeypatch, tmp_path):
     assert c.events[-1] == "stop"
 
 
-@pytest.mark.parametrize("fixture_name", ["container", "container_with_artifacts"])
+@pytest.mark.parametrize("fixture_name", ["container"])
 @pytest.mark.parametrize("provider", [None, "claude"])
 @pytest.mark.parametrize("unrelated_auth", ["missing", "corrupt", "locked"])
 def test_generic_fixture_ignores_unrelated_codex_account(
@@ -203,7 +203,7 @@ def test_generic_fixture_ignores_unrelated_codex_account(
         if lock_file is not None:
             lock_file.close()
     assert not any(target == "/codex-auth" for _, target, _ in c.mounts)
-    assert len(c.mounts) == (1 if fixture_name == "container_with_artifacts" else 0)
+    assert len(c.mounts) == 0
     assert c.events == ["start", "stop"]
     assert c.wrapped.calls == []
 

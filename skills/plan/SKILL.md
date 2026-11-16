@@ -52,8 +52,7 @@ A short structured block containing, in order:
 1. The work context (from `$ARGUMENTS`).
 2. explain's answer (or its absence note).
 3. Standing pointers: `docs/superpowers/specs/` (prior design records),
-   `docs/superpowers/plans/` (implementation plans), and
-   `.omc/docs/gitnexus/docs/` (generated LLM docs) when present.
+   `docs/superpowers/plans/` (implementation plans).
 
 ## Step 3 — seed
 

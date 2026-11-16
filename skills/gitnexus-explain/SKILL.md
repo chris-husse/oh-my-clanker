@@ -1,6 +1,6 @@
 ---
 name: gitnexus-explain
-description: Internal — used by /omc:explain; not meant for direct invocation. Answer a code question by composing GitNexus graph queries (query/context/impact/cypher) plus the generated docs.
+description: Internal — used by /omc:explain; not meant for direct invocation. Answer a code question by composing GitNexus graph queries (query/context/impact/cypher).
 ---
 
 # omc gitnexus-explain (internal)
@@ -42,10 +42,6 @@ or `--set gitnexus.embeddings=true`), or the runtime is missing, or the one-time
 backfill has not run yet. In that case relay that as a hint in your findings;
 never try to enable it from here.
 
-Also read the generated docs at `.omc/docs/gitnexus/docs/` (primary root)
-when present — module pages often carry the architectural "why" the graph
-alone can't.
-
 The proxy prints `OMC_KNOWLEDGE {…}` on **stderr** (matched by prefix, not
 position — GitNexus's own warnings land there too) when the snapshot is
 stale. Relay that line to your caller as the first thing you return.
@@ -53,6 +49,6 @@ stale. Relay that line to your caller as the first thing you return.
 ## Step 3 — return findings
 
 Return the evidence, organized for the caller to synthesize: the symbols and
-files involved (cite `path:symbol`), how they connect (flows), and any
-relevant doc-page excerpts. State what the graph could NOT answer rather than
-guessing — absence of a finding is not proof of absence.
+files involved (cite `path:symbol`) and how they connect (flows). State what
+the graph could NOT answer rather than guessing — absence of a finding is not
+proof of absence.

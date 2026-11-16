@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tomllib
 
 import pytest
 
 from tests.e2e import harness
+
+from ._stubs import host_bin
 
 
 @pytest.mark.parametrize("mode", ["ok", "auth-error"])
@@ -28,8 +31,10 @@ def test_wire_mcp_uses_selected_codex_home_and_preserves_config(
     )
 
     # Run the command emitted by wire_mcp under a disposable home, without
-    # exposing the host's Codex settings or credentials to the subprocess.
-    env = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
+    # exposing the host's Codex settings or credentials to the subprocess. PATH
+    # holds only the dirs of the tools that command runs (no FHS dirs on NixOS).
+    tools = (host_bin(name) for name in ("bash", "mkdir", "cat"))
+    env = {"HOME": str(home), "PATH": os.pathsep.join(dict.fromkeys(map(os.path.dirname, tools)))}
     if custom_home:
         env["CODEX_HOME"] = str(codex_home)
 

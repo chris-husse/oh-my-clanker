@@ -9,6 +9,8 @@ import pytest
 
 from tests.e2e import harness, judge, test_e2e_smoke
 
+from ._stubs import host_bin
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -49,7 +51,7 @@ def test_provider_matrix_collects_claude_and_codex_cases():
 def test_plugin_bootstrap_rejects_unknown_provider_before_running_tools(tmp_path):
     script = ROOT / "docker" / "setup-plugins.sh"
     result = subprocess.run(
-        ["/bin/bash", str(script), "unsupported"],
+        [host_bin("bash"), str(script), "unsupported"],
         env={"PATH": str(tmp_path)},
         capture_output=True,
         text=True,

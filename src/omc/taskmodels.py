@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import docsllm
+from . import modelprobe
 from .config.schema import Config, GlobalConfig
 from .config.store import _BANNED_FAMILIES, validate_task_model
 from .errors import ConfigError
@@ -117,7 +117,7 @@ def _codex_models(ctx: ToolContext, *, refresh: bool) -> list[_ListedModel]:
         # Codex 0.158 prints the cache entry shape as {"models": [...]} on stdout.
         # It refreshes by its own 300 s TTL and client_version rule; logged-out
         # clients print the bundled list. Warnings on stderr do not spoil stdout.
-        cp = ctx.run_bounded(["codex", "debug", "models"], timeout=docsllm.AUTH_STATUS_TIMEOUT)
+        cp = ctx.run_bounded(["codex", "debug", "models"], timeout=modelprobe.AUTH_STATUS_TIMEOUT)
         if cp.returncode != 0:
             tail = (cp.stderr or cp.stdout or "").strip()[-200:]
             raise ConfigError(f"codex debug models failed (exit {cp.returncode}): {tail}")
@@ -172,20 +172,35 @@ def _codex_catalog(ctx: ToolContext) -> list[CatalogModel]:
 
 
 def claude_catalog(ctx: ToolContext) -> ClaudeCatalog:
-    status = docsllm.auth_status(ctx, "claude")
+    status = modelprobe.auth_status(ctx, "claude")
     org_id = status.get("orgId")
     config_directory = status.get("configDirectory")
     if status.get("authMethod") == "api_key" and not org_id:
         # Claude Code 2.1.286 reports no orgId and writes no model-catalog
         # cache for ANTHROPIC_API_KEY auth, even after a successful turn.
         # Query the same key's live model list instead of guessing an org.
-        key = ctx.env.get("ANTHROPIC_API_KEY", "")
+        key = ctx.env.get("ANTHROPIC_API_KEY", "").strip()  # a CRLF .env leaves "\r"
         if not key:
             raise ConfigError(
                 "claude API-key auth has no local model catalog; "
                 "set ANTHROPIC_API_KEY for model reconciliation"
             )
         return ClaudeCatalog(_api_catalog(ctx, "claude", key), fresh=True, overdue_minutes=None)
+    if status.get("authMethod") == "oauth_token" and not org_id:
+        # Claude Code 2.1.325 under CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`)
+        # reports no orgId and writes no model-catalog cache: every turn logs
+        # "[servedCatalog] off (flag)", even with nonessential traffic re-enabled
+        # by the --settings override. The same token is accepted as a bearer by
+        # GET /v1/models (HTTP 200, no beta header). Verified 2026-11-16.
+        token = ctx.env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+        if not token:
+            raise ConfigError(
+                "claude OAuth-token auth has no local model catalog; "
+                "set CLAUDE_CODE_OAUTH_TOKEN for model reconciliation"
+            )
+        return ClaudeCatalog(
+            _api_catalog(ctx, "claude", token, bearer=True), fresh=True, overdue_minutes=None
+        )
     # Claude Code 2.1.300 account auth reports the current org and resolved
     # configDirectory. Its catalog files are <orgId>-*-cc.json under
     # cache/model-catalog; other organizations' files can coexist there.
@@ -285,8 +300,10 @@ def claude_catalog(ctx: ToolContext) -> ClaudeCatalog:
         raise ConfigError(f"invalid Claude model catalog {path}: {exc}") from exc
 
 
-def _api_catalog(ctx: ToolContext, provider: str, key: str) -> list[CatalogModel]:
-    ok, detail, models = docsllm.api_connection_probe(ctx, provider, key)
+def _api_catalog(
+    ctx: ToolContext, provider: str, key: str, *, bearer: bool = False
+) -> list[CatalogModel]:
+    ok, detail, models = modelprobe.api_connection_probe(ctx, provider, key, bearer=bearer)
     if not ok:
         raise ConfigError(detail)  # api_connection_probe already redacts the key
     adapter = get_provider(provider)
@@ -304,10 +321,8 @@ def _api_catalog(ctx: ToolContext, provider: str, key: str) -> list[CatalogModel
     return result
 
 
-def catalog(ctx: ToolContext, provider: str, *, docs_api_key: str = "") -> list[CatalogModel]:
-    """Return the current non-cheap models offered by this provider source."""
-    if docs_api_key:
-        return _api_catalog(ctx, provider, docs_api_key)
+def catalog(ctx: ToolContext, provider: str) -> list[CatalogModel]:
+    """Return the current non-cheap models offered by this provider."""
     if provider == "codex":
         return _codex_catalog(ctx)
     if provider == "claude":
@@ -461,8 +476,8 @@ def validate_selection(
     if provider == "codex" and family not in get_provider(provider).families():
         # A full id needs no list (§5): prove the id itself works, once.
         say(f"→ validating {wanted} via codex")
-        ok, detail = docsllm.cli_model_probe(ctx, provider, family, effort=effort)
-        docsllm._step(say, ok, detail)
+        ok, detail = modelprobe.cli_model_probe(ctx, provider, family, effort=effort)
+        modelprobe.step(say, ok, detail)
         return ModelChoice(family, effort)
     if provider == "codex":
         choice = resolve_choice(ctx, provider, wanted, validate_effort=True)
@@ -472,8 +487,8 @@ def validate_selection(
     say(f"→ validating {wanted} via claude")
     # Claude's CLI and Agent tool accept family aliases directly. Its answer
     # supplies the current full id for display only; no id is stored.
-    ok, detail = docsllm.cli_model_probe(
+    ok, detail = modelprobe.cli_model_probe(
         ctx, provider, family, prompt=EXACT_ID_PROMPT, effort=effort, return_output=True
     )
-    docsllm._step(say, ok, detail if not ok else f"{wanted} → {detail}")
+    modelprobe.step(say, ok, detail if not ok else f"{wanted} → {detail}")
     return ModelChoice(family, effort)

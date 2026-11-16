@@ -44,8 +44,8 @@ return with zero findings. The lens never fails a stage over its own plumbing.
 `Cargo.lock`, `poetry.lock`), generated directories (`dist/`, `build/`,
 `target/`, `node_modules/`, `__pycache__/`), binaries, vendored code
 (`vendor/`, `third_party/`), snapshot fixtures (`__snapshots__/`,
-`*.snap`, `tests/**/artifacts/`), and the knowledge mirrors `.omc/docs/` and
-`.gitnexus/`.
+`*.snap`, `tests/**/artifacts/`), the leftover generated `.omc/docs/`, and the
+`.gitnexus/` index.
 
 ## Step 1 — read the project's conventions first
 

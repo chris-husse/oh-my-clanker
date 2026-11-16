@@ -34,9 +34,6 @@ class CodexProvider(Provider):
         # Codex 0.158 loads this global AGENTS.md in every session.
         return self._instruction_dir(env, "CODEX_HOME", ".codex") / "AGENTS.md"
 
-    def models(self):
-        return []  # free-text entry; codex model ids move fast
-
     def headless_argv(
         self, prompt, *, model, effort="", allowed_tools=None, session_name="", served_catalog=False
     ):

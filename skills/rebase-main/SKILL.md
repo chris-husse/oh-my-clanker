@@ -1,15 +1,13 @@
 ---
 name: rebase-main
-description: Refresh this worktree onto the latest base branch AND re-mirror .omc/docs from the primary checkout. The .gitnexus graph stays primary. Run anytime; standalone it keeps your commits. /omc:finish runs it first, with --squash.
+description: Refresh this worktree onto the latest base branch. The .gitnexus graph stays primary. Run anytime; standalone it keeps your commits. /omc:finish runs it first, with --squash.
 ---
 
 # omc rebase-main
 
-A worktree is a snapshot of main at cut time — code and generated knowledge
-docs (`.omc/docs/`). The `.gitnexus/` graph stays in the primary checkout,
-where `/omc:explain` queries it. This refreshes code and docs via the
-deterministic Python subcommand (an LLM is never trusted with
-delete-semantics mirroring):
+A worktree is a snapshot of main's code at cut time. The `.gitnexus/` graph
+stays in the primary checkout, where `/omc:explain` queries it. This
+refreshes the code via the deterministic Python subcommand:
 
 ```sh
 omc internal rebase-main
@@ -30,22 +28,17 @@ unless `/omc:finish` invoked this skill with it.
 
 The last line is machine-readable:
 
-- `OMC_REBASE_MAIN {"ok": true, "rebased": "<old>..<new>", "synced": [...],
-  "shared": [...]}` — report what moved and whether `.omc/docs` was
-  re-mirrored, then continue. `synced` and `shared` never list `.gitnexus`.
-  An entry under `shared` was already present via a shared `.omc` (symlinked
-  across checkouts) — nothing was copied,
-  and that is success, not a warning. With `--squash` the verdict also
-  carries `"squashed": <n>` — the branch commits folded (0 when there was
+- `OMC_REBASE_MAIN {"ok": true, "rebased": "<old>..<new>"}` — report what
+  moved, then continue. With `--squash` the verdict also carries
+  `"squashed": <n>` — the branch commits folded (0 when there was
   nothing to squash, or only uncommitted changes were folded) — and `<old>`
   is the pre-squash tip.
 - `OMC_REBASE_MAIN {"ok": true, ..., "note": "primary checkout — nothing to
   rebase"}` — you're in the main checkout; `omc watch` owns freshness here.
   The primary keeps this no-op unless `/omc:finish` passes `--squash` on a
-  feature branch there (a plain clone): then it squashes and rebases but
-  mirrors nothing — the normal verdict with `"squashed"`, `synced` and
-  `shared` empty. A detached HEAD there — a rebase still paused in the
-  primary included — gets this no-op too, never rc 2.
+  feature branch there (a plain clone): then it squashes and rebases there —
+  the normal verdict with `"squashed"`. A detached HEAD there — a rebase
+  still paused in the primary included — gets this no-op too, never rc 2.
 - **rc 3 (bail)** with `{"ok": false, "conflicts": [...]}` — the rebase hit
   conflicts and is LEFT PAUSED. You resolve it — this is not a question:
   1. For each conflicted path — on the first stop the verdict's
@@ -72,7 +65,7 @@ The last line is machine-readable:
      Only then `GIT_EDITOR=true git rebase --continue`.
   4. Stopped again (a standalone rebase replays several commits) → repeat
      from 1. When the rebase completes, re-run `omc internal rebase-main`
-     with the same arguments so the `.omc/docs` mirror still happens (with
+     with the same arguments so the run ends with its success verdict (with
      `--squash` the re-run is idempotent: the branch is already one commit
      over the base).
   5. Report in a few lines what conflicted and how you resolved each path;
@@ -132,12 +125,11 @@ The last line is machine-readable:
 
 Every `OMC_REBASE_MAIN` payload carries `"knowledge": {…}` (the primary's
 freshness verdict, same schema as `OMC_KNOWLEDGE`). When `knowledge.fresh` is
-false, relay its `reasons` and `fix` — the mirrored docs may be stale, and
-the primary graph may also be stale.
+false, relay its `reasons` and `fix` — the primary graph may be stale.
 
 ## When to use
 
-- Anytime the base branch has moved and you want current code and generated
-  docs in this worktree. `/omc:explain` queries the primary graph; this
-  command does not copy or refresh it.
+- Anytime the base branch has moved and you want current code in this
+  worktree. `/omc:explain` queries the primary graph; this command does not
+  copy or refresh it.
 - `/omc:finish` invokes this as its FIRST working step, with `--squash`.

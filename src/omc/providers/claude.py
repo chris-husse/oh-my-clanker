@@ -6,14 +6,13 @@ from pathlib import Path
 
 from .base import Provider
 
-# Anthropic's OpenAI-compatible endpoint (docs read 2026-10-01): /chat/completions
-# under this base accepts `Authorization: Bearer <key>`, `max_completion_tokens`,
-# system messages (hoisted) and streaming — exactly what GitNexus's llm-client
-# sends for `--provider custom`. Trailing slash kept: GitNexus strips it itself.
+# Anthropic's HTTP API base. Under ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+# auth Claude Code writes no local model catalog, so taskmodels._api_catalog
+# lists models from /v1/models.
 API_BASE_URL = "https://api.anthropic.com/v1/"
 
-# CLI family aliases -> API id prefixes. The newest id with the prefix is picked
-# from the live /v1/models list at configure time (docsllm.resolve_model).
+# CLI family aliases -> API id prefixes. taskmodels._api_catalog tags each id of
+# the live /v1/models list with its family by prefix.
 _API_FAMILIES = {"fable": "claude-fable-", "opus": "claude-opus-", "sonnet": "claude-sonnet-"}
 
 # The inline settings object that re-enables Claude Code's served model-catalog
@@ -50,14 +49,6 @@ class ClaudeProvider(Provider):
         # Claude Code loads user CLAUDE.md in every session, including projects
         # whose own instruction file is named AGENTS.md.
         return self._instruction_dir(env, "CLAUDE_CONFIG_DIR", ".claude") / "CLAUDE.md"
-
-    def models(self):
-        # CLI aliases — resolved to the latest model in each family by the
-        # claude binary; haiku excluded per tier policy (never used).
-        return ["fable", "opus", "sonnet"]
-
-    def docs_model_default(self) -> str:
-        return "sonnet"  # standard coding tier — the docs floor
 
     def api_base_url(self) -> str:
         return API_BASE_URL

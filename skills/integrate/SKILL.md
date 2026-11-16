@@ -40,7 +40,7 @@ the remaining slots. The interactive session is where files get written.
      at `.omc/config/AGENTS.md`?
    - `.omc/config/AGENTS.md` — the project's own agent instructions
    - `.config/wt.toml` — does a copy-ignored step exist?
-   - `.gitnexus/` index and `.omc/docs/` generated docs
+   - `.gitnexus/` index
    - `.omc/skills/check` · `.omc/skills/build` · `.omc/skills/verify` ·
      `.omc/skills/review` · `.omc/skills/explain-context` ·
      `.omc/skills/investigation-context`

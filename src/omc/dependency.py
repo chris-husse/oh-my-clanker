@@ -1,8 +1,7 @@
-"""External dependency checkouts + their GitNexus indexes/docs (under ~/.omc).
+"""External dependency checkouts + their GitNexus indexes (under ~/.omc).
 
 Layout (spec 2026-07-22-gitnexus-dependency-index-explain-design.md):
   <home>/dependencies/<host>/<owner...>/<repo>/<commit>   checkout, branch omc-pin
-  <home>/gitnexus/<host>/<owner...>/<repo>/<commit>/docs  mirrored wiki
   <home>/dependencies.json                                manifest (atomic writes)
 
 GitNexus has no commit-hash concept — it indexes a WORKING TREE keyed by repo
@@ -24,19 +23,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .config import resolve
 from .errors import OmcError
 from .gitnexus import gitnexus_argv, gitnexus_cli, redact_userinfo
-from .mirror import mirror_dir
-from .providers.registry import docs_llm_for
 from .toolctx import ToolContext
-from .wikirun import (  # noqa: F401
-    _WIKI_POLL_SECONDS,
-    _WIKI_STALL_SECONDS,
-    GitNexusProgress,
-    PageCountTracker,
-    wiki_failure_excerpt,
-)
 
 PIN_BRANCH = "omc-pin"
 
@@ -98,10 +87,6 @@ def checkout_dir(home: Path, ref: DepRef, commit: str) -> Path:
     return home / "dependencies" / ref.host / Path(ref.path) / commit
 
 
-def docs_dir(home: Path, ref: DepRef, commit: str) -> Path:
-    return home / "gitnexus" / ref.host / Path(ref.path) / commit / "docs"
-
-
 def manifest_path(home: Path) -> Path:
     return home / "dependencies.json"
 
@@ -123,11 +108,11 @@ def load_manifest(home: Path) -> dict:
 
 @contextmanager
 def _manifest_lock(home: Path):
-    """Serialize manifest read-modify-write ACROSS PROCESSES: dependency watch
-    documents up to 8 dependencies in parallel, and two subprocesses saving
-    near-simultaneously would lose one flip (a lost documented:true re-runs an
-    entire LLM wiki). flock on a sibling lockfile; fcntl is stdlib on omc's
-    platforms (macOS/Linux)."""
+    """Serialize manifest read-modify-write ACROSS PROCESSES: an ensure and the
+    ensure children of dependency watch write concurrently, and two saving
+    near-simultaneously would lose one write (a lost indexed:true re-clones and
+    re-indexes the dependency). flock on a sibling lockfile; fcntl is stdlib on
+    omc's platforms (macOS/Linux)."""
     home.mkdir(parents=True, exist_ok=True)
     with open(home / "dependencies.json.lock", "w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
@@ -176,12 +161,6 @@ def _verdict(payload: dict) -> None:
     print(f"OMC_DEPENDENCY {json.dumps(payload)}", flush=True)
 
 
-def _progress(percent: int) -> None:
-    """OMC_PROGRESS: machine-readable progress on stdout (contract sibling of
-    OMC_DEPENDENCY). The watch parses these; rendering is the caller's job."""
-    print(f"OMC_PROGRESS {json.dumps({'percent': percent})}", flush=True)
-
-
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -227,7 +206,7 @@ def _resolve_commit(ctx: ToolContext, ref: DepRef, commit: str | None) -> str:
 
 
 def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
-    """Clone at commit + index. NO LLM — documentation is `document`'s job."""
+    """Clone at commit + index. No LLM."""
     try:
         ref = parse_git_url(git_url)
         commit = _resolve_commit(ctx, ref, commit)
@@ -243,7 +222,6 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
         return 1
     manifest = load_manifest(ctx.home)
     dest = checkout_dir(ctx.home, ref, commit)
-    docs = docs_dir(ctx.home, ref, commit)
     entry = manifest["dependencies"].get(ref.key, {}).get("commits", {}).get(commit)
     if entry and entry.get("indexed") and (dest / ".git").exists():
         _verdict(
@@ -253,9 +231,7 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
                 "key": ref.key,
                 "commit": commit,
                 "checkout": str(dest),
-                "docs": str(docs),
                 "indexed": True,
-                "documented": bool(entry.get("documented")),
             }
         )
         return 0
@@ -292,25 +268,20 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
         print(f"error: gitnexus analyze failed: {detail}", file=sys.stderr)
         return 1
     # Locked read-modify-write: clone+index spent minutes, during which a
-    # concurrent writer (e.g. a parallel document flipping documented:true) may
-    # have rewritten the manifest — and other writers may race the save itself.
-    documented = False
+    # concurrent writer (another ensure, e.g. a dependency watch child) may have
+    # rewritten the manifest — and other writers may race the save itself.
 
     def _record(manifest: dict) -> None:
-        nonlocal documented
         dep = manifest["dependencies"].setdefault(ref.key, {"url": ref.url, "commits": {}})
         dep["url"] = ref.url
         c = dep["commits"].setdefault(commit, {})
         c.update(
             {
                 "checkout": str(dest),
-                "docs": str(docs),
                 "indexed": True,
-                "documented": bool(c.get("documented")),
                 "created": c.get("created") or _now_iso(),
             }
         )
-        documented = c["documented"]
 
     update_manifest(ctx.home, _record)
     _verdict(
@@ -320,119 +291,7 @@ def run_ensure(ctx: ToolContext, git_url: str, commit: str | None) -> int:
             "key": ref.key,
             "commit": commit,
             "checkout": str(dest),
-            "docs": str(docs),
             "indexed": True,
-            "documented": documented,
-        }
-    )
-    return 0
-
-
-def run_document(ctx: ToolContext, ref_str: str) -> int:
-    """The LLM step, run separately from ensure (wiki is slow): gitnexus wiki
-    in the checkout, mirror .gitnexus/wiki -> the docs tree, flip documented."""
-    try:
-        key, commit, entry = resolve_ref(ctx.home, ref_str)
-    except OmcError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    # A falsy checkout must be treated as not-indexed BEFORE building a Path:
-    # Path("") is Path("."), and "./.git" would spuriously pass the guard
-    # whenever cwd happens to be a git repo (wrong-repo answers).
-    checkout = entry.get("checkout")
-    if not entry.get("indexed") or not checkout or not (Path(checkout) / ".git").exists():
-        print(
-            f"error: {_redact(key)}@{commit[:7]} is not indexed — {_ENSURE_HINT}",
-            file=sys.stderr,
-        )
-        return 1
-    dest = Path(checkout)
-    cfg = resolve.load_effective(ctx)  # may itself raise ConfigError (malformed
-    # config.yaml / secrets.yaml): run_internal's OmcError boundary prints it as
-    # `error: …` rc 1, exactly as store.load_global did — do not widen the try.
-    if cfg is None:
-        print("error: omc is not configured — run `omc configure` first.", file=sys.stderr)
-        return 1
-    try:
-        run = docs_llm_for(cfg)
-    except OmcError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    print(f"· via {run.label}", file=sys.stderr, flush=True)
-    wiki = dest / ".gitnexus" / "wiki"
-    tracker = PageCountTracker(wiki)
-    tracker.refresh()
-    total, done = tracker.state()
-    if total and done:
-        print(f"· resuming — {done}/{total} pages already on disk", file=sys.stderr, flush=True)
-    gn = GitNexusProgress()
-
-    def _percent() -> int | None:
-        # GitNexus's whole-run percent once it has spoken (fork prints
-        # GITNEXUS_PROGRESS lines when piped); the disk page count until then —
-        # and for an older GitNexus that never speaks, exactly today's behavior.
-        return gn.percent if gn.percent is not None else tracker.percent
-
-    last_pct = _percent()
-    if last_pct is not None:
-        _progress(last_pct)
-
-    def _beat() -> object:
-        # Heartbeat AND reporter: the same disk poll feeds the stall guard's
-        # token and emits OMC_PROGRESS whenever the integer percent moves. The
-        # supervising thread is the only one that prints to stdout.
-        nonlocal last_pct
-        token = tracker.beat()
-        pct = _percent()
-        if pct is not None and pct != last_pct:
-            last_pct = pct
-            _progress(pct)
-        return token
-
-    cp, stalled = ctx.run_supervised(
-        gitnexus_argv(ctx, *run.wiki_args),
-        cwd=dest,
-        heartbeat=_beat,
-        stall_after=_WIKI_STALL_SECONDS,
-        poll=_WIKI_POLL_SECONDS,
-        extra_env=run.extra_env,
-        on_line=lambda line: gn.feed(run.redact(line)),  # redact before progress stores detail
-    )
-    if stalled:
-        print(
-            f"error: gitnexus wiki stalled — no progress for {int(_WIKI_STALL_SECONDS)}s; killed",
-            file=sys.stderr,
-        )
-        return 1
-    if cp.returncode != 0:
-        # Exact-key redaction precedes the userinfo heuristic, then the helper
-        # removes progress noise and keeps the tail of the combined streams.
-        print(
-            f"error: gitnexus wiki failed (exit {cp.returncode}): "
-            f"{wiki_failure_excerpt(cp, lambda s: _redact(run.redact(s)))}",
-            file=sys.stderr,
-        )
-        return 1
-    if not wiki.is_dir():
-        print(f"error: gitnexus wiki directory missing: {wiki}", file=sys.stderr)
-        return 1
-    # entry["docs"] is always set by run_ensure; the fallback derives the same
-    # path straight from the key (host/owner/.../repo) without re-parsing a URL.
-    docs = Path(entry.get("docs") or (ctx.home / "gitnexus" / Path(key) / commit / "docs"))
-    mirror_dir(wiki, docs)
-    update_manifest(
-        ctx.home, lambda m: m["dependencies"][key]["commits"][commit].update(documented=True)
-    )
-    _progress(100)  # deterministic completion signal — the last poll may have missed the final page
-    _verdict(
-        {
-            "ok": True,
-            "key": key,
-            "commit": commit,
-            "checkout": str(dest),
-            "docs": str(docs),
-            "indexed": True,
-            "documented": True,
         }
     )
     return 0

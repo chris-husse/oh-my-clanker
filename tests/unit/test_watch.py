@@ -14,16 +14,16 @@ from omc.config.schema import Config
 from omc.toolctx import ToolContext
 from omc.watch import run_watch
 
-from ._stubs import DEFAULT_CODEX_CATALOG, make_codex_stub
+from ._stubs import DEFAULT_CODEX_CATALOG, host_bin, make_codex_stub
 
 
 @pytest.fixture(autouse=True)
-def _fast_wiki_poll(monkeypatch):
-    """The wiki runs under run_supervised; its disk-poll interval is the only
-    thing between a stubbed `node` exiting and the call returning."""
+def _fast_poll(monkeypatch):
+    """Narrated GitNexus steps run under run_supervised; its poll interval is the
+    only thing between a stubbed `node` exiting and the call returning."""
     import omc.gitnexus as gitnexus_mod
 
-    monkeypatch.setattr(gitnexus_mod, "_WIKI_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(gitnexus_mod, "_POLL_SECONDS", 0.05)
 
 
 @pytest.fixture(autouse=True)
@@ -40,24 +40,16 @@ def _current_models(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("documentation", "auto_build", "groups"),
-    [
-        (False, False, set()),
-        (True, False, {"docs"}),
-        (False, True, {"orchestrator"}),
-        (True, True, {"docs", "orchestrator"}),
-    ],
+    ("auto_build", "groups"),
+    [(False, set()), (True, {"orchestrator"})],
 )
 def test_watch_reconciles_selected_models_at_each_locked_tick(
-    tmp_path, monkeypatch, documentation, auto_build, groups
+    tmp_path, monkeypatch, auto_build, groups
 ):
     import omc.watch as watch_mod
 
     initial = Config()
-    initial.llm.docs.provider = "codex"
     remapped = [Config(), Config()]
-    for cfg in remapped:
-        cfg.llm.docs.provider = "codex"
     events = []
     calls = []
     locked = False
@@ -98,7 +90,6 @@ def test_watch_reconciles_selected_models_at_each_locked_tick(
         assert command_start is (not calls)
         assert cfg is (initial if not calls else remapped[0])
         assert cfg.llm.default == "claude"  # auto-build's orchestrator provider
-        assert cfg.llm.docs.provider == "codex"  # docs provider differs
         calls.append((cfg, leaves))
         events.append("reconcile")
         return remapped[len(calls) - 1]
@@ -133,7 +124,6 @@ def test_watch_reconciles_selected_models_at_each_locked_tick(
             object(),
             initial,
             interval=1,
-            enable_documentation=documentation,
             auto_build=auto_build,
         )
         == 0
@@ -191,7 +181,7 @@ def test_watch_first_tick_reconcile_failure_fails_loud(tmp_path, monkeypatch):
     ticks = []
     monkeypatch.setattr(watch_mod, "_tick", lambda *a, **k: ticks.append(1) or "synced")
     with pytest.raises(ConfigError, match="catalog unreachable"):
-        watch_mod.run_watch(object(), Config(), interval=1, enable_documentation=True)
+        watch_mod.run_watch(object(), Config(), interval=1, auto_build=True)
     assert ticks == []
     assert not instance.is_locked
 
@@ -200,14 +190,14 @@ def test_watch_later_tick_reconcile_failure_warns_and_keeps_previous_cfg(
     tmp_path, monkeypatch, capsys
 ):
     """Later ticks are warn-and-skip: one ✗ line, previous cfg kept, loop goes on."""
-    import omc.docsllm as docsllm
+    import omc.modelprobe as modelprobe
     import omc.watch as watch_mod
 
     _fake_watch_boot(monkeypatch, tmp_path)
     initial = Config()
     first = Config()
     third = Config()
-    outcomes = [first, docsllm.ProbeFailed("GET /v1/models returned 503"), third]
+    outcomes = [first, modelprobe.ProbeFailed("GET /v1/models returned 503"), third]
 
     def flaky_reconcile(ctx, cfg, groups, *, say, dry_run, report_current, command_start):
         assert command_start is (len(outcomes) == 3)
@@ -227,7 +217,7 @@ def test_watch_later_tick_reconcile_failure_warns_and_keeps_previous_cfg(
             raise KeyboardInterrupt
 
     monkeypatch.setattr(watch_mod.time, "sleep", stop_after_three_ticks)
-    assert watch_mod.run_watch(object(), initial, interval=1, enable_documentation=True) == 0
+    assert watch_mod.run_watch(object(), initial, interval=1, auto_build=True) == 0
     assert len(seen) == 3
     assert seen[0] is first
     assert seen[1] is first  # failed reconcile keeps the previous cfg
@@ -237,18 +227,18 @@ def test_watch_later_tick_reconcile_failure_warns_and_keeps_previous_cfg(
 
 
 def test_watch_reports_current_on_entry_and_recovery_only(tmp_path, monkeypatch, capsys):
-    import omc.docsllm as docsllm
+    import omc.modelprobe as modelprobe
     import omc.watch as watch_mod
 
     instance = _fake_watch_boot(monkeypatch, tmp_path)
     initial, first, third, fourth = Config(), Config(), Config(), Config()
-    outcomes = [first, docsllm.ProbeFailed("GET /v1/models returned 503"), third, fourth]
+    outcomes = [first, modelprobe.ProbeFailed("GET /v1/models returned 503"), third, fourth]
     requested = []
     starts = []
     inputs = []
 
     def recording_reconcile(ctx, cfg, groups, *, say, dry_run, report_current, command_start):
-        assert groups == {"docs"} and not dry_run
+        assert groups == {"orchestrator"} and not dry_run
         requested.append(report_current)
         starts.append(command_start)
         inputs.append(cfg)
@@ -268,7 +258,7 @@ def test_watch_reports_current_on_entry_and_recovery_only(tmp_path, monkeypatch,
             raise KeyboardInterrupt
 
     monkeypatch.setattr(watch_mod.time, "sleep", stop_after_four_ticks)
-    assert watch_mod.run_watch(object(), initial, interval=1, enable_documentation=True) == 0
+    assert watch_mod.run_watch(object(), initial, interval=1, auto_build=True) == 0
     assert requested == [True, False, True, False]
     assert starts == [True, False, False, False]  # recovery re-reports; it never re-refreshes
     assert all(
@@ -295,7 +285,7 @@ def test_watch_once_requests_current_report(tmp_path, monkeypatch):
     requested = []
 
     def recording_reconcile(ctx, current, groups, *, say, dry_run, report_current, command_start):
-        assert current is cfg and groups == {"docs"} and not dry_run
+        assert current is cfg and groups == {"orchestrator"} and not dry_run
         assert command_start
         requested.append(report_current)
         return current
@@ -304,7 +294,7 @@ def test_watch_once_requests_current_report(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(watch_mod, "_tick", lambda ctx, current, root, **k: seen.append(current))
 
-    assert watch_mod.run_watch(object(), cfg, once=True, enable_documentation=True) == 0
+    assert watch_mod.run_watch(object(), cfg, once=True, auto_build=True) == 0
     assert requested == [True]
     assert len(seen) == 1 and seen[0] is cfg
     assert not instance.is_locked
@@ -384,6 +374,11 @@ def _push_remote_edit(origin, tmp_path):
     _git("push", "-q", "origin", "main", cwd=other)
 
 
+def _stub_tools():
+    """Real git/mkdir/rm by resolved absolute path (stubs may run on a restricted PATH)."""
+    return (shlex.quote(host_bin(t)) for t in ("git", "mkdir", "rm"))
+
+
 def _ctx_with_node_stub(tmp_path, home):
     """Real git on PATH + recording `node`/`wt`/`claude` stubs + a fake built CLI."""
     bindir = tmp_path / "bin"
@@ -394,17 +389,15 @@ def _ctx_with_node_stub(tmp_path, home):
     # recomputed verdict can flip to fresh. Restricted PATH: shell builtins and
     # absolute paths only; `echo ok` stays unconditional so ensure_gitnexus's
     # --version probe passes.
+    git, mkdir, rm = _stub_tools()
     node.write_text(
         "#!/bin/sh\n"
         f'echo "$@" >> "{calls}"\n'
         'case "$*" in\n'
-        '  *" clean --force") /bin/rm -rf .gitnexus ;;\n'
-        '  *" analyze --skip-agents-md --skip-skills"*) /bin/mkdir -p .gitnexus; '
+        f'  *" clean --force") {rm} -rf .gitnexus ;;\n'
+        f'  *" analyze --skip-agents-md --skip-skills"*) {mkdir} -p .gitnexus; '
         'printf \'{"branch":"main","lastCommit":"%s","repoPath":"%s"}\' '
-        '"$(/usr/bin/git rev-parse HEAD)" "$PWD" > .gitnexus/meta.json ;;\n'
-        '  *" wiki --provider"*) /bin/mkdir -p .gitnexus/wiki; '
-        'printf \'{"fromCommit":"%s","moduleFiles":{}}\' "$(/usr/bin/git rev-parse HEAD)" '
-        "> .gitnexus/wiki/meta.json; printf 'page' > .gitnexus/wiki/index.md ;;\n"
+        f'"$({git} rev-parse HEAD)" "$PWD" > .gitnexus/meta.json ;;\n'
         "esac\n"
         "echo ok\nexit 0\n"
     )
@@ -424,7 +417,7 @@ def _ctx_with_node_stub(tmp_path, home):
     return ToolContext.from_env(env), calls
 
 
-def _run_once(repo, ctx, *, enable_documentation=False, rebase=False):
+def _run_once(repo, ctx, *, rebase=False):
     old = os.getcwd()
     os.chdir(repo)
     try:
@@ -433,7 +426,6 @@ def _run_once(repo, ctx, *, enable_documentation=False, rebase=False):
             Config(),
             interval=1,
             once=True,
-            enable_documentation=enable_documentation,
             rebase=rebase,
         )
     finally:
@@ -445,7 +437,7 @@ def test_loop_tick_up_to_date_does_not_reindex(tmp_path, capsys):
 
     _, repo = _repo_with_origin(tmp_path)
     ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False, last=None)
+    _tick(ctx, Config(), str(repo), force_refresh=False, last=None)
     assert "up to date" in capsys.readouterr().err
     assert not calls.exists()  # loop mode: nothing new -> no reindex
 
@@ -467,28 +459,6 @@ def test_once_refreshes_index_even_when_up_to_date(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "up to date" in err
     assert "analyze --skip-agents-md --skip-skills" in calls.read_text()
-
-
-def test_once_with_documentation_refreshes_docs_even_when_up_to_date(tmp_path, capsys):
-    """--once with docs on a fresh index whose wiki is BEHIND regenerates the wiki."""
-    _, repo = _repo_with_origin(tmp_path)
-    first = _git_out(repo, "rev-parse", "HEAD")
-    (repo / "g.txt").write_text("two\n")
-    _git("add", ".", cwd=repo)
-    _git("commit", "-qm", "c2", cwd=repo)
-    _git("push", "-q", "origin", "main", cwd=repo)
-    _seed_fresh_index(repo)  # index at the new HEAD
-    w = repo / ".gitnexus" / "wiki"
-    w.mkdir()
-    (w / "meta.json").write_text(json.dumps({"fromCommit": first}))  # docs one commit back
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    assert _run_once(repo, ctx, enable_documentation=True) == 0
-    recorded = calls.read_text()
-    # docs floor is passed explicitly (never the session model, and explicit
-    # so gitnexus's own cached model can't resurrect a stale choice)
-    assert "wiki --provider claude" in recorded
-    assert "--model sonnet" in recorded
-    assert "analyze" not in recorded  # index was fresh: only the docs ran
 
 
 def test_once_on_fresh_snapshot_narrates_current_and_calls_nothing(tmp_path, capsys):
@@ -513,17 +483,7 @@ def test_tick_syncs_and_reindexes(tmp_path, capsys):
     assert (repo / "new.txt").exists()  # ff-merge actually happened
     recorded = calls.read_text()
     assert "analyze --skip-agents-md --skip-skills" in recorded
-    assert "wiki" not in recorded  # documentation is opt-in
-
-
-def test_tick_documentation_gated_by_flag(tmp_path, capsys):
-    origin, repo = _repo_with_origin(tmp_path)
-    _push_remote_commit(origin, tmp_path)
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    assert _run_once(repo, ctx, enable_documentation=True) == 0
-    recorded = calls.read_text()
-    assert "analyze" in recorded
-    assert "wiki --provider claude" in recorded
+    assert "wiki" not in recorded  # watch never runs the wiki
 
 
 def test_tick_refuses_off_branch(tmp_path, capsys):
@@ -559,7 +519,6 @@ def _tick_rebase(ctx, repo, last=None):
         ctx,
         Config(),
         str(repo),
-        enable_documentation=False,
         force_refresh=False,
         last=last,
         rebase=True,
@@ -730,7 +689,7 @@ def test_watch_installs_gitnexus_when_missing(tmp_path, monkeypatch):
     old = os.getcwd()
     os.chdir(repo)
     try:
-        rc = run_watch(ctx, Config(), interval=1, once=True, enable_documentation=False)
+        rc = run_watch(ctx, Config(), interval=1, once=True)
     finally:
         os.chdir(old)
     assert calls == [True]  # ensure_gitnexus was invoked
@@ -760,7 +719,7 @@ def test_watch_aborts_when_gitnexus_install_fails(tmp_path, monkeypatch):
     old = os.getcwd()
     os.chdir(repo)
     try:
-        rc = run_watch(ctx, Config(), interval=1, once=True, enable_documentation=False)
+        rc = run_watch(ctx, Config(), interval=1, once=True)
     finally:
         os.chdir(old)
     assert rc == 1  # aborted on the failed prerequisite
@@ -799,9 +758,7 @@ def _run_loop(repo, ctx, ticks, between=None, cfg=None, **kw):
     old_cwd = os.getcwd()
     os.chdir(repo)
     try:
-        return run_watch(
-            ctx, cfg or Config(), interval=1, once=False, enable_documentation=False, **kw
-        )
+        return run_watch(ctx, cfg or Config(), interval=1, once=False, **kw)
     finally:
         os.chdir(old_cwd)
         watch_mod.time.sleep = real_sleep
@@ -1196,7 +1153,7 @@ def test_busy_lock_held_while_hook_runs_and_instance_held_while_idle(tmp_path, c
     hook.parent.mkdir(parents=True, exist_ok=True)
     # the hook runs INSIDE the busy window: probe both locks from there
     hook.write_text(
-        "#!/bin/bash\n"
+        f"#!{host_bin('bash')}\n"
         f'python3 -c "\n'
         f"import fcntl\n"
         f"out = open('{probe_out}', 'w')\n"
@@ -1264,25 +1221,26 @@ def _seed_docs_mirror(repo):
 
 def _analyze_side_effects(*, move_to: str | None = None, rogue_stamp: str | None = None):
     """GitNexus refuses a mismatched explicit label before writing anything."""
+    git, mkdir, _ = _stub_tools()
     move = (
         "if [ ! -f .git/analyze-moved ]; then : > .git/analyze-moved; "
-        f"/usr/bin/git switch -q {shlex.quote(move_to)} || exit 90; fi; "
+        f"{git} switch -q {shlex.quote(move_to)} || exit 90; fi; "
         if move_to
         else ""
     )
     return (
         move + 'label=""; while [ "$#" -gt 0 ]; do '
         'if [ "$1" = --branch ]; then shift; label="$1"; fi; shift; done; '
-        "actual=$(/usr/bin/git rev-parse --abbrev-ref HEAD); "
+        f"actual=$({git} rev-parse --abbrev-ref HEAD); "
         'if [ -n "$label" ] && [ "$label" != "$actual" ]; then '
         'printf \'%s\\n\' "--branch \\"$label\\" does not match the checked-out branch '
         '\\"$actual\\". Check out \\"$label\\" before indexing it, or omit --branch '
         'to index the current branch." >&2; exit 1; fi; '
         "stamp=${label:-$actual}; "
         + (f"stamp={shlex.quote(rogue_stamp)}; " if rogue_stamp else "")
-        + "/bin/mkdir -p .gitnexus; "
+        + f"{mkdir} -p .gitnexus; "
         'printf \'{"branch":"%s","lastCommit":"%s","repoPath":"%s"}\' '
-        '"$stamp" "$(/usr/bin/git rev-parse HEAD)" "$PWD" > .gitnexus/meta.json'
+        f'"$stamp" "$({git} rev-parse HEAD)" "$PWD" > .gitnexus/meta.json'
     )
 
 
@@ -1298,7 +1256,8 @@ def _ctx_with_healing_node_stub(
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     calls = bindir / "node.calls"
-    clean_cmd = "/bin/rm -rf .gitnexus" if clean_removes else ":"
+    _, _, rm = _stub_tools()
+    clean_cmd = f"{rm} -rf .gitnexus" if clean_removes else ":"
     node = bindir / "node"
     node.write_text(
         "#!/bin/sh\n"
@@ -1308,10 +1267,6 @@ def _ctx_with_healing_node_stub(
         '  *" analyze --skip-agents-md --skip-skills"*) '
         + _analyze_side_effects(move_to=move_to, rogue_stamp=rogue_stamp)
         + " ;;\n"
-        '  *" wiki --provider"*) /bin/mkdir -p .gitnexus/wiki; '
-        'printf \'{"fromCommit":"%s","moduleFiles":{}}\' "$(/usr/bin/git rev-parse HEAD)" '
-        "> .gitnexus/wiki/meta.json; "
-        "printf 'regenerated from the healed graph' > .gitnexus/wiki/index.md ;;\n"
         "esac\n"
         "echo ok\nexit 0\n"
     )
@@ -1340,7 +1295,7 @@ def test_refresh_heals_inverted_store(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "owned by 'feature/omc-v1', not 'main' — destroying and rebuilding" in err
     assert "✓ index rebuilt for main" in err
-    assert "docs mirror cleared — run omc watch --once --enable-documentation" in err
+    assert "docs mirror" not in err
     recorded = calls.read_text()
     assert "clean --force" in recorded
     assert "analyze --skip-agents-md --skip-skills" in recorded
@@ -1348,7 +1303,7 @@ def test_refresh_heals_inverted_store(tmp_path, capsys):
     assert recorded.index("clean --force") < recorded.index("analyze")
     # post-conditions actually hold
     assert json.loads((repo / ".gitnexus" / "meta.json").read_text())["branch"] == "main"
-    assert not docs.exists()
+    assert (docs / "stale.md").exists()  # omc deletes no leftover docs mirror
     # healed path must not ALSO run the incremental analyze (exactly one analyze)
     assert recorded.count("analyze --skip-agents-md --skip-skills") == 1
 
@@ -1373,29 +1328,30 @@ def _ctx_with_shared_store_node_stub(
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, home)
     node = tmp_path / "bin" / "node"
     shared = tmp_path / "shared-store"
+    git, mkdir, rm = _stub_tools()
     node.write_text(
         "#!/bin/sh\n"
         f'printf "%s|%s\\n" "$GITNEXUS_SHARED_STORE" "$*" >> "{calls}"\n'
         'shift\ncase "$*" in\n'
         '  "clean --gc --force") '
-        f'/bin/rm -rf "{shared}"; printf %s {shlex.quote(gc_output)}; exit {gc_exit} ;;\n'
+        f'{rm} -rf "{shared}"; printf %s {shlex.quote(gc_output)}; exit {gc_exit} ;;\n'
         '  "clean --force") '
         'if [ "$GITNEXUS_SHARED_STORE" = off ] && [ ! -f .gitnexus/store.json ]; then '
-        "/bin/rm -rf .gitnexus; else "
-        f'/bin/rm -rf "{shared}" .gitnexus/store.json; fi ;;\n'
+        f"{rm} -rf .gitnexus; else "
+        f'{rm} -rf "{shared}" .gitnexus/store.json; fi ;;\n'
         '  "analyze --skip-agents-md --skip-skills"*) '
         + ('echo "registration failed"; exit 9; ' if analyze_fails else "")
-        + "/bin/mkdir -p .gitnexus; "
+        + f"{mkdir} -p .gitnexus; "
         'if [ "$GITNEXUS_SHARED_STORE" = off ]; then '
-        "/bin/rm -f .gitnexus/store.json; target=.gitnexus/meta.json; else "
-        f'/bin/mkdir -p "{shared}"; target="{shared}/meta.json"; '
+        f"{rm} -f .gitnexus/store.json; target=.gitnexus/meta.json; else "
+        f'{mkdir} -p "{shared}"; target="{shared}/meta.json"; '
         f"printf '%s' '{{\"storePath\":\"{shared}\"}}' > .gitnexus/store.json; fi; "
         'printf \'{"branch":"main","lastCommit":"%s","repoPath":"%s"}\' '
-        '"$(/usr/bin/git rev-parse HEAD)" "$PWD" > "$target" ;;\n'
+        f'"$({git} rev-parse HEAD)" "$PWD" > "$target" ;;\n'
         "esac\necho ok\n"
     )
     ctx.env = {**ctx.env, "PATH": str(tmp_path / "bin"), "GITNEXUS_SHARED_STORE": "on"}
-    ctx.git_bin = "/usr/bin/git"
+    ctx.git_bin = host_bin("git")
     return ctx, calls
 
 
@@ -1419,63 +1375,6 @@ def test_heal_wrong_stamp_never_claims_success(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "✗ rebuilt index is not owned by 'main' — not claiming success" in err
     assert "✓ index rebuilt" not in err
-
-
-def test_heal_with_documentation_regenerates_wiki(tmp_path, capsys):
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_inverted_store(repo)
-    docs = _seed_docs_mirror(repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
-    assert _run_once(repo, ctx, enable_documentation=True) == 0
-    recorded = calls.read_text()
-    assert "clean --force" in recorded
-    assert "wiki --provider claude" in recorded
-    err = capsys.readouterr().err
-    assert "docs mirror cleared — run omc watch" not in err  # hint only when docs are OFF
-    # the mirror is REBUILT from the healed graph, not left holding stale pages
-    assert "✓ documentation refreshed" in err
-    assert (docs / "index.md").read_text() == "regenerated from the healed graph"
-    assert not (docs / "stale.md").exists()
-
-
-def test_heal_without_a_docs_mirror_omits_the_regenerate_hint(tmp_path, capsys):
-    """The hint is a claim about the filesystem ("cleared") — it must not print
-    when there was no mirror to clear."""
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_inverted_store(repo)  # deliberately no docs mirror
-    ctx, _ = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
-    assert _run_once(repo, ctx) == 0
-    err = capsys.readouterr().err
-    assert "✓ index rebuilt for main" in err
-    assert "docs mirror cleared — run omc watch" not in err
-
-
-def test_heal_survives_an_undeletable_docs_mirror(tmp_path, capsys, monkeypatch):
-    """Watch doctrine: a tick action warns and skips, it NEVER raises out of the
-    loop (run_watch catches only KeyboardInterrupt). A stuck docs mirror must
-    also not abort the rebuild — the index is the thing watch exists to keep
-    fresh, and the next documentation-enabled run re-mirrors over the leftovers."""
-    import omc.gitnexus as gitnexus_mod
-
-    _, repo = _repo_with_origin(tmp_path)
-    _seed_inverted_store(repo)
-    _seed_docs_mirror(repo)
-    ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
-
-    def boom(_root):
-        raise OSError("permission denied")
-
-    monkeypatch.setattr(gitnexus_mod, "clear_docs_mirror", boom)
-    assert _run_once(repo, ctx) == 0
-    err = capsys.readouterr().err
-    assert "✗ could not delete the stale docs mirror: permission denied" in err
-    assert "✓ index rebuilt for main" in err  # heal continued past the mirror failure
-    # never contradict the warning: the stale mirror is still there
-    assert "docs mirror cleared — run omc watch" not in err
-    assert (repo / ".omc" / "docs" / "gitnexus" / "docs" / "stale.md").exists()
-    recorded = calls.read_text()
-    assert "clean --force" in recorded
-    assert "analyze --skip-agents-md --skip-skills" in recorded
 
 
 def _stale_index(repo):
@@ -1510,7 +1409,7 @@ def test_healed_token_returned_by_tick(tmp_path, capsys):
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    tok = _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False)
+    tok = _tick(ctx, Config(), str(repo), force_refresh=False)
     assert tok == "healed"
 
 
@@ -1521,12 +1420,10 @@ def test_persistently_stale_verdict_is_not_retried_every_tick(tmp_path, capsys):
     _stale_index(repo)
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     _foreign_stamping_stub(tmp_path)
-    first = _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False)
+    first = _tick(ctx, Config(), str(repo), force_refresh=False)
     assert first.startswith("knowledge-stale:") and "index-foreign" in first
     n = calls.read_text().count("analyze")
-    second = _tick(
-        ctx, Config(), str(repo), enable_documentation=False, force_refresh=False, last=first
-    )
+    second = _tick(ctx, Config(), str(repo), force_refresh=False, last=first)
     assert second == first
     assert calls.read_text().count("analyze") == n  # ladder skipped: same codes
 
@@ -1536,9 +1433,7 @@ def test_pending_reset_runs_on_fresh_up_to_date_tick(tmp_path, capsys):
 
     _, repo = _repo_with_origin(tmp_path)
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
-    tok = _tick(
-        ctx, Config(), str(repo), enable_documentation=False, force_refresh=False, reset=True
-    )
+    tok = _tick(ctx, Config(), str(repo), force_refresh=False, reset=True)
     assert tok == "healed"
     recorded = calls.read_text()
     assert recorded.index("clean --force") < recorded.index("analyze")
@@ -1559,7 +1454,7 @@ def test_reset_flag_consumed_after_sync_once(tmp_path, capsys):
     recorded = calls.read_text()
     assert recorded.count("clean --force") == 1
     assert recorded.count("analyze --skip-agents-md --skip-skills") == 1
-    assert not docs.exists()
+    assert (docs / "stale.md").exists()  # the reset leaves a leftover docs mirror alone
     assert (repo / "new.txt").exists()  # sync happened first: analyze indexed the NEW head
     meta = json.loads((repo / ".gitnexus" / "meta.json").read_text())
     assert meta["lastCommit"] == _git_out(repo, "rev-parse", "HEAD")
@@ -1637,16 +1532,6 @@ def test_reset_refuses_off_base_branch_before_any_node_call(tmp_path, capsys):
     assert list((repo / ".git").glob("omc-watch*.lock")) == []  # and before the instance lock
 
 
-def test_wiki_reasons_silent_without_documentation(tmp_path, capsys):
-    from omc.watch import _tick
-
-    _, repo = _repo_with_origin(tmp_path)  # fresh index, no wiki
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    tok = _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False)
-    assert tok == "up-to-date" and not calls.exists()  # _tick alone never probes --version
-    assert "docs" not in capsys.readouterr().err
-
-
 def test_tick_narrates_busy_lock_contention_once(tmp_path, capsys):
     from omc.watchlock import busy_lock
 
@@ -1660,6 +1545,34 @@ def test_tick_narrates_busy_lock_contention_once(tmp_path, capsys):
     p.wait()
     err = capsys.readouterr().err
     assert err.count("· waiting for another omc knowledge refresh to finish") == 1
+
+
+def test_watch_rejects_enable_documentation():
+    from omc.cli import build_parser
+
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["watch", "--enable-documentation"])
+    assert exc.value.code == 2
+
+
+def test_reset_gitnexus_help_names_the_whole_store():
+    import argparse
+
+    from omc.cli import build_parser
+
+    parser = build_parser()
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    action = next(
+        action
+        for action in subparsers.choices["watch"]._actions
+        if "--reset-gitnexus" in action.option_strings
+    )
+    assert "wiki" not in action.help and "docs" not in action.help
+    # `gitnexus clean --force` removes the whole store directory, not just the index
+    assert "Force-clear the GitNexus store (`.gitnexus/`) and rebuild it" in action.help
+    assert "primary must be on the base branch" in action.help
 
 
 def test_watch_reset_gitnexus_flag_parses():
@@ -1694,14 +1607,12 @@ def test_shared_store_watch_convergence_and_quiet_failure(tmp_path, capsys, monk
     ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
     if not policy:
         monkeypatch.setattr(ctx, "child_env", lambda: dict(ctx.env))
-    first = _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=False)
+    first = _tick(ctx, Config(), str(repo), force_refresh=False)
     assert first == ("healed" if policy else "knowledge-stale:index-behind")
     recorded = calls.read_text()
     if not policy:
         assert "clean did not remove the index" in capsys.readouterr().err
-        second = _tick(
-            ctx, Config(), str(repo), enable_documentation=False, force_refresh=False, last=first
-        )
+        second = _tick(ctx, Config(), str(repo), force_refresh=False, last=first)
         assert second == first
         assert calls.read_text() == recorded
     else:
@@ -1712,11 +1623,12 @@ def test_shared_store_watch_convergence_and_quiet_failure(tmp_path, capsys, monk
 def _move_on_fetch(ctx, tmp_path, repo):
     wrapper = tmp_path / "bin" / "moving-git"
     marker = tmp_path / "fetch-moved"
+    git, _, _ = _stub_tools()
     wrapper.write_text(
         "#!/bin/sh\n"
         f'if [ "$1" = fetch ] && [ ! -f "{marker}" ]; then '
-        f': > "{marker}"; /usr/bin/git -C "{repo}" switch -q feature/x || exit 90; fi\n'
-        'exec /usr/bin/git "$@"\n'
+        f': > "{marker}"; {git} -C "{repo}" switch -q feature/x || exit 90; fi\n'
+        f'exec {git} "$@"\n'
     )
     wrapper.chmod(0o755)
     ctx.git_bin = str(wrapper)
@@ -1740,7 +1652,7 @@ def test_move_after_guard_aborts_before_node(tmp_path, capsys, force_refresh):
 
     repo, docs, ctx, calls = _movement_fixture(tmp_path)
     _move_on_fetch(ctx, tmp_path, repo)
-    token = _tick(ctx, Config(), str(repo), enable_documentation=False, force_refresh=force_refresh)
+    token = _tick(ctx, Config(), str(repo), force_refresh=force_refresh)
     assert token == "off-branch:feature/x"
     assert not calls.exists()
     assert capsys.readouterr().err.count("✗ primary moved") == 1
@@ -1752,14 +1664,14 @@ def test_move_during_incremental_preserves_snapshot(tmp_path, capsys):
     meta = repo / ".gitnexus/meta.json"
     before = meta.read_bytes()
     sentinel = (docs / "stale.md").read_bytes()
-    assert _run_once(repo, ctx, enable_documentation=True) == 0
+    assert _run_once(repo, ctx) == 0
     assert meta.read_bytes() == before
     assert (docs / "stale.md").read_bytes() == sentinel
     recorded = calls.read_text()
     err = capsys.readouterr().err
     assert "✗ primary moved" in err
-    assert " clean " not in recorded and " wiki " not in recorded
-    for line in ("destroying and rebuilding", "✓ knowledge is current", "✓ docs mirror restored"):
+    assert " clean " not in recorded
+    for line in ("destroying and rebuilding", "✓ knowledge is current"):
         assert line not in err
     assert not (repo / "hook-ran.txt").exists()
 
@@ -1794,28 +1706,7 @@ def test_reset_move_before_write_remains_pending(tmp_path, capsys):
     assert capsys.readouterr().err.count("· reset pending") == 1
     assert calls.read_text().count(" clean --force") == 1
     assert json.loads(meta.read_text())["lastCommit"] == _git_out(repo, "rev-parse", "HEAD")
-    assert not docs.exists()
-    assert not (repo / "hook-ran.txt").exists()
-
-
-def test_move_before_wiki_aborts(tmp_path, capsys, monkeypatch):
-    import omc.gitnexus as gn
-
-    repo, docs, ctx, calls = _movement_fixture(tmp_path)
-    _seed_fresh_index(repo)
-    run_wiki = gn._run_wiki
-
-    def move_then_wiki(*args, **kw):
-        _git("switch", "feature/x", cwd=repo)
-        return run_wiki(*args, **kw)
-
-    monkeypatch.setattr(gn, "_run_wiki", move_then_wiki)
-    assert _run_once(repo, ctx, enable_documentation=True) == 0
-    err = capsys.readouterr().err
-    assert "✗ primary moved" in err
-    assert " wiki " not in calls.read_text()
-    assert "✓ knowledge is current" not in err and "✓ docs mirror restored" not in err
-    assert (docs / "stale.md").read_text() == "cites deleted files"
+    assert (docs / "stale.md").exists()
     assert not (repo / "hook-ran.txt").exists()
 
 
@@ -1904,7 +1795,7 @@ def test_synced_move_before_reset_keeps_reset_pending(tmp_path, capsys, monkeypa
         assert calls.read_text().count(" clean --force") == 1
         assert err.count("· reset pending") == 1
         assert json.loads(meta.read_text())["lastCommit"] == _git_out(repo, "rev-parse", "HEAD")
-        assert not docs.exists()
+        assert (docs / "stale.md").exists()
     assert (repo / "hook-ran.txt").read_text().strip() == "synced"
 
 

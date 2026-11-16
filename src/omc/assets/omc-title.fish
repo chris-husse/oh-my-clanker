@@ -62,7 +62,11 @@ function __omc_title_dispatch --argument-names outcome
         end
     end
     set -l dir $__omc_title_home/title-request
-    test -d $dir; or command /bin/mkdir -p $dir 2>/dev/null; or return 0
+    # mkdir through PATH, like git and omc: hosts such as NixOS have no /bin/mkdir. The
+    # `command -s` guard keeps an absent mkdir silent, as for git.
+    if not test -d $dir
+        command -s mkdir >/dev/null 2>&1; and command mkdir -p $dir 2>/dev/null; or return 0
+    end
     set -l request $dir/$__omc_title_uuid-$fish_pid
     # Builtin echo + redirection only; the helper serializes and re-reads (omc title apply).
     echo $outcome >$request; or return 0

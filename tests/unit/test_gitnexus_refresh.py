@@ -2,7 +2,7 @@
 Judged by recomputing the verdict, never by exit codes."""
 
 import json
-import shutil
+import shlex
 import stat
 
 import pytest
@@ -11,6 +11,7 @@ from omc.config.schema import Config, GitNexusConfig
 from omc.gitnexus import refresh_knowledge
 from omc.toolctx import ToolContext
 
+from ._stubs import host_bin
 from .test_watch import (
     _ctx_with_healing_node_stub,
     _ctx_with_node_stub,
@@ -24,10 +25,10 @@ REPO_PATH_SLOT = '"repoPath":"%s"'
 
 
 @pytest.fixture(autouse=True)
-def _fast_wiki_poll(monkeypatch):
+def _fast_poll(monkeypatch):
     import omc.gitnexus as gitnexus_mod
 
-    monkeypatch.setattr(gitnexus_mod, "_WIKI_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(gitnexus_mod, "_POLL_SECONDS", 0.05)
 
 
 def _stale_index(repo):
@@ -53,7 +54,7 @@ def _run(ctx, repo, **kw):
 def test_fresh_snapshot_narrates_current_and_calls_nothing(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, documentation=False, reset=False)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh and not calls.exists()  # refresh_knowledge itself never probes --version
     assert "✓ knowledge is current" in said
 
@@ -62,7 +63,7 @@ def test_stale_index_heals_with_one_incremental_analyze(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, documentation=False, reset=False)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     recorded = calls.read_text()
     assert [line.split()[1:] for line in recorded.splitlines() if " analyze " in line] == [
@@ -77,7 +78,7 @@ def test_analyze_that_leaves_it_stale_escalates_to_clean(tmp_path):
     _stale_index(repo)
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     _foreign_stamping_stub(tmp_path)
-    v, said = _run(ctx, repo, documentation=False, reset=False)
+    v, said = _run(ctx, repo, reset=False)
     recorded = calls.read_text()
     assert "clean --force" in recorded
     assert recorded.index("analyze") < recorded.index("clean --force")
@@ -100,7 +101,7 @@ def test_failed_analyze_exit_code_is_narrated_but_verdict_decides(tmp_path, stil
     node.write_text(node.read_text().replace("echo ok\nexit 0\n", "echo ok\nexit 7\n"))
     if still_stale:
         _foreign_stamping_stub(tmp_path)
-    v, said = _run(ctx, repo, documentation=False, reset=False)
+    v, said = _run(ctx, repo, reset=False)
     assert any(s.startswith("✗ analyze failed") for s in said)
     assert v.fresh is not still_stale
     assert ("clean --force" in calls.read_text()) is still_stale
@@ -112,7 +113,7 @@ def test_inverted_store_destroys_first_exactly_one_analyze(tmp_path):
         json.dumps({"branch": "feature/x", "lastCommit": "old"})
     )
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, documentation=False, reset=False)
+    v, said = _run(ctx, repo, reset=False)
     recorded = calls.read_text()
     assert recorded.index("clean --force") < recorded.index("analyze")
     assert [line.split()[1:] for line in recorded.splitlines() if " analyze " in line] == [
@@ -121,24 +122,23 @@ def test_inverted_store_destroys_first_exactly_one_analyze(tmp_path):
     assert "✓ index rebuilt for main" in said and v.fresh
 
 
-def test_reset_clears_mirror_and_rebuilds(tmp_path):
+def test_reset_leaves_a_leftover_docs_mirror_alone(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     docs = repo / ".omc" / "docs" / "gitnexus" / "docs"
     docs.mkdir(parents=True)
     (docs / "stale.md").write_text("x")
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, documentation=False, reset=True)
+    v, said = _run(ctx, repo, reset=True)
     recorded = calls.read_text()
     assert recorded.index("clean --force") < recorded.index("analyze")
-    assert not docs.exists() and v.fresh
-    hint = "· docs mirror cleared — run omc watch --once --enable-documentation to regenerate"
-    assert hint in said
+    assert v.fresh and (docs / "stale.md").read_text() == "x"
+    assert not any("docs mirror" in s for s in said)
 
 
 def test_reset_with_failed_clean_aborts_before_analyze(tmp_path):
     _, repo = _repo_with_origin(tmp_path)  # fresh fixture: the FAILED clean is the story
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", clean_removes=False)
-    v, said = _run(ctx, repo, documentation=False, reset=True)
+    v, said = _run(ctx, repo, reset=True)
     assert any(s.startswith("✗ clean did not remove the index") for s in said)
     assert "analyze" not in calls.read_text()
     # The clean failed, so the fixture's index survived untouched — and it was
@@ -146,306 +146,12 @@ def test_reset_with_failed_clean_aborts_before_analyze(tmp_path):
     assert v.fresh
 
 
-def _seed_wiki_and_mirror(repo):
-    """A wiki whose fromCommit is HEAD (verdict-fresh) plus its docs mirror."""
-    wiki = repo / ".gitnexus" / "wiki"
-    wiki.mkdir(parents=True, exist_ok=True)
-    (wiki / "meta.json").write_text(
-        json.dumps({"fromCommit": _git_out(repo, "rev-parse", "HEAD"), "moduleFiles": {}})
-    )
-    (wiki / "index.md").write_text("page")
+def _seed_leftover_docs(repo):
+    """A docs mirror left on disk by an older omc; nothing reads or deletes it."""
     docs = repo / ".omc" / "docs" / "gitnexus" / "docs"
     docs.mkdir(parents=True)
     (docs / "index.md").write_text("page")
     return docs
-
-
-def test_reset_with_failed_clean_restores_the_docs_mirror(tmp_path):
-    """The mirror is cleared BEFORE `clean`; a clean that leaves the index intact
-    keeps the verdict FRESH, so no wiki reason would ever re-mirror and the docs
-    /omc:explain reads would stay deleted forever. A fresh verdict must imply the
-    mirror's presence (spec §2)."""
-    _, repo = _repo_with_origin(tmp_path)
-    docs = _seed_wiki_and_mirror(repo)
-    ctx, _calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", clean_removes=False)
-    v, said = _run(ctx, repo, documentation=True, reset=True)
-    assert any(s.startswith("✗ clean did not remove the index") for s in said)
-    assert v.fresh  # index and wiki survived the failed clean: honest verdict
-    assert (docs / "index.md").read_text() == "page"
-    assert "✓ docs mirror restored" in said
-
-
-def test_documentation_off_restores_the_cleared_mirror(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
-    docs = _seed_wiki_and_mirror(repo)
-    ctx, _ = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home", clean_removes=False)
-    v, said = _run(ctx, repo, documentation=False, reset=True)
-    assert v.fresh
-    assert (docs / "index.md").read_text() == "page"
-    assert said.count("✓ docs mirror restored") == 1
-    assert not any("docs mirror cleared" in line for line in said)
-
-
-@pytest.mark.parametrize("meta", [None, "{", '{"fromCommit":"old"}'])
-def test_documentation_off_missing_mirror_requires_readable_metadata(tmp_path, meta):
-    _, repo = _repo_with_origin(tmp_path)
-    docs = _seed_wiki_and_mirror(repo)
-    shutil.rmtree(docs)
-    path = repo / ".gitnexus/wiki/meta.json"
-    if meta is None:
-        path.unlink()
-    else:
-        path.write_text(meta)
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, documentation=False, reset=False)
-    assert v.fresh and not calls.exists()
-    assert docs.exists() == (meta == '{"fromCommit":"old"}')
-    assert ("✓ docs mirror restored" in said) == docs.exists()
-
-
-@pytest.mark.parametrize("documentation", [False, True])
-def test_initially_fresh_restores_only_absent_mirror(tmp_path, documentation):
-    _, repo = _repo_with_origin(tmp_path)
-    docs = _seed_wiki_and_mirror(repo)
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    (docs / "index.md").write_text("preserve")
-    v, said = _run(ctx, repo, documentation=documentation, reset=False)
-    assert v.fresh and (docs / "index.md").read_text() == "preserve"
-    assert "✓ docs mirror restored" not in said
-    shutil.rmtree(docs)
-    v, said = _run(ctx, repo, documentation=documentation, reset=False)
-    assert v.fresh and not calls.exists()
-    assert (docs / "index.md").read_text() == "page"
-    assert said.count("✓ docs mirror restored") == 1
-
-
-def test_documentation_off_never_computes_wiki_reasons(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)  # index fresh, no wiki at all
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, documentation=False, reset=False)
-    assert v.fresh and not calls.exists()
-    assert not any("docs" in s for s in said if s.startswith("✗"))
-
-
-def test_wiki_behind_runs_wiki_supervised_and_mirrors(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
-    w = repo / ".gitnexus" / "wiki"
-    w.mkdir()
-    (w / "meta.json").write_text(json.dumps({"fromCommit": "b" * 40}))  # wiki-unknown
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, documentation=True, reset=False)
-    recorded = calls.read_text()
-    assert "wiki --provider claude" in recorded and "--model sonnet" in recorded
-    assert v.fresh
-    assert (repo / ".omc" / "docs" / "gitnexus" / "docs" / "index.md").read_text() == "page"
-    assert "✓ documentation refreshed → .omc/docs/gitnexus/docs" in said
-
-
-def test_wiki_still_behind_leaves_mirror_untouched(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    node = tmp_path / "bin" / "node"
-    text = node.read_text()
-    assert "> .gitnexus/wiki/meta.json;" in text
-    # a wiki run that writes NO metadata: verdict stays wiki-missing
-    node.write_text(text.replace("> .gitnexus/wiki/meta.json;", "> /dev/null;"))
-    v, said = _run(ctx, repo, documentation=True, reset=False)
-    assert "wiki-missing" in v.codes()
-    assert not (repo / ".omc" / "docs").exists()
-    assert "✗ documentation still behind after regeneration" in said
-
-
-def _api_cfg(key="sk-ant-test-0123456789abcdef", model="claude-sonnet-5-5"):
-    from omc.config.schema import DocsConfig, LLMConfig, ProviderConfig, SecretsConfig
-
-    return Config(
-        llm=LLMConfig(
-            default="claude",
-            docs=DocsConfig(backend="api"),
-            providers={"claude": ProviderConfig(docs_model=model)},
-        ),
-        secrets=SecretsConfig(api_keys={"claude": key} if key else {}),
-    )
-
-
-def test_wiki_api_backend_passes_key_in_env_only(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
-    w = repo / ".gitnexus" / "wiki"
-    w.mkdir()
-    (w / "meta.json").write_text(json.dumps({"fromCommit": "b" * 40}))  # wiki-unknown
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    node = tmp_path / "bin" / "node"
-    node.write_text(node.read_text().replace('echo "$@" >>', 'echo "KEY=$GITNEXUS_API_KEY $@" >>'))
-    said = []
-    v = refresh_knowledge(
-        ctx, _api_cfg(), str(repo), "main", say=said.append, documentation=True, reset=False
-    )
-    recorded = calls.read_text()
-    assert (
-        "wiki --provider custom --base-url https://api.anthropic.com/v1/"
-        " --model claude-sonnet-5-5 --reasoning-model" in recorded
-    )
-    assert "KEY=sk-ant-test-0123456789abcdef " in recorded  # the wiki line's env
-    assert v.fresh
-    assert "→ regenerating documentation via claude api (claude-sonnet-5-5)" in said
-    assert not any("sk-ant-test" in s for s in said)
-
-
-def test_wiki_api_without_key_narrates_and_does_not_crash(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)  # index fresh, no wiki
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    said = []
-    v = refresh_knowledge(
-        ctx, _api_cfg(key=""), str(repo), "main", say=said.append, documentation=True, reset=False
-    )
-    assert not v.fresh
-    assert any(s.startswith("✗ documentation: ") and "run omc configure" in s for s in said)
-    assert "wiki" not in (calls.read_text() if calls.exists() else "")
-
-
-def test_wiki_api_failure_tail_is_redacted_before_truncation(tmp_path):
-    # Mirror of test_dependency's run_document case: 370 chars of noise, then the
-    # key spans offsets 384-412, so a naive [:400] would cut it in half and leak
-    # `sk-ant-test-0123`; _run_wiki must redact first.
-    key = "sk-ant-test-0123456789abcdef"
-    _, repo = _repo_with_origin(tmp_path)
-    w = repo / ".gitnexus" / "wiki"
-    w.mkdir()
-    (w / "meta.json").write_text(json.dumps({"fromCommit": "b" * 40}))  # wiki-unknown
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    node = tmp_path / "bin" / "node"
-    arm = '*" wiki --provider"*) '
-    text = node.read_text()
-    assert arm in text
-    noise = "x" * 370 + f"LLM API error {key} boom"
-    progress = 'GITNEXUS_PROGRESS {"detail":"private progress"}'
-    node.write_text(
-        text.replace(arm, f"{arm}echo '{progress}' >&2; printf '%s' '{noise}'; exit 1; ")
-    )
-    said = []
-    v = refresh_knowledge(
-        ctx, _api_cfg(key), str(repo), "main", say=said.append, documentation=True, reset=False
-    )
-    assert not v.fresh
-    failed = next(s for s in said if s.startswith("✗ wiki failed (exit 1): "))
-    assert "LLM API error" in failed and "private progress" not in failed
-    assert not any(key in s or key[:12] in s for s in said)
-    assert any("******" in s for s in said)
-
-
-def test_wiki_api_success_redacts_progress_before_narration_and_tracker(tmp_path, monkeypatch):
-    import omc.cli.progress_bar as pb
-
-    key = "sk-ant-test-0123456789abcdef"
-    trackers = []
-    real_bar = pb.BarThread
-
-    def capture_bar(tracker):
-        trackers.append(tracker)
-        return real_bar(tracker)
-
-    monkeypatch.setattr(pb, "BarThread", capture_bar)
-    progress = (
-        'GITNEXUS_PROGRESS {"phase":"grouping","percent":28,'
-        f'"detail":"Fallback after API error {key}; grouping by directory"}}'
-    )
-    ctx, repo = _wiki_behind_with_speaking_stub(tmp_path, extra_shell=f"echo '{progress}' >&2; ")
-    said = []
-    v = refresh_knowledge(
-        ctx, _api_cfg(key), str(repo), "main", say=said.append, documentation=True, reset=False
-    )
-    assert v.fresh
-    assert any("Fallback after API error ******" in line for line in said)
-    assert not any(key in line for line in said)
-    assert trackers[0].percent == 28
-    assert "Fallback after API error ******" in trackers[0].detail
-    assert key not in trackers[0].detail
-
-
-_GN_LINES = (
-    'echo \'GITNEXUS_PROGRESS {"phase":"grouping","percent":15,'
-    '"detail":"Grouping files into modules (LLM)..."}\' >&2; '
-    'echo \'GITNEXUS_PROGRESS {"phase":"heartbeat","percent":15,'
-    '"detail":"Grouping files into modules (LLM)... (30s)"}\' >&2; '
-    'echo \'GITNEXUS_PROGRESS {"phase":"grouping","percent":28,'
-    '"detail":"Created 3 modules"}\' >&2; '
-    'echo \'GITNEXUS_PROGRESS {"phase":"grouping","percent":28,'
-    '"detail":"Created 3 modules"}\' >&2; '
-)
-
-
-def _wiki_behind_with_speaking_stub(tmp_path, *, extra_shell=""):
-    """A wiki-behind repo whose fake GitNexus prints progress lines on stderr."""
-    _, repo = _repo_with_origin(tmp_path)
-    w = repo / ".gitnexus" / "wiki"
-    w.mkdir()
-    (w / "meta.json").write_text(json.dumps({"fromCommit": "b" * 40}))  # wiki-unknown
-    ctx, calls = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    node = tmp_path / "bin" / "node"
-    arm = '*" wiki --provider"*) '
-    text = node.read_text()
-    assert arm in text
-    node.write_text(text.replace(arm, arm + _GN_LINES + extra_shell))
-    return ctx, repo
-
-
-def test_wiki_off_tty_narrates_gitnexus_phase_changes_but_not_heartbeats(tmp_path):
-    ctx, repo = _wiki_behind_with_speaking_stub(tmp_path)
-    v, said = _run(ctx, repo, documentation=True, reset=False)  # pytest: stderr is not a TTY
-    assert v.fresh
-    assert "· Grouping files into modules (LLM)..." in said
-    assert said.count("· Created 3 modules") == 1  # repeated identical line narrated once
-    assert not any("(30s)" in s for s in said)  # heartbeats are not news
-    # narration lands between the start line and the success line
-    assert said.index("· Created 3 modules") > said.index(
-        next(s for s in said if s.startswith("→ regenerating documentation via"))
-    )
-
-
-def test_wiki_on_tty_drives_the_bar_and_does_not_narrate(tmp_path, monkeypatch):
-    import io
-
-    import omc.cli.progress_bar as pb
-
-    class FakeTTY(io.StringIO):
-        def isatty(self) -> bool:
-            return True
-
-    out = FakeTTY()
-    real_bar = pb.BarThread
-    # Seam from tests/unit/test_progress_bar.py: a bar draws on the `out=` stream
-    # it is given. _run_wiki imports BarThread lazily from this module, so patching
-    # it here hands _run_wiki a bar bound to a fake TTY — no global sys.stderr touch.
-    monkeypatch.setattr(pb, "BarThread", lambda tracker: real_bar(tracker, out=out))
-    assert real_bar(object(), out=out).enabled is True
-    assert real_bar(object(), out=io.StringIO()).enabled is False
-    # linger so the 1 s redraw thread paints at least once before stop
-    ctx, repo = _wiki_behind_with_speaking_stub(tmp_path, extra_shell="sleep 1.3; ")
-    v, said = _run(ctx, repo, documentation=True, reset=False)
-    assert v.fresh
-    assert not any(s.startswith("· ") for s in said)
-    painted = out.getvalue()
-    assert "\r[" in painted and "%" in painted  # an in-place bar redraw
-    assert painted.endswith("\r\x1b[K")  # cleared before narration resumed
-
-
-def test_wiki_failure_excerpt_is_the_tail_where_the_error_is(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
-    w = repo / ".gitnexus" / "wiki"
-    w.mkdir()
-    (w / "meta.json").write_text(json.dumps({"fromCommit": "b" * 40}))
-    ctx, _ = _ctx_with_node_stub(tmp_path, tmp_path / "home")
-    node = tmp_path / "bin" / "node"
-    arm = '*" wiki --provider"*) '
-    noise = "x" * 500 + " LLM API error: boom"
-    progress = 'GITNEXUS_PROGRESS {"detail":"private progress"}'
-    command = f"{arm}echo '{progress}' >&2; printf '%s' '{noise}'; exit 1; "
-    node.write_text(node.read_text().replace(arm, command))
-    v, said = _run(ctx, repo, documentation=True, reset=False)
-    assert not v.fresh
-    failed = next(s for s in said if s.startswith("✗ wiki failed (exit 1): "))
-    assert "LLM API error: boom" in failed
-    assert "private progress" not in failed
 
 
 def test_shared_store_legacy_index_converges_locally(tmp_path):
@@ -455,7 +161,7 @@ def test_shared_store_legacy_index_converges_locally(tmp_path):
     _git("add", "f.txt", cwd=repo)
     _git("commit", "-qm", "c2", cwd=repo)
     ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
-    verdict, said = _run(ctx, repo, documentation=False, reset=False)
+    verdict, said = _run(ctx, repo, reset=False)
     assert verdict.fresh, said
     metadata = json.loads((repo / ".gitnexus" / "meta.json").read_text())
     assert metadata["lastCommit"] == _git_out(repo, "rev-parse", "HEAD")
@@ -468,7 +174,7 @@ def test_shared_store_legacy_index_converges_locally(tmp_path):
         ["analyze", "--skip-agents-md", "--skip-skills", "--branch", "main"]
     ]
     assert POINTER_NOTICE not in said
-    again, _ = _run(ctx, repo, documentation=False, reset=False)
+    again, _ = _run(ctx, repo, reset=False)
     assert again.fresh
     assert calls.read_text() == recorded
 
@@ -504,7 +210,7 @@ def test_pointer_converges_and_gc_is_best_effort(tmp_path, gc_exit, gc_output):
     ctx, calls = _ctx_with_shared_store_node_stub(
         tmp_path, tmp_path / "home", gc_exit=gc_exit, gc_output=gc_output
     )
-    v, said = _run(ctx, repo, documentation=False, reset=False)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh
     assert said.count(POINTER_NOTICE) == 1
     assert _commands(calls) == [
@@ -521,7 +227,7 @@ def test_already_fresh_pointer_does_not_run_gc(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _pointer(repo, tmp_path)
     ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, documentation=False, reset=False)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh and not calls.exists()
     assert POINTER_NOTICE not in said
 
@@ -534,7 +240,7 @@ def test_pointer_analyze_failure_before_registration_preserves_stale_legacy(tmp_
     old = (repo / ".gitnexus/meta.json").read_text()
     _pointer(repo, tmp_path)
     ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home", analyze_fails=True)
-    v, said = _run(ctx, repo, documentation=False, reset=False)
+    v, said = _run(ctx, repo, reset=False)
     assert v.codes() == ["index-behind"]
     assert (repo / ".gitnexus/meta.json").read_text() == old
     assert any("clean did not remove the index" in line for line in said)
@@ -542,19 +248,6 @@ def test_pointer_analyze_failure_before_registration_preserves_stale_legacy(tmp_
         ["analyze", "--skip-agents-md", "--skip-skills", "--branch", "main"],
         ["clean", "--force"],
     ]
-
-
-def test_pointer_gc_runs_before_documentation_completes(tmp_path):
-    _, repo = _repo_with_origin(tmp_path)
-    _stale_index(repo)
-    _pointer(repo, tmp_path)
-    ctx, calls = _ctx_with_shared_store_node_stub(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, documentation=True, reset=False)
-    assert not v.index_codes() and v.wiki_codes() == ["wiki-missing"]
-    commands = _commands(calls)
-    assert commands[1] == ["clean", "--gc", "--force"]
-    assert commands[2][0] == "wiki"
-    assert commands.count(["clean", "--gc", "--force"]) == 1
 
 
 @pytest.mark.parametrize("observed", ["HEAD", None])
@@ -576,14 +269,14 @@ def test_detached_writer_preserves_snapshot(tmp_path, writer):
     import omc.gitnexus as gn
 
     _, repo = _repo_with_origin(tmp_path)
-    docs = _seed_wiki_and_mirror(repo)
+    docs = _seed_leftover_docs(repo)
     meta = repo / ".gitnexus/meta.json"
     before = meta.read_bytes()
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
     _git("checkout", "--detach", cwd=repo)
     with pytest.raises(gn.CheckoutMoved):
         if writer == "reset":
-            _run(ctx, repo, documentation=True, reset=True)
+            _run(ctx, repo, reset=True)
         else:
             gn._destroy_and_rebuild(ctx, repo, "main", lambda line: None)
     assert not calls.exists()
@@ -598,7 +291,7 @@ def test_custom_base_pins_analyze(tmp_path):
     meta = repo / ".gitnexus/meta.json"
     meta.write_text(meta.read_text().replace('"main"', '"trunk"'))
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, tmp_path / "home")
-    v = refresh_knowledge(ctx, Config(), repo, "trunk", documentation=False, reset=False)
+    v = refresh_knowledge(ctx, Config(), repo, "trunk", reset=False)
     assert v.fresh
     assert calls.read_text().split()[1:] == [
         "analyze",
@@ -677,7 +370,7 @@ def test_run_narrated_silent_child_survives_on_a_changing_heartbeat(tmp_path):
     ticks = itertools.count()
     cp, stalled = gn._run_narrated(
         ctx,
-        ["/bin/sleep", "0.6"],
+        [host_bin("sleep"), "0.6"],
         cwd=str(tmp_path),
         say=lambda _line: None,
         heartbeat=lambda: next(ticks),
@@ -691,18 +384,18 @@ def test_run_narrated_silent_child_stalls_on_the_constant_default_heartbeat(tmp_
 
     ctx = ToolContext.from_env({"HOME": str(tmp_path), "PATH": str(tmp_path)})
     cp, stalled = gn._run_narrated(
-        ctx, ["/bin/sleep", "5"], cwd=str(tmp_path), say=lambda _line: None, stall_after=0.25
+        ctx, [host_bin("sleep"), "5"], cwd=str(tmp_path), say=lambda _line: None, stall_after=0.25
     )
     assert stalled is True and cp.returncode != 0
 
 
-def test_run_narrated_default_stall_reads_wiki_stall_seconds_at_call_time(tmp_path, monkeypatch):
+def test_run_narrated_default_stall_reads_stall_seconds_at_call_time(tmp_path, monkeypatch):
     import omc.gitnexus as gn
 
-    monkeypatch.setattr(gn, "_WIKI_STALL_SECONDS", 0.25)
+    monkeypatch.setattr(gn, "_STALL_SECONDS", 0.25)
     ctx = ToolContext.from_env({"HOME": str(tmp_path), "PATH": str(tmp_path)})
     _cp, stalled = gn._run_narrated(
-        ctx, ["/bin/sleep", "5"], cwd=str(tmp_path), say=lambda _line: None
+        ctx, [host_bin("sleep"), "5"], cwd=str(tmp_path), say=lambda _line: None
     )
     assert stalled is True
 
@@ -748,12 +441,13 @@ def _embedding_fixture(
     ctx, calls = _ctx_with_healing_node_stub(tmp_path, home)
     node = tmp_path / "bin" / "node"
     rt = home / "dependencies" / "gitnexus-embeddings" / "runtime"
+    git, mkdir, rm = (shlex.quote(host_bin(t)) for t in ("git", "mkdir", "rm"))
     if runtime_ready:
         for pkg in ("@huggingface/transformers", "onnxruntime-node"):
             (rt / "node_modules" / pkg).mkdir(parents=True)
             (rt / "node_modules" / pkg / "package.json").write_text("{}")
     populate = (
-        f'/bin/mkdir -p "{rt}/node_modules/@huggingface/transformers" '
+        f'{mkdir} -p "{rt}/node_modules/@huggingface/transformers" '
         f'"{rt}/node_modules/onnxruntime-node"; '
         f': > "{rt}/node_modules/@huggingface/transformers/package.json"; '
         f': > "{rt}/node_modules/onnxruntime-node/package.json"; '
@@ -767,16 +461,16 @@ def _embedding_fixture(
         else ""
     )
     meta = (
-        "/bin/mkdir -p .gitnexus; "
+        f"{mkdir} -p .gitnexus; "
         'printf \'{"branch":"main","lastCommit":"%s","repoPath":"%s"%s}\' '
-        '"$(/usr/bin/git rev-parse HEAD)" "$PWD" "$1" > .gitnexus/meta.json'
+        f'"$({git} rev-parse HEAD)" "$PWD" "$1" > .gitnexus/meta.json'
     )
     node.write_text(
         "#!/bin/sh\n"
         f'printf "%s|%s\\n" "${{GITNEXUS_LBUG_EXTENSION_INSTALL:-unset}}" "$*" >> "{calls}"\n'
         "shift\n"  # drop the CLI path; $* is now the verb and its arguments
         'case "$*" in\n'
-        '  "clean --force") /bin/rm -rf .gitnexus ;;\n'
+        f'  "clean --force") {rm} -rf .gitnexus ;;\n'
         f'  "embeddings install") {populate}echo "added 2 packages"; exit {install_rc} ;;\n'
         f'  "embeddings sync "*) if [ {sync_rc} -ne 0 ]; then exit {sync_rc}; fi; '
         f'stamp() {{ {meta}; }}; stamp \',"stats":{{"nodes":5,"embeddings":{sync_count}}}\' ;;\n'
@@ -790,7 +484,7 @@ def _embedding_fixture(
     )
     node.chmod(node.stat().st_mode | stat.S_IXUSR)
     ctx.env = {**ctx.env, "PATH": str(tmp_path / "bin")}
-    ctx.git_bin = "/usr/bin/git"
+    ctx.git_bin = host_bin("git")
     return ctx, calls
 
 
@@ -800,9 +494,7 @@ def _on_cfg():
 
 def _run_on(ctx, repo, **kw):
     said = []
-    v = refresh_knowledge(
-        ctx, _on_cfg(), str(repo), "main", say=said.append, documentation=False, reset=False, **kw
-    )
+    v = refresh_knowledge(ctx, _on_cfg(), str(repo), "main", say=said.append, reset=False, **kw)
     return v, said
 
 
@@ -827,7 +519,7 @@ def test_off_keeps_todays_argv_and_never_mentions_embeddings(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home", runtime_ready=False)
-    v, said = _run(ctx, repo, documentation=False, reset=False)  # Config(): off
+    v, said = _run(ctx, repo, reset=False)  # Config(): off
     assert v.fresh
     assert _rows(calls) == [("unset", PLAIN)]
     assert not any("embedding" in s for s in said)
@@ -928,7 +620,7 @@ def test_rebuild_after_an_embedding_fallback_runs_keyword_only(tmp_path):
         text.replace(
             PLAIN_ARM,
             PLAIN_ARM + "if [ -e .gitnexus/keep-stale ]; then "
-            "/bin/cat > .gitnexus/meta.json <<'EOF'\n"
+            f"{shlex.quote(host_bin('cat'))} > .gitnexus/meta.json <<'EOF'\n"
             '{"branch":"main","lastCommit":"old","repoPath":"/elsewhere"}\n'
             "EOF\n"
             "exit 0; fi; ",
@@ -978,7 +670,7 @@ def test_silent_embedding_analyze_lives_on_store_writes_and_dies_on_the_embed_bu
 ):
     """Off a TTY the embedding phase prints NOTHING (verified on the real CLI), so
     liveness comes from <root>/.gitnexus changing under the _EMBED_STALL_SECONDS
-    budget, not from bytes under the wiki one. The wiki budget is shrunk below
+    budget, not from bytes under the default one. The default budget is shrunk below
     the beat gap, so a child supervised on it would die: surviving proves the
     embed budget is the one consulted. A silent child that keeps writing the
     store survives; one that writes nothing is killed after the embed budget
@@ -986,16 +678,17 @@ def test_silent_embedding_analyze_lives_on_store_writes_and_dies_on_the_embed_bu
     import omc.gitnexus as gn
 
     monkeypatch.setattr(gn, "_EMBED_STALL_SECONDS", 0.5)
-    monkeypatch.setattr(gn, "_WIKI_STALL_SECONDS", 0.1)
+    monkeypatch.setattr(gn, "_STALL_SECONDS", 0.1)
     _, repo = _repo_with_origin(tmp_path)
     _stale_index(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     if touches_store:
         # 1.2 s of silence — past the 0.5 s budget — with a new store file every 0.2 s.
-        beats = "; ".join(f"/bin/sleep 0.2; : > .gitnexus/beat{i}" for i in range(6))
+        sleep = shlex.quote(host_bin("sleep"))
+        beats = "; ".join(f"{sleep} 0.2; : > .gitnexus/beat{i}" for i in range(6))
         _silent_arm(tmp_path, EMBED_ARM, f"{beats}; ")
     else:
-        _silent_arm(tmp_path, EMBED_ARM, "/bin/sleep 5; ")
+        _silent_arm(tmp_path, EMBED_ARM, f"{shlex.quote(host_bin('sleep'))} 5; ")
     v, said = _run_on(ctx, repo)
     assert v.fresh
     if touches_store:
@@ -1099,7 +792,7 @@ def test_backfill_failure_is_narrated_and_leaves_the_verdict_alone(tmp_path):
 def test_off_never_backfills(tmp_path):
     _, repo = _repo_with_origin(tmp_path)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
-    v, said = _run(ctx, repo, documentation=False, reset=False)
+    v, said = _run(ctx, repo, reset=False)
     assert v.fresh and not calls.exists() and "✓ knowledge is current" in said
 
 
@@ -1123,24 +816,25 @@ def test_silent_embeddings_sync_lives_on_store_writes_and_dies_on_the_embed_budg
 ):
     """`embeddings sync` may print nothing for long stretches while it embeds, so
     it gets the embedding analyze's liveness: <root>/.gitnexus changing under
-    the _EMBED_STALL_SECONDS budget, not the wiki one (shrunk below the beat gap
+    the _EMBED_STALL_SECONDS budget, not the default one (shrunk below the beat gap
     here, so surviving proves which budget is consulted). A silent sync that
     keeps writing the store survives and lands its vectors; one that writes
     nothing is reported stalled and the verdict is untouched."""
     import omc.gitnexus as gn
 
     monkeypatch.setattr(gn, "_EMBED_STALL_SECONDS", 0.5)
-    monkeypatch.setattr(gn, "_WIKI_STALL_SECONDS", 0.1)
+    monkeypatch.setattr(gn, "_STALL_SECONDS", 0.1)
     _, repo = _repo_with_origin(tmp_path)
     _with_nodes(repo)
     ctx, calls = _embedding_fixture(tmp_path, tmp_path / "home")
     before = (repo / ".gitnexus/meta.json").read_bytes()
     if touches_store:
         # 1.2 s of silence — past the 0.5 s budget — with a new store file every 0.2 s.
-        beats = "; ".join(f"/bin/sleep 0.2; : > .gitnexus/beat{i}" for i in range(6))
+        sleep = shlex.quote(host_bin("sleep"))
+        beats = "; ".join(f"{sleep} 0.2; : > .gitnexus/beat{i}" for i in range(6))
         _silent_arm(tmp_path, SYNC_ARM, f"{beats}; ")
     else:
-        _silent_arm(tmp_path, SYNC_ARM, "/bin/sleep 5; ")
+        _silent_arm(tmp_path, SYNC_ARM, f"{shlex.quote(host_bin('sleep'))} 5; ")
     v, said = _run_on(ctx, repo)
     assert v.fresh
     assert _rows(calls) == [("auto", ["embeddings", "sync", str(repo)])]

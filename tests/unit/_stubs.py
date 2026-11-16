@@ -2,10 +2,42 @@
 
 from __future__ import annotations
 
+import functools
 import json
+import os
 import shlex
+import shutil
 import stat
 from pathlib import Path
+
+import pytest
+
+# The developer's PATH, captured at import: tests narrow os.environ["PATH"] to a stub
+# dir before writing stubs, and a stub must never be what host_bin finds or caches.
+_HOST_PATH = os.environ.get("PATH", os.defpath)
+# Install hint per tool host_bin is asked for; anything else gets the generic one.
+_COREUTILS = "install coreutils (`sudo apt-get install coreutils`; macOS ships them)"
+_INSTALL_HINTS = {
+    "bash": "install bash (`brew install bash` / `sudo apt-get install bash`)",
+    "git": "install git (`brew install git` / `sudo apt-get install git`)",
+    **dict.fromkeys(("cat", "mkdir", "rm", "sleep", "wc"), _COREUTILS),
+}
+
+
+@functools.cache
+def host_bin(name: str) -> str:
+    """Absolute path of the real ``name`` on the developer's PATH, resolved once.
+
+    Stubs run on a restricted PATH, so they call real tools by absolute path —
+    resolved here, never a hardcoded ``/bin/…`` or ``/usr/bin/…`` literal (hosts
+    such as NixOS have neither). A missing tool fails loud, naming the fix.
+    """
+    found = shutil.which(name, path=_HOST_PATH)
+    if found is None:
+        hint = _INSTALL_HINTS.get(name, f"install `{name}` and put it on PATH")
+        pytest.fail(f"`{name}` is required by the unit suite but is not on PATH: {hint}")
+    return found
+
 
 DEFAULT_CODEX_CATALOG: dict[str, object] = {
     "models": [
@@ -45,10 +77,10 @@ def make_stub(
     # would not resolve. This records what the CHILD was handed, which is the only
     # way to prove a secret reached one subprocess and not the other.
     envlog = f"/usr/bin/env > {shlex.quote(str(env_log))}\n" if env_log else ""
-    err = f"/bin/cat >&2 <<'OMC_STUB_ERR_EOF'\n{stderr}\nOMC_STUB_ERR_EOF\n" if stderr else ""
+    cat = shlex.quote(host_bin("cat"))
+    err = f"{cat} >&2 <<'OMC_STUB_ERR_EOF'\n{stderr}\nOMC_STUB_ERR_EOF\n" if stderr else ""
     path.write_text(
-        f"#!/bin/sh\n{log}{envlog}/bin/cat <<'OMC_STUB_EOF'\n{stdout}\nOMC_STUB_EOF\n"
-        f"{err}exit {rc}\n"
+        f"#!/bin/sh\n{log}{envlog}{cat} <<'OMC_STUB_EOF'\n{stdout}\nOMC_STUB_EOF\n{err}exit {rc}\n"
     )
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return path
@@ -68,15 +100,16 @@ def make_codex_stub(
     path = bindir / "codex"
     body = json.dumps(catalog) if isinstance(catalog, dict) else catalog
     log = f"printf '%s\\n' \"$*\" >> {shlex.quote(str(argv_log))}\n" if argv_log else ""
+    cat = shlex.quote(host_bin("cat"))
     path.write_text(
         "#!/bin/sh\n"
         f"{log}"
         'case "$1 $2" in\n'
         '  "debug models")\n'
-        f"    /bin/cat <<'OMC_CODEX_MODELS_EOF'\n{body}\nOMC_CODEX_MODELS_EOF\n"
+        f"    {cat} <<'OMC_CODEX_MODELS_EOF'\n{body}\nOMC_CODEX_MODELS_EOF\n"
         f"    exit {catalog_rc} ;;\n"
         "  *)\n"
-        f"    /bin/cat <<'OMC_CODEX_LAUNCH_EOF'\n{stdout}\nOMC_CODEX_LAUNCH_EOF\n"
+        f"    {cat} <<'OMC_CODEX_LAUNCH_EOF'\n{stdout}\nOMC_CODEX_LAUNCH_EOF\n"
         f"    exit {rc} ;;\n"
         "esac\n"
     )
@@ -130,7 +163,7 @@ def make_claude_stub(
       marketplace's plugins; failures can be injected by operation name.
 
     `--version` answers like the real CLI. `auth status` answers JSON with
-    ``loggedIn``; `-p "Reply with exactly OK."` (the docsllm probe prompt)
+    ``loggedIn``; `-p "Reply with exactly OK."` (the modelprobe probe prompt)
     answers ``headless_reply``/``headless_rc``; other `-p` prompts keep the
     generic fallthrough. Every other invocation prints ``stdout`` and exits
     ``rc`` (the slug/verdict path). Every argv line is appended to the
@@ -139,7 +172,7 @@ def make_claude_stub(
     import json
     import sys
 
-    # == omc.docsllm.HEADLESS_PROBE_PROMPT (kept literal: tests/_stubs must not
+    # == omc.modelprobe.HEADLESS_PROBE_PROMPT (kept literal: tests/_stubs must not
     # import omc at write time)
     probe_prompt = "Reply with exactly OK."
 

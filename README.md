@@ -52,21 +52,21 @@ When omc is configured, the git/wt/provider tool probe runs before the GitNexus 
 
 `omc uninstall` removes the CLI, `~/.omc`, omc's fenced section from every provider's global guidance and the owned fish hook. Remove the plugin through each harness's plugin manager; the command prints the steps.
 
+**Upgrade note:** documentation generation was removed. `.gitnexus/wiki/`, `.omc/docs/` and `~/.omc/secrets.yaml` are no longer used and may be deleted by hand. omc deletes nothing in `.omc/docs/` or `~/.omc/secrets.yaml`; an `omc watch --reset-gitnexus` or a heal that has to destroy and rebuild the index (a store owned by another branch, or an index still stale after an incremental refresh) clears the whole GitNexus store (`gitnexus clean --force`), so it removes a leftover `.gitnexus/wiki/` together with the index. Until `config.yaml` is rewritten, each command prints one `· config: ignoring unknown key(s) ['llm.docs', 'llm.providers.<p>.docs_model'] in <path>` line. Run `omc configure --set llm.default=<your provider>` once: it rewrites the file without probing a model, and the line stops.
+
 ## Configure
 
-Run `omc configure` whenever settings change. Enter edits a field, Esc goes up or exits, and Ctrl-C abandons an edit; accepted changes save immediately. After enabling a provider or changing the documentation provider, reopen the menu to rebuild dependent choices.
+Run `omc configure` whenever settings change. Enter edits a field, Esc goes up or exits, and Ctrl-C abandons an edit; accepted changes save immediately. After enabling a provider, reopen the menu to rebuild dependent choices.
 
 | File | Stores |
 |---|---|
 | `~/.omc/config.yaml` | Your LLM settings |
 | `<repo>/.omc/config.yaml` | Worktree naming and base branch; commit this for the team |
-| `~/.omc/secrets.yaml` | API keys, mode 0600; never written to `config.yaml` |
 
 The worktree section appears only when configure runs inside a git repository. The menu sets:
 
 - **Default provider** and each provider's **Orchestrator model**.
 - **Task models**: Design, Plan, Review, Simple Complexity Task, Medium Complexity Task and High Complexity Task. Each accepts `family[:effort]`, such as `sol:high`; blank follows the provider default. Claude task models other than the orchestrator take a family only, because a Claude subagent carries no effort level.
-- **Documentation provider**, **Documentation backend** (`cli` or `api`) and **Documentation model**.
 - **Native notifications**, **Branch prefix** (default `feature/`) and **Base branch** (default `main`).
 - **GitNexus → Embeddings** (`gitnexus.embeddings`, off by default; also `omc configure --set gitnexus.embeddings=true`). When on, omc installs GitNexus's local embedding runtime under `~/.omc`, embeds on every index refresh, backfills an existing index once, and falls back to keyword-only indexing when the runtime or a download fails. It never fails `omc update`, `omc watch` or a refresh.
 - **LLM → Provider Selection Per Step** (`llm.provider_selection_per_step`, off by default; also `omc configure --set llm.provider_selection_per_step=true`). Off means `/omc:design` runs through implement, audit, finish and the push in one session, printing one notice line at each automatic step. On restores the per-stage stops that offer another provider (`omc implement` or `omc review` with `--claude` or `--codex`). Off also means the implementing session audits itself; turn it on, or run `omc review` after a typed stop, for a second provider's audit. Existing installs get the off default on upgrade, with no migration.
@@ -83,7 +83,7 @@ Provider defaults are:
 
 Implementation plan tasks carry a `Complexity: simple | medium | high` label; a missing label means medium.
 
-Configured models are checked against the provider's current model list before `omc design`, `omc implement` and `omc review` launch (Orchestrator and task models), before `omc dependency watch` (Documentation model) and on watch ticks that use them; a blank choice is checked as the provider default. A current listing costs no remap turn and writes nothing. For Codex, omc reads `codex debug models` on the binary it launches and immediately remaps a still-stale value. For Claude, refresh turns happen only when its model list is missing, past its own refresh time, or without one, and only at a command's start (and on `omc watch`'s first tick): one or two quick no-model turns with nonessential traffic enabled, so a user setting that disables it cannot freeze the list. A still-stale value is then remapped, and a list still missing after two turns stops the command. The provider CLI's default model picks a listed full model id, omc saves it to `~/.omc/config.yaml` and prints one line per remap. A failed remap stops the command and saves nothing.
+Configured models are checked against the provider's current model list before `omc design`, `omc implement` and `omc review` launch (Orchestrator and task models) and on watch ticks that use them; a blank choice is checked as the provider default. A current listing costs no remap turn and writes nothing. For Codex, omc reads `codex debug models` on the binary it launches and immediately remaps a still-stale value. For Claude, refresh turns happen only when its model list is missing, past its own refresh time, or without one, and only at a command's start (and on `omc watch`'s first tick): one or two quick no-model turns with nonessential traffic enabled, so a user setting that disables it cannot freeze the list. A still-stale value is then remapped, and a list still missing after two turns stops the command. The provider CLI's default model picks a listed full model id, omc saves it to `~/.omc/config.yaml` and prints one line per remap. A failed remap stops the command and saves nothing.
 
 For scripts, use `--defaults` or repeat `--set`:
 
@@ -92,13 +92,7 @@ omc configure --defaults
 omc configure --set llm.default=claude --set worktree.base_branch=main
 ```
 
-Documentation follows the default provider unless overridden with `llm.docs.provider`. Its model uses the standard coding tier, independently of the Orchestrator model: Claude defaults to `sonnet` on CLI or the latest matching full API model id, and Codex leaves the model blank so its CLI default applies. Set `llm.providers.claude.docs_model` to override; API aliases such as `opus` resolve to a full id when saved.
-
-The `api` documentation backend uses Anthropic's OpenAI-compatible endpoint and is available for Claude only; Codex supports the `cli` backend. Paste the key once in the hidden prompt; later it displays as `******` plus its last four characters. Scripts can set `llm.providers.claude.api_key`, but a command-line key is visible in shell history and the process list.
-
-Before saving a changed key, task model or documentation selection, configure makes the applicable real probes: models endpoint, `claude auth status`, and a short headless model call or per-model GET. A failing probe saves no settings. CLI is the default backend; set `llm.docs.backend=api` to switch.
-
-Anthropic describes its compatibility layer as intended for testing/comparison. API generation failures leave knowledge stale with no silent fallback; watch does not retry a repair while the stale reasons stay identical from tick to tick. A bare `gitnexus wiki` opens its own setup wizard because omc supplies the key only to its child processes. `fable` may pass validation yet fail generation for zero-data-retention organisations.
+Before saving a changed task model, configure probes it for real: a short headless model call, or for a Codex family choice a lookup in the model catalog of the `codex` it launches. A failing probe saves no settings.
 
 Configure writes fenced global guidance to `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`, honoring `CLAUDE_CONFIG_DIR` and `CODEX_HOME` and preserving text outside the fence. In a repository it seeds `.omc/config/AGENTS.md` once; commit your project guidance to share it, while root `AGENTS.md`/`CLAUDE.md` remain yours.
 
@@ -106,34 +100,33 @@ Legacy root symlinks and ignore entries remain after upgrading. Delete old root 
 
 ## Keep knowledge fresh with `omc watch`
 
-New worktrees take code from the base branch. When `omc design` creates or re-enters a worktree, it copies the primary checkout's `.omc/`, docs included, adding only missing entries: tracked or already-copied files win, symlinks are recreated rather than followed, and a `.omc/` shared with the primary is left alone. The repo's Worktrunk config copies its other gitignored files, such as `.env`, `.venv` and local caches. This repo's config excludes `.gitnexus/` and `target/`; each worktree builds its own target cache.
+New worktrees take code from the base branch. When `omc design` creates or re-enters a worktree, it copies the primary checkout's `.omc/`, adding only missing entries: tracked or already-copied files win, symlinks are recreated rather than followed, and a `.omc/` shared with the primary is left alone. The repo's Worktrunk config copies its other gitignored files, such as `.env`, `.venv` and local caches. This repo's config excludes `.gitnexus/` and `target/`; each worktree builds its own target cache.
 
-Stale primary knowledge gives new worktrees stale docs and makes `/omc:explain` answer from an old primary graph.
+Stale primary knowledge makes `/omc:explain` answer from an old primary graph.
 
-**Run `omc watch` in a terminal in the primary checkout and leave it running while you work.** It refuses to run inside a worktree; worktrees refresh through `/omc:rebase-main`. To keep documentation fresh and build the primary checkout automatically:
+**Run `omc watch` in a terminal in the primary checkout and leave it running while you work.** It refuses to run inside a worktree; worktrees refresh through `/omc:rebase-main`. To also build the primary checkout automatically:
 
 ```bash
-omc watch --enable-documentation --auto-build
+omc watch --auto-build
 ```
 
-Both additions cost LLM work and are opt-in. A normal tick:
+That addition costs LLM work and is opt-in. A normal tick:
 
 1. Checks that the primary is on its base branch, then fetches that branch only.
 2. Warns and skips unsafe syncs: off-branch, dirty (tracked changes) or diverged checkouts stay untouched by default.
 3. Fast-forwards the checkout when new commits arrive.
 4. Refreshes the GitNexus index directly, with no LLM cost; up-to-date ticks also heal stale knowledge.
-5. Optionally regenerates documentation, runs the project's post-watch hook on action ticks, then optionally runs its build stage.
+5. Runs the project's post-watch hook on action ticks, then optionally runs its build stage.
 
-With `--enable-documentation` or `--auto-build`, each tick first checks the Documentation or Orchestrator model and remaps one the provider no longer lists, as described under [Configure](#configure).
+With `--auto-build`, each tick first checks the Orchestrator model and remaps it when the provider no longer lists it, as described under [Configure](#configure).
 
 | Option | Effect |
 |---|---|
 | `--interval` | Seconds between ticks; default **30**. |
 | `--once` | One tick: check now, repair stale knowledge, then exit; current knowledge is reported as current. The hook and auto-build also run on this forced refresh. |
-| `--enable-documentation` | Also regenerate LLM-written docs. |
 | `--auto-build` | Run the project's build stage after action ticks via the default LLM; absent stages skip immediately. |
 | `--rebase` | Opt into `git rebase --autostash` instead of skipping dirty/diverged checkouts. |
-| `--reset-gitnexus` | Force-clear index, wiki and docs mirror and rebuild; primary must be on the base branch. The reset waits for a tick that can refresh. |
+| `--reset-gitnexus` | Force-clear the GitNexus store (`.gitnexus/`) and rebuild it; primary must be on the base branch. The reset waits for a tick that can refresh. |
 | `--clear-mutex` | Bypass the single-instance guard; normally unnecessary because crash locks are kernel-released. |
 
 Watch is foreground-only: no daemon, one instance per primary, Ctrl-C to stop. A second watcher refuses unless you bypass its guard. Off-branch checkouts remain untouched even with `--rebase`.
@@ -146,7 +139,7 @@ A project can commit `.omc/hooks/post-watch.sh`. Watch runs it with bash from th
 
 Hook and build log paths appear when they start. Auto-build streams output with a progress bar and elapsed time; use `tail -f <logfile>` or `omc internal build-progress <logfile>` to follow it elsewhere. Build failures link the transcript. There is **no build timeout**: long builds remain observable and Ctrl-C stops them.
 
-For external dependencies, `omc dependency watch` runs from any directory against `~/.omc`: it indexes cached checkouts that are not yet indexed, backfills LLM docs for indexed commits and announces completion (`--once` and `--interval` are available).
+For external dependencies, `omc dependency watch` runs from any directory against `~/.omc`: it indexes cached checkouts that are not yet indexed, adopts checkouts on disk the manifest does not know yet, and announces completion (`--once` and `--interval` are available).
 
 ## The lifecycle: `omc design`, `omc implement`, `omc review`
 
@@ -205,13 +198,12 @@ Useful in-session skills:
 
 | Skill | Use it to |
 |---|---|
-| `/omc:explain <question>` | Understand code or change impact from graph/docs and project context, with file-and-symbol citations. |
+| `/omc:explain <question>` | Understand code or change impact from the graph and project context, with file-and-symbol citations. |
 | `/omc:index` | Incrementally refresh the primary checkout's GitNexus graph, with no LLM cost. |
-| `/omc:document` | Generate architecture docs in `.omc/docs/gitnexus/docs/` from that graph. |
 | `/omc:explain-dependency [<name>] <question>` | Explain a library/service at a pinned commit (default: its remote HEAD); first ask indexes it without LLM cost. |
 | `/omc:investigate <environment> <prompt>` | Run a read-only, environment-locked investigation with evidence and query workers; requires `.omc/skills/investigation-context`, whose `envs/<env>.md` briefings define the environments, and refuses without it. |
 | `/omc:mr-review <mr-link>` | Review a colleague's GitLab MR or GitHub PR against the intent its author linked, post the comments that survive reconciliation unattended with an automated-review footer, and keep the full review trail on disk. |
-| `/omc:rebase-main` | Rebase onto the latest base and re-mirror `.omc/docs/` from the primary; standalone it keeps your commits, while finish runs it with `--squash`. Explain still queries the primary graph. |
+| `/omc:rebase-main` | Rebase the worktree's code onto the latest base, and nothing else; standalone it keeps your commits, while finish runs it with `--squash`. The graph stays primary, where explain queries it. |
 | `/omc:check-wt-config` | Review existing worktree config for faithful copies; `omc watch` seeds a starter when absent. |
 | `/omc:finish` | Publish the branch, also available without an audit. |
 | `/omc:integrate` | Set up or revisit the project's omc integration. |
@@ -230,7 +222,7 @@ evidence to the local answer, never the answer itself; each is optional and
 fails on its own, and `/omc:explain` ends with one status line per source
 while still answering from the local graph.
 
-Finish squashes the branch to one commit, folding in uncommitted changes, then rebases that single commit onto the latest base and refreshes the worktree's `.omc/docs/`, so a conflict with the base stops the rebase at most once; the session resolves that conflict itself (as `/omc:rebase-main` does) before the stage gates, rather than handing it back. Any feature branch works: in a plain clone's primary checkout it squashes and rebases the same way but mirrors nothing. It then runs **check → build → verify → review → final verify** before pushing with `--force-with-lease`; the final verify is skipped when the tree is unchanged since verify passed. Tracked files a stage changes are amended into the commit. A red stage is repaired within the stage-gate rule's two-fix bound (a red verify first reruns only its failed pieces, then build and one full verify, when the project's verify skill has a "Running a subset" section; otherwise fix → check → build → one full verify); at the bound, finish asks one CRITICAL question and pushes nothing. Finish is the only place an agent starts verify. The commit message is the MR/PR description generated from the diff, a compare URL is printed, and **you open the MR/PR**. Finish then moves the ticket to In Review on a best-effort basis and offers to close the worktree (the unmerged branch survives), address review comments with amend/re-push, or discuss the change. Stacked branches are refused.
+Finish squashes the branch to one commit, folding in uncommitted changes, then rebases that single commit onto the latest base, so a conflict with the base stops the rebase at most once; the session resolves that conflict itself (as `/omc:rebase-main` does) before the stage gates, rather than handing it back. Any feature branch works: in a plain clone's primary checkout it squashes and rebases the same way. It then runs **check → build → verify → review → final verify** before pushing with `--force-with-lease`; the final verify is skipped when the tree is unchanged since verify passed. Tracked files a stage changes are amended into the commit. A red stage is repaired within the stage-gate rule's two-fix bound (a red verify first reruns only its failed pieces, then build and one full verify, when the project's verify skill has a "Running a subset" section; otherwise fix → check → build → one full verify); at the bound, finish asks one CRITICAL question and pushes nothing. Finish is the only place an agent starts verify. The commit message is the MR/PR description generated from the diff, a compare URL is printed, and **you open the MR/PR**. Finish then moves the ticket to In Review on a best-effort basis and offers to close the worktree (the unmerged branch survives), address review comments with amend/re-push, or discuss the change. Stacked branches are refused.
 
 Project stages live in `.omc/skills/<stage>/SKILL.md`: check is the frequent unit gate, build builds the world without tests, verify is full E2E, run by agents only inside finish (you or the project may run it any time), and review judges the diff. Each can run as `/omc:<stage>`; unconfigured project stages are no-ops. Review always adds omc's grug complexity lens and human-review lens for human MR review rules. Important findings from either need a fix or a waiver in the design record's “Deliberate complexity” section; Minor findings are advisory. An unresolved finding, unavailable lens or failed gate stops publication.
 
@@ -251,26 +243,23 @@ flowchart LR
     Tools --> Nexus["GitNexus"]
 ```
 
-Watch maintains `.gitnexus/` and `.omc/docs/` in the primary checkout. omc's worktree cut copies the primary `.omc/` into new worktrees, adding only missing files, so docs arrive without the graph. The repo's Worktrunk config carries other ignored files such as `.env` and `.venv`; this repo's excludes `.gitnexus/` and `target/`. `/omc:rebase-main` re-mirrors only `.omc/docs/`.
+Watch maintains the `.gitnexus/` graph in the primary checkout. Worktrees carry no graph: omc's worktree cut copies the primary `.omc/` into new worktrees, adding only missing files, with no copied graph. The repo's Worktrunk config carries other ignored files such as `.env` and `.venv`; this repo's excludes `.gitnexus/` and `target/`. `/omc:rebase-main` moves code only.
 
-**Explain queries the primary graph** through `omc internal gitnexus`, scoped to the configured base branch, and reads primary docs. Any old `.gitnexus/` content already in a worktree is left untouched and is not used for those queries.
+**Explain queries the primary graph** through `omc internal gitnexus`, scoped to the configured base branch. Any old `.gitnexus/` content already in a worktree is left untouched and is not used for those queries.
 
 Current GitNexus releases normally route linked-worktree checkouts to `$GITNEXUS_HOME/stores`. omc sets `GITNEXUS_SHARED_STORE=off` in `ToolContext.child_env`, which overrides inherited sharing settings and keeps the primary `.gitnexus/` local for indexing and whole-directory cleanup. `GITNEXUS_STORAGE_PATH` and `GITNEXUS_STORAGE_ROOT` are unsupported with omc and remain untouched.
 
 ```mermaid
 flowchart LR
     Watch["omc watch"] --> Graph["Primary .gitnexus/ graph"]
-    Watch --> Docs["Primary .omc/docs/"]
-    Docs --> Copy["omc worktree cut copies missing .omc/ files"]
-    Copy --> WorktreeDocs["Worktree .omc/docs/"]
-    Docs --> Rebase["/omc:rebase-main"]
-    Rebase --> WorktreeDocs
+    PrimaryOmc["Primary .omc/"] --> Copy["omc worktree cut copies missing .omc/ files"]
+    Copy --> Worktree["Worktree: code and .omc/, no graph"]
+    Rebase["/omc:rebase-main"] -->|code only| Worktree
     Explain["/omc:explain in any worktree"] --> Proxy["omc internal gitnexus"]
     Proxy -->|queries| Graph
-    Docs -->|reference docs| Explain
 ```
 
-[GitNexus](https://github.com/chris-husse/GitNexus) installs from its approved source under `~/.omc/dependencies/gitnexus`; the checkout tracks that repository's `main` and `omc update` rebuilds it. Its graph provides symbols and execution flows; generated docs explain architecture, and a project's explain-context skill establishes where its truth lives.
+[GitNexus](https://github.com/chris-husse/GitNexus) installs from its approved source under `~/.omc/dependencies/gitnexus`; the checkout tracks that repository's `main` and `omc update` rebuilds it. Its graph provides symbols and execution flows, and a project's explain-context skill establishes where its truth lives.
 
 When `gitnexus.embeddings` is on, the embedding runtime and model cache live beside the clone under `~/.omc/dependencies/gitnexus-embeddings/{runtime,hf}` (`GITNEXUS_EMBEDDING_RUNTIME_DIR` and `HF_HOME`, set by `gitnexus_env` for every omc child alongside `GITNEXUS_SHARED_STORE=off`), so an update of the clone never touches them. `/omc:explain` queries then become semantic and the keyword-only warning disappears.
 
@@ -287,7 +276,7 @@ sequenceDiagram
 
 The shared contract names are `OMC_KNOWLEDGE`, `OMC_DESIGN_RECORD`, `OMC_STAGE`, `OMC_REBASE_MAIN`, `OMC_SLUG`, `OMC_MODELS` and `OMC_TICKET`. The CLI emits knowledge, design-record, rebase-main and models verdicts (`omc internal models` resolves every task's model and effort and carries the provider-selection-per-step flag); stage, slug and ticket-sync verdicts come from skills, and the behavior layer names all seven as sacred. Finish's squash count travels in the CLI's rebase-main verdict as `squashed`; no skill emits a squash verdict. A stage verdict reads `OMC_STAGE {"stage", "configured", "passed", "summary"}`. Contracts are single JSON lines with those prefixes, without Markdown wrapping. Exit codes mean **0** success, **1** error, **2** usage/refusal, **3** internal bail (inconclusive; the caller judges what comes next).
 
-The CLI handles mechanics and launches model work for slugging, docs, auto-build and sessions. Skills supply judgment and may run git or project commands directly. `ToolContext` centralizes the Python CLI's subprocess and network calls; provider adapters supply each harness's argv and settings. See [Development](#development) for this repo's project integration.
+The CLI handles mechanics and launches model work for slugging, auto-build and sessions. Skills supply judgment and may run git or project commands directly. `ToolContext` centralizes the Python CLI's subprocess and network calls; provider adapters supply each harness's argv and settings. See [Development](#development) for this repo's project integration.
 
 ## Prerequisites
 
@@ -308,8 +297,8 @@ The CLI handles mechanics and launches model work for slugging, docs, auto-build
 | `omc install [path]` | Install from a local checkout (default `.`); re-root future updates. |
 | `omc update` | Update CLI, managed dependencies, guidance and plugins. |
 | `omc uninstall` | Remove CLI and managed user data. |
-| `omc dependency watch` | Index and document cached external dependencies. |
-| `omc dependency list` | List cached dependency repos with commit, ref, index/doc status and creation time. |
+| `omc dependency watch` | Index cached external dependencies. |
+| `omc dependency list` | List cached dependency repos with commit, ref, index status and creation time. |
 | `omc shell-integration fish enable\|disable\|status\|reconcile` | Manage the fish tab-title hook. |
 | `omc title set -- <title>` / `omc title release` | Pin or release the iTerm2 tab title; the fish hook uses `title apply`. |
 | `omc aws-credential-process` | Assume an AWS role with a 1Password-served TOTP for headless credentials; needs `--source-profile`, `--role-arn`, `--mfa-serial` and `--op-item`. |
@@ -335,14 +324,14 @@ omc is developed with omc: keep watch running in the primary checkout and start 
 | Surface | What it ensures here |
 |---|---|
 | `.omc/config.yaml` (committed) | Branches are `feature/<slug>`, cut from `main`. |
-| `.config/wt.toml` | Copies ignored files such as `.env`, `.venv` and `.omc/docs/` into worktrees, excluding `.gitnexus/` and `target/`; sets up submodules and direnv before landing. |
+| `.config/wt.toml` | Copies ignored files such as `.env`, `.venv` and local caches into worktrees, excluding `.gitnexus/` and `target/`; sets up submodules and direnv before landing. |
 | `.omc/config/AGENTS.md` | Red → green on every change, tests run or fail and never skip, ToolContext process boundary, no unasked installs, generated README. |
 | `.omc/skills/check` | Frequent quick gate: the unit suite. |
 | `.omc/skills/build` | World build during finish: format check, lint and package build, without tests. |
 | `.omc/skills/verify` | Docker golden lifecycle, then variations and smoke in parallel; 300 s per test. Codex gate when Codex code changed; tokens from gitignored `.env`, never public runners. Docker is required. Its "Running a subset" section reruns failed pieces by pytest node id (never `-k`), after the golden path reruns in full. |
 | `.omc/skills/review` | Branch diff checked against this repo's rules, plus omc's grug and human-review lenses. |
 | `.omc/skills/explain-context` | Where truth lives and the order sources take precedence. |
-| `.gitignore` | The primary `.gitnexus/` graph and generated `.omc/docs/` stay uncommitted; omc's worktree cut copies docs into worktrees. |
+| `.gitignore` | The primary `.gitnexus/` graph stays uncommitted; a leftover `.omc/docs/` from the removed documentation generation stays ignored. |
 | `docs/superpowers/specs/`, `docs/superpowers/plans/` | Dated design records and implementation plans. |
 
 This repo has no post-watch hook. [PLUGIN-NOTES.md](docker/PLUGIN-NOTES.md) holds harness/auth details and [lifecycle E2E evidence](docker/PLUGIN-NOTES.md#conversational-lifecycle-regression-evidence-2026-09-24).

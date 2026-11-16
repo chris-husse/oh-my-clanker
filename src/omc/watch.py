@@ -2,15 +2,14 @@
 
 Foreground polling loop (omc never creates daemons/launchd/cron). Each tick:
 fetch → ff-sync when safely possible → on new commits refresh the GitNexus
-index directly (zero LLM cost) and, only with --enable-documentation, the
-LLM-generated wiki. Never destructive by default: off-branch, dirty, or
-diverged checkouts are warned about and left alone — --rebase is the explicit
-opt-in past the dirty/diverged skips (autostash rebase; conflicts abort and
-restore); off-branch checkouts are never touched in any mode.
+index directly (zero LLM cost). Never destructive by default: off-branch,
+dirty, or diverged checkouts are warned about and left alone — --rebase is the
+explicit opt-in past the dirty/diverged skips (autostash rebase; conflicts
+abort and restore); off-branch checkouts are never touched in any mode.
 
-`--reset-gitnexus` force-clears index, wiki and docs mirror and rebuilds (base
-branch only); up-to-date ticks heal a stale verdict (`healed`, no hooks) and
-never retry the same failure every tick (`knowledge-stale:<codes>`).
+`--reset-gitnexus` force-clears the index and rebuilds it (base branch only);
+up-to-date ticks heal a stale verdict (`healed`, no hooks) and never retry the
+same failure every tick (`knowledge-stale:<codes>`).
 """
 
 from __future__ import annotations
@@ -214,7 +213,6 @@ def _refresh_index(
     ctx: ToolContext,
     cfg: Config,
     root: str,
-    enable_documentation: bool,
     *,
     reset: bool = False,
     reset_progress: ResetProgress | None = None,
@@ -226,7 +224,6 @@ def _refresh_index(
             cfg,
             root,
             cfg.worktree.base_branch,
-            documentation=enable_documentation,
             reset=reset,
             say=_say,
             reset_progress=reset_progress,
@@ -244,7 +241,6 @@ def _tick(
     cfg: Config,
     root: str,
     *,
-    enable_documentation: bool,
     force_refresh: bool,
     last: str | None = None,
     rebase: bool = False,
@@ -287,24 +283,18 @@ def _tick(
             _say("· up to date")
             # --once is the "check now" button: repair whatever is stale (and a
             # pending reset), narrate "current" when nothing is.
-            result = _refresh_index(
-                ctx, cfg, root, enable_documentation, reset=reset, reset_progress=reset_progress
-            )
+            result = _refresh_index(ctx, cfg, root, reset=reset, reset_progress=reset_progress)
             if isinstance(result, CheckoutMoved):
                 return f"off-branch:{result.branch}"
             return "refreshed"
-        verdict = snapshot_freshness(
-            ctx, Path(root), base, ref="HEAD", documentation=enable_documentation
-        )
+        verdict = snapshot_freshness(ctx, Path(root), base, ref="HEAD")
         if verdict.fresh and not reset:
             return quiet("up-to-date", f"· up to date — waiting for changes on origin/{base}")
         codes = ",".join(sorted(verdict.codes()))
         if not reset and last == f"knowledge-stale:{codes}":
             return last  # same failure as last tick: no retry hammer, no extra line
         _say("· up to date")
-        after = _refresh_index(
-            ctx, cfg, root, enable_documentation, reset=reset, reset_progress=reset_progress
-        )
+        after = _refresh_index(ctx, cfg, root, reset=reset, reset_progress=reset_progress)
         if isinstance(after, CheckoutMoved):
             return f"off-branch:{after.branch}"
         if after.fresh:
@@ -346,9 +336,7 @@ def _tick(
             )
         new = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
         _say(f"✓ rebased {base}: {old}..{new} ({behind} commits)")
-        _refresh_index(
-            ctx, cfg, root, enable_documentation, reset=reset, reset_progress=reset_progress
-        )
+        _refresh_index(ctx, cfg, root, reset=reset, reset_progress=reset_progress)
         return "synced"
     if ahead not in ("", "0"):
         return quiet(
@@ -366,7 +354,7 @@ def _tick(
         return quiet("merge-failed", f"✗ ff-merge failed: {(cp.stderr or '').strip()[:200]}")
     new = _out(ctx, [ctx.git_bin, "rev-parse", "--short", "HEAD"], root)
     _say(f"✓ synced {base}: {old}..{new} ({behind} commits)")
-    _refresh_index(ctx, cfg, root, enable_documentation, reset=reset, reset_progress=reset_progress)
+    _refresh_index(ctx, cfg, root, reset=reset, reset_progress=reset_progress)
     return "synced"
 
 
@@ -376,7 +364,6 @@ def run_watch(
     *,
     interval: int = 30,
     once: bool = False,
-    enable_documentation: bool = False,
     auto_build: bool = False,
     rebase: bool = False,
     clear_mutex: bool = False,
@@ -423,16 +410,11 @@ def run_watch(
         if not acquire_instance(instance, clear=clear_mutex):
             print(WATCH_BAIL_MSG, file=sys.stderr)
             return 1
-    _say(
-        f"→ watching {root} (base {base}, every {interval}s"
-        f"{', documentation enabled' if enable_documentation else ''}) — Ctrl-C stops"
-    )
+    _say(f"→ watching {root} (base {base}, every {interval}s) — Ctrl-C stops")
     last: str | None = None
     reset_pending = reset_gitnexus
     reset_note: str | None = None
     model_groups: set[str] = set()
-    if enable_documentation:
-        model_groups.add("docs")
     if auto_build:
         model_groups.add("orchestrator")
     first_tick = True
@@ -467,7 +449,6 @@ def run_watch(
                     ctx,
                     cfg,
                     root,
-                    enable_documentation=enable_documentation,
                     force_refresh=once,
                     last=last,
                     rebase=rebase,

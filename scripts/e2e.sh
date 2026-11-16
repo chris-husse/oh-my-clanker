@@ -127,10 +127,11 @@ hold_image() {
 sweep() {
     # Only containers a crashed run left behind: never a running one, so a
     # concurrent run on this host (same or another checkout) is untouched.
+    # `xargs -r`: GNU xargs runs `docker rm -f` once on empty input (BSD accepts -r too).
     [ "$no_docker" = 1 ] && return 0
     docker ps -a --filter status=exited --filter status=created --filter status=dead \
         --format '{{.ID}} {{.Image}}' \
-        | awk '$2 ~ /^omc-e2e(:|-stage:)/ {print $1}' | xargs docker rm -f >/dev/null 2>&1 || true
+        | awk '$2 ~ /^omc-e2e(:|-stage:)/ {print $1}' | xargs -r docker rm -f >/dev/null 2>&1 || true
 }
 run_golden() {
     uv run pytest -m "e2e and golden and not expensive and not codex_gate" -q -n 0 \

@@ -107,12 +107,10 @@ hypotheses. If you don't know what the user is asking about, ask.
 Before the first dispatch, ground yourself in the implicated code *in the
 main thread* — preferably with one `/omc:explain` pass ("which parts of this
 codebase are relevant to: <the symptom/lead>?"), called as a command, never
-unpacked: it composes the project's knowledge graph, generated docs, and its
+unpacked: it composes the project's knowledge graph and its
 own explain-context. When explain is unavailable (no index), fall back to
-reading the generated GitNexus docs under `.omc/docs/gitnexus/docs/` directly
-(skip silently when absent), design records where the project's
-explain-context points, specific source files only when the docs point at
-them. Workers never do this — the orchestrator is the only thing that
+design records where the project's explain-context points, and specific
+source files only when those records point at them. Workers never do this — the orchestrator is the only thing that
 synthesizes against code. During the loop, `/omc:explain` does double duty —
 it answers the "how does this code work" questions a finding raises AND is how
 you pressure-test and refine the findings themselves (see step 5).

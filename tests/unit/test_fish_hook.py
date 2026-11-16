@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from ._fishpty import drive_fish
+from ._stubs import host_bin
 
 HOOK = Path(__file__).resolve().parents[2] / "src" / "omc" / "assets" / "omc-title.fish"
 SESSION = "w0t1p0:38B11221-B7E1-4F36-8A3B-50D549172632"
@@ -38,6 +39,7 @@ printf 'via-helper %s\\n' "$*" >> "$OMC_TEST_LOG"
 exit 0
 """
 # In-fish bounded wait: the helper is disowned and the pipe session ends with `exit`.
+# `{sleep}` is the real sleep's resolved path: PATH holds only the stubs.
 WAIT_FN = """function __wait_log --argument-names pattern count
     set -l tries 0
     while test $tries -lt 200
@@ -47,7 +49,7 @@ WAIT_FN = """function __wait_log --argument-names pattern count
             end
         end
         set tries (math $tries + 1)
-        /bin/sleep 0.05
+        {sleep} 0.05
     end
     echo "__wait_log: $pattern x$count not reached" >&2
     return 1
@@ -89,6 +91,7 @@ class HookShell:
         (self.stubs / "omc").write_text(STUB_OMC)
         (self.stubs / "omc").chmod(0o755)
         (self.stubs / "git").symlink_to(git)  # the hook runs `command git`
+        (self.stubs / "mkdir").symlink_to(host_bin("mkdir"))  # and `command mkdir`
         self.config = tmp_path / "config"
         confd = self.config / "fish" / "conf.d"
         confd.mkdir(parents=True)
@@ -99,7 +102,8 @@ class HookShell:
             'echo USER_CONFIG >> "$OMC_TEST_LOG"\nfunction fish_title; echo USER_TITLE; end\n'
         )
         self.helpers = tmp_path / "helpers.fish"
-        self.helpers.write_text(WAIT_FN)
+        self.sleep = host_bin("sleep")
+        self.helpers.write_text(WAIT_FN.format(sleep=self.sleep))
         self.omc_home = tmp_path / "omc home"
         self.log = tmp_path / "omc.log"
         (tmp_path / "home").mkdir()
@@ -265,7 +269,7 @@ def test_user_fish_title_and_config_untouched_one_handler_after_resourcing(sh):
 def test_inert_shells_record_nothing(sh, env):
     proc = sh.run(
         "emit fish_prompt; git switch -qc feature/second; emit fish_prompt; "
-        "cd /; emit fish_prompt; /bin/sleep 0.3; functions --handlers",
+        f"cd /; emit fish_prompt; {sh.sleep} 0.3; functions --handlers",
         env=env,
     )
     assert proc.returncode == 0, proc.stderr
@@ -297,7 +301,7 @@ def test_failure_marker_hints_once_and_retries_once_per_failure(sh):
     proc = sh.run(
         "emit fish_prompt; __wait_log '^request:' 1; emit fish_prompt; emit fish_prompt; "
         f"echo {shlex.quote(second)} > {shlex.quote(str(marker))}; "
-        "emit fish_prompt; __wait_log '^request:' 2; emit fish_prompt; /bin/sleep 0.3"
+        f"emit fish_prompt; __wait_log '^request:' 2; emit fish_prompt; {sh.sleep} 0.3"
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stderr.splitlines() == [first, second]
@@ -329,7 +333,31 @@ def test_omc_added_to_path_later_is_picked_up(sh):
 
 def test_missing_git_changes_nothing(sh):
     (sh.stubs / "git").unlink()
-    proc = sh.run("emit fish_prompt; emit fish_prompt; /bin/sleep 0.2")
+    proc = sh.run(f"emit fish_prompt; emit fish_prompt; {sh.sleep} 0.2")
+    assert proc.returncode == 0
+    assert proc.stderr == ""
+    assert sh.lines() == ["USER_CONFIG"]
+
+
+def test_request_dir_is_made_with_the_mkdir_on_path(sh):
+    # Like git and omc, mkdir resolves through PATH: hosts such as NixOS have no /bin/mkdir.
+    made = sh.tmp / "mkdir.calls"
+    (sh.stubs / "mkdir").unlink()
+    (sh.stubs / "mkdir").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> {shlex.quote(str(made))}\n'
+        f'exec {shlex.quote(host_bin("mkdir"))} "$@"\n'
+    )
+    (sh.stubs / "mkdir").chmod(0o755)
+    proc = sh.run("emit fish_prompt; __wait_log '^request:' 1")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    assert made.read_text() == f"-p {sh.omc_home / 'title-request'}\n"
+    assert sh.requests() == ["set feature/first"]
+
+
+def test_missing_mkdir_changes_nothing(sh):
+    (sh.stubs / "mkdir").unlink()
+    proc = sh.run(f"emit fish_prompt; emit fish_prompt; {sh.sleep} 0.2")
     assert proc.returncode == 0
     assert proc.stderr == ""
     assert sh.lines() == ["USER_CONFIG"]

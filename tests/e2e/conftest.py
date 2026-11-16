@@ -211,22 +211,3 @@ def stage_session(request, e2e_provider):
         with session:
             session.bind(manifest["slug"], manifest["worktree"], manifest["repo"])
             yield c, session, manifest
-
-
-@pytest.fixture
-def container_with_artifacts(e2e_image, e2e_provider):
-    """A container with tests/e2e/artifacts mounted rw at /artifacts — the
-    permanent-E2E-artifact channel (committed wiki docs sync back out)."""
-    from testcontainers.core.container import DockerContainer
-
-    artifacts = REPO_ROOT / "tests" / "e2e" / "artifacts"
-    artifacts.mkdir(parents=True, exist_ok=True)
-    use_codex_account = e2e_provider == "codex"
-    c = _forward_tokens(
-        DockerContainer(e2e_image)
-        .with_command("sleep infinity")
-        .with_volume_mapping(str(artifacts), "/artifacts", "rw"),
-        use_codex_account=use_codex_account,
-    )
-    with codex_account(c, _finish_container_setup, use_account=use_codex_account):
-        yield c

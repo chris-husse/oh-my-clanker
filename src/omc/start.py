@@ -72,17 +72,14 @@ def build_start_seed(context: str, knowledge: dict | None = None) -> str:
 
 def render_knowledge_alert(v) -> list[str]:
     """The stderr block for a stale verdict (spec §5): header, ONE `  · <text>`
-    per reason (index reasons first, then wiki), the fix line. index-missing
+    per reason in verdict order, the fix line. index-missing
     alone gets the two-line form: a never-indexed project needs no distance."""
     fix = f"  → fix: {v.fix}   (run in {v.run_in})"
     if v.codes() == ["index-missing"]:
         return ["✗ no knowledge snapshot yet — /omc:explain has nothing to answer from", fix]
-    ordered = [r for r in v.reasons if not r.code.startswith("wiki-")] + [
-        r for r in v.reasons if r.code.startswith("wiki-")
-    ]
     return (
         ["✗ knowledge snapshot is stale — /omc:explain will answer from old data"]
-        + [f"  · {r.text}" for r in ordered]
+        + [f"  · {r.text}" for r in v.reasons]
         + [fix]
     )
 

@@ -1,6 +1,7 @@
 """Real Worktrunk regression for a failing pre-start hook."""
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,22 +15,45 @@ from omc.toolctx import ToolContext
 from omc.worktree import create_worktree
 from omc.wtconfig import WT_TEMPLATE
 
+# The oldest Worktrunk these tests support; CI installs exactly this one
+# (.github/workflows/ci.yml).
+WT_MINIMUM = (0, 79, 0)
+_WT_MIN = ".".join(map(str, WT_MINIMUM))
+WT_INSTALL = (
+    f"Worktrunk v{_WT_MIN} or newer is required. On Linux run: "
+    'target="$(uname -m)-unknown-linux-musl"; '
+    'asset="worktrunk-${target}.tar.xz"; '
+    f"release=https://github.com/max-sixty/worktrunk/releases/download/v{_WT_MIN}; "
+    'curl -fsSLO "$release/$asset"; '
+    'curl -fsSLO "$release/$asset.sha256"; '
+    'sha256sum -c "$asset.sha256"; '
+    'tar -xJf "$asset"; '
+    'sudo install -m 0755 "worktrunk-${target}/wt" /usr/local/bin/wt'
+)
+
+
+# The pre-start hook's `exit 7`, as each supported Worktrunk reports it:
+# v0.79: "pre-start command failed: exit status: 7"
+# v0.82: "✗ pre-start project hook failed (exit code 7)"
+HOOK_EXIT_7 = r"pre-start (command failed: exit status: 7\b|project hook failed \(exit code 7\))"
+
+
+def _require_wt(wt):
+    """`wt` when it is WT_MINIMUM or newer; older or unparseable fails loud with the install."""
+    if wt is None:
+        pytest.fail(WT_INSTALL)
+    found = subprocess.run(
+        [wt, "--version"], capture_output=True, text=True, timeout=10
+    ).stdout.strip()
+    match = re.match(r"wt v?(\d+)\.(\d+)\.(\d+)\b", found)
+    if match is None or tuple(map(int, match.groups())) < WT_MINIMUM:
+        pytest.fail(f"{WT_INSTALL} (found `{found}` at {wt})")
+    return wt
+
 
 @pytest.fixture
 def failing_hook_repo(tmp_path, request):
-    wt = shutil.which("wt")
-    if wt is None:
-        pytest.fail(
-            "Worktrunk v0.79.0 is required. On Linux run: "
-            'target="$(uname -m)-unknown-linux-musl"; '
-            'asset="worktrunk-${target}.tar.xz"; '
-            "release=https://github.com/max-sixty/worktrunk/releases/download/v0.79.0; "
-            'curl -fsSLO "$release/$asset"; '
-            'curl -fsSLO "$release/$asset.sha256"; '
-            'sha256sum -c "$asset.sha256"; '
-            'tar -xJf "$asset"; '
-            'sudo install -m 0755 "worktrunk-${target}/wt" /usr/local/bin/wt'
-        )
+    wt = _require_wt(shutil.which("wt"))
 
     private = {
         "HOME": tmp_path / "home",
@@ -271,7 +295,7 @@ def test_real_wt_hook_failure_leaves_worktree_and_branch(failing_hook_repo):
     )
     try:
         assert completed.returncode != 0
-        assert "pre-start command failed: exit status: 7" in completed.stderr
+        assert re.search(HOOK_EXIT_7, completed.stderr), completed.stderr
         porcelain = git("worktree", "list", "--porcelain")
         assert "branch refs/heads/feature/hook-failure\n" in porcelain
         assert git("show-ref", "--verify", "refs/heads/feature/hook-failure")
@@ -307,7 +331,7 @@ def test_create_worktree_cleans_real_failed_cut(failing_hook_repo, monkeypatch):
     ctx = ToolContext.from_env(env)
     ctx.wt_bin = wt
 
-    with pytest.raises(OmcError, match="pre-start command failed: exit status: 7"):
+    with pytest.raises(OmcError, match=HOOK_EXIT_7):
         create_worktree(ctx, "feature/hook-failure", base="origin/main")
 
     porcelain = git("worktree", "list", "--porcelain")
@@ -321,3 +345,45 @@ def test_create_worktree_cleans_real_failed_cut(failing_hook_repo, monkeypatch):
         == 1
     )
     assert git("status", "--porcelain") == ""
+
+
+def _fake_wt(tmp_path, version_line):
+    wt = tmp_path / "wt"
+    wt.write_text(f"#!/bin/sh\necho '{version_line}'\n")
+    wt.chmod(0o755)
+    return str(wt)
+
+
+@pytest.mark.parametrize("line", ["wt v0.78.1", "wt 0.9.0", "garbled"])
+def test_too_old_or_unknown_worktrunk_fails_loud_naming_the_install(tmp_path, line):
+    # Below the minimum (or unparseable) must fail with the install command, never as a
+    # confusing assertion mismatch. 0.9.0 < 0.79.0: compared numerically, not as text.
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _require_wt(_fake_wt(tmp_path, line))
+    assert f"found `{line}`" in str(failure.value)
+    assert "releases/download/v0.79.0" in str(failure.value)
+
+
+@pytest.mark.parametrize("line", ["wt 0.79.0", "wt v0.79.0", "wt 0.82.0"])
+def test_minimum_or_newer_worktrunk_is_accepted(tmp_path, line):
+    wt = _fake_wt(tmp_path, line)
+    assert _require_wt(wt) == wt
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "pre-start command failed: exit status: 7",  # v0.79
+        "✗ pre-start project hook failed (exit code 7)\n",  # v0.82
+    ],
+)
+def test_hook_exit_7_matches_each_supported_worktrunk(stderr):
+    assert re.search(HOOK_EXIT_7, stderr)
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    ["pre-start command failed: exit status: 70", "pre-start project hook failed (exit code 8)"],
+)
+def test_hook_exit_7_rejects_other_exit_codes(stderr):
+    assert not re.search(HOOK_EXIT_7, stderr)

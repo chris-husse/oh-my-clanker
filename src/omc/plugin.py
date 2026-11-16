@@ -20,6 +20,7 @@ official marketplace, `claude plugin list --json` reports omc with no errors.
 
 from __future__ import annotations
 
+import errno
 import json
 import re
 import shlex
@@ -170,7 +171,18 @@ def _codex_skill_files(plugin_root: Path) -> dict[Path, bytes]:
 
 def _codex_resolve(path: Path, *, purpose: str, strict: bool = False) -> Path:
     try:
-        return path.resolve(strict=strict)
+        resolved = path.resolve(strict=strict)
+        if not strict:
+            # Python 3.12's non-strict resolve raises RuntimeError on a symlink loop;
+            # 3.13+ returns a path silently. A strict probe reports the loop on both
+            # (RuntimeError / ELOOP); any other strict failure (a missing path) is
+            # what non-strict mode tolerates.
+            try:
+                path.resolve(strict=True)
+            except OSError as probe:
+                if probe.errno == errno.ELOOP:
+                    raise
+        return resolved
     except (OSError, RuntimeError, ValueError) as exc:
         raise OmcError(f"cannot resolve Codex {purpose} at {path}: {exc}") from exc
 

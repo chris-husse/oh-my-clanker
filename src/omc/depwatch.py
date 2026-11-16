@@ -1,41 +1,32 @@
 """`omc dependency` (watch/list) — the ~/.omc dependency cache, human side.
 
 `watch`: foreground polling loop like watch.py (omc never creates daemons).
-Each pass DRAINS: ticks re-run back-to-back until a scan finds no new work
-(an attempted-set caps every action at once per pass, so failures cannot
-spin), then the pass announces plainly — "Finished documenting all
-dependencies!" or how many items are still pending. Every mutation is
-delegated to an `omc internal dependency …` subprocess — the loop only scans
-and schedules (which is exactly what the unit tests assert). Runs from
-anywhere: it operates on ~/.omc, not on a project checkout.
+It only ensures: unknown disk checkouts are adopted and unindexed manifest
+entries are cloned and indexed; a commit is done once it is indexed. Each pass
+DRAINS: ticks re-run back-to-back until a scan finds no new work (an
+attempted-set caps every action at once per pass, so failures cannot spin),
+then the pass announces plainly — "Finished indexing all dependencies!" or how
+many items are still pending. Every mutation is delegated to an
+`omc internal dependency ensure` subprocess — the loop only scans and schedules
+(which is exactly what the unit tests assert). Runs from anywhere: it operates
+on ~/.omc, not on a project checkout.
 
-`list`: read-only status table of the manifest (repo, commit, indexed,
-documented) on stdout.
+`list`: read-only status table of the manifest (repo, commit, ref, indexed,
+created) on stdout.
 """
 
 from __future__ import annotations
 
-import contextlib
-import json
-import os
 import re
 import sys
-import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .cli.progress_bar import MultiBarThread, render_bar
 from .dependency import load_manifest, parse_git_url
 from .errors import OmcError
 from .toolctx import ToolContext
 
 _HASH_DIR = re.compile(r"\A[0-9a-f]{40}\Z")
-
-# Wiki generation dominates wall-clock; document up to this many dependencies
-# concurrently. The manifest stays consistent under this: every writer goes
-# through dependency.update_manifest's flock.
-_DOCUMENT_JOBS = 8
 
 
 def _say(msg: str) -> None:
@@ -110,7 +101,6 @@ def _tick(ctx: ToolContext, attempted: set[tuple[str, str]]) -> int:
         entry.get("checkout") for dep in deps.values() for entry in dep.get("commits", {}).values()
     }
     actions = 0
-    documents: list[str] = []
     for checkout in _scan_disk(ctx.home):
         if str(checkout) in known or ("adopt", str(checkout)) in attempted:
             continue
@@ -169,110 +159,19 @@ def _tick(ctx: ToolContext, attempted: set[tuple[str, str]]) -> int:
                     ],
                 )
                 actions += 1
-            elif not entry.get("documented"):
-                if ("document", f"{key}@{commit}") in attempted:
-                    continue
-                attempted.add(("document", f"{key}@{commit}"))
-                documents.append(f"{key}@{commit}")
-    actions += _document_batch(ctx, documents)
     return actions
-
-
-class _DocumentJob:
-    """One document child: percent parsed from its OMC_PROGRESS lines, full
-    output teed to a log file, exit code from the pool future's ctx.stream."""
-
-    def __init__(self, ref: str) -> None:
-        self.ref = ref
-        fd, self.log_path = tempfile.mkstemp(prefix="omc-dep-document-", suffix=".log")
-        self.log = os.fdopen(fd, "w", encoding="utf-8")
-        self.percent: int | None = None
-        self.rc: int | None = None
-        self._start = time.monotonic()
-        self._spin = 0
-
-    def feed(self, line: str) -> None:
-        self.log.write(line + "\n")
-        self.log.flush()
-        if line.startswith("OMC_PROGRESS "):
-            # malformed/foreign progress lines are ignored, never fatal
-            try:
-                pct = json.loads(line.split(" ", 1)[1])["percent"]
-            except (ValueError, KeyError, TypeError):
-                return
-            if isinstance(pct, int) and 0 <= pct <= 100:
-                self.percent = pct
-
-    def row(self) -> str:
-        spin = self._spin
-        if self.percent is None:
-            self._spin += 1
-        return f"{self.ref} {render_bar(self.percent, time.monotonic() - self._start, spin=spin)}"
-
-    def final_line(self) -> str:
-        if self.rc == 0:
-            return f"✓ done {self.ref} (log: {self.log_path})"
-        return f"✗ failed (exit {self.rc}) {self.ref} — log: {self.log_path}"
-
-
-def _document_batch(ctx: ToolContext, refs: list[str]) -> int:
-    """Run the tick's document actions, up to _DOCUMENT_JOBS concurrently.
-    Children are fully piped: each job's output tees to its own log file and
-    its OMC_PROGRESS lines feed a per-dependency bar block (TTY only —
-    headless runs get per-job start/finish lines instead)."""
-    if not refs:
-        return 0
-    if len(refs) > 1:
-        _say(f"→ documenting {len(refs)} dependencies (up to {_DOCUMENT_JOBS} in parallel)")
-    jobs = {ref: _DocumentJob(ref) for ref in refs}
-    tty = bool(getattr(sys.stderr, "isatty", lambda: False)())
-    if not tty:
-        for job in jobs.values():
-            _say(f"→ omc internal dependency document --git {job.ref} — log: {job.log_path}")
-    bar = MultiBarThread(lambda: [job.row() for job in jobs.values()])
-    bar.start()
-
-    def _document(ref: str) -> None:
-        job = jobs[ref]
-        # Contain a missing/unlaunchable omc (watch doctrine: warn+skip, never crash)
-        try:
-            job.rc = ctx.stream(
-                ["omc", "internal", "dependency", "document", "--git", ref],
-                on_line=job.feed,
-            )
-        except OSError as exc:
-            # Recovery write must not itself crash the watch loop: a full disk
-            # would make this write raise, escape pool.map and take the loop down
-            # (violating warn-and-skip). Suppress — the exit code still records it.
-            with contextlib.suppress(OSError):
-                job.log.write(f"{exc}\n")
-            job.rc = -1
-        finally:
-            try:
-                job.log.close()
-            except OSError:
-                pass
-
-    try:
-        with ThreadPoolExecutor(max_workers=min(_DOCUMENT_JOBS, len(refs))) as pool:
-            list(pool.map(_document, refs))
-    finally:
-        bar.stop()
-    for job in jobs.values():
-        _say(job.final_line())
-    return len(refs)
 
 
 def _manifest_status(home: Path) -> tuple[int, int, int]:
     """(dependencies, commits, remaining). Remaining counts manifest commit
-    entries not yet indexed AND documented, plus disk checkouts the manifest
-    doesn't know (a failed adoption must not read as completion)."""
+    entries not yet indexed, plus disk checkouts the manifest doesn't know (a
+    failed adoption must not read as completion)."""
     try:
         deps = load_manifest(home).get("dependencies", {})
     except OmcError:
         return 0, 0, 0
     commits = [e for dep in deps.values() for e in dep.get("commits", {}).values()]
-    remaining = sum(1 for e in commits if not (e.get("indexed") and e.get("documented")))
+    remaining = sum(1 for e in commits if not e.get("indexed"))
     known = {e.get("checkout") for e in commits}
     remaining += sum(1 for checkout in _scan_disk(home) if str(checkout) not in known)
     return len(deps), len(commits), remaining
@@ -294,7 +193,7 @@ def _pass(ctx: ToolContext, *, once: bool) -> int:
             dep_word = "dependency" if ndeps == 1 else "dependencies"
             commit_word = "commit" if ncommits == 1 else "commits"
             _say(
-                "✓ Finished documenting all dependencies! "
+                "✓ Finished indexing all dependencies! "
                 f"({ndeps} {dep_word}, {ncommits} {commit_word})"
             )
         else:
@@ -342,7 +241,6 @@ def run_dependency_list(home: Path) -> int:
             commit[:7],
             entry.get("ref") or "-",
             "✓" if entry.get("indexed") else "✗",
-            "✓" if entry.get("documented") else "✗",
             (entry.get("created") or "")[:10] or "-",
         )
         for key, dep in sorted(deps.items())
@@ -351,7 +249,7 @@ def run_dependency_list(home: Path) -> int:
     if not rows:
         print("no dependencies cached yet — /omc:explain-dependency <name> <question> indexes one")
         return 0
-    header = ("DEPENDENCY", "COMMIT", "REF", "INDEXED", "DOCUMENTED", "CREATED")
+    header = ("DEPENDENCY", "COMMIT", "REF", "INDEXED", "CREATED")
     widths = [max(len(header[i]), *(len(r[i]) for r in rows)) for i in range(len(header))]
     for row in (header, *rows):
         print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())

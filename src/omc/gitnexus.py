@@ -15,16 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .errors import OmcError
-from .mirror import DOCS_MIRROR_REL, clear_docs_mirror, mirror_dir
 from .toolctx import ToolContext, gitnexus_env
-from .wikirun import (
-    _WIKI_POLL_SECONDS,
-    _WIKI_STALL_SECONDS,
-    GitNexusProgress,
-    PageCountTracker,
-    wiki_failure_excerpt,
-)
 from .wtconfig import current_branch
 
 if TYPE_CHECKING:  # annotation-only; ToolContext stays the subprocess boundary
@@ -106,7 +97,7 @@ def _run_analyze(
 
     The embedding phase prints nothing off a TTY (verified notes in the
     Embeddings section below), so liveness is the store changing under the long
-    _EMBED_STALL_SECONDS budget, not bytes under the wiki one — bytes alone
+    _EMBED_STALL_SECONDS budget, not bytes under the default one — bytes alone
     would kill a healthy multi-minute pass."""
     _require_base(ctx, root, base)
     if embed:
@@ -200,6 +191,13 @@ def _backfill_embeddings(ctx: ToolContext, root: Path, say) -> None:
 #   ("Local embedding runtime is not installed. Downloading it now …") and
 #   exits 0 — omc owns the install so that download is narrated, not silent.
 
+# _run_narrated's default liveness budget: 300 s without new output bytes or a
+# heartbeat change marks a wedged child, which is then killed.
+_STALL_SECONDS = 300.0
+
+# One poll per second of the supervised child's heartbeat; monkeypatchable in tests.
+_POLL_SECONDS = 1.0
+
 # The embedding phase prints nothing off a TTY (verified above), so bytes alone
 # would kill a healthy multi-minute pass; the embedding analyze and
 # `embeddings sync` pass this with a store heartbeat.
@@ -254,10 +252,9 @@ def _run_narrated(
     `embeddings sync`: minutes of CPU and downloads that a captured `ctx.run`
     would hide (a silent minute is a bug). By default byte activity is the only
     progress signal (constant heartbeat) and the stall window is
-    _WIKI_STALL_SECONDS; a silent phase passes a real heartbeat (the runtime
+    _STALL_SECONDS; a silent phase passes a real heartbeat (the runtime
     install) and, when it runs for minutes, a longer stall_after (the embedding
-    pass). No progress bar (GITNEXUS_PROGRESS is a wiki-only feature of
-    the fork). Off a TTY analyze prints "\\x1b[2K\\r"-prefixed phase lines; the
+    pass). Off a TTY analyze prints "\\x1b[2K\\r"-prefixed phase lines; the
     escapes are stripped first. Pino JSON lines start with "{" and are not news.
     Returns (completed, stalled) like run_supervised; raises OSError like ctx.run."""
     last = [""]
@@ -273,8 +270,8 @@ def _run_narrated(
         argv,
         cwd=cwd,
         heartbeat=heartbeat if heartbeat is not None else (lambda: None),
-        stall_after=_WIKI_STALL_SECONDS if stall_after is None else stall_after,
-        poll=_WIKI_POLL_SECONDS,
+        stall_after=_STALL_SECONDS if stall_after is None else stall_after,
+        poll=_POLL_SECONDS,
         extra_env=extra_env,
         on_line=on_line,
     )
@@ -334,8 +331,8 @@ def ensure_embeddings(
     try:
         # cwd=home: the install needs no repo, and home exists whenever the CLI does.
         # npm may print nothing for minutes while it downloads, so liveness is the
-        # runtime dir filling up, not bytes; the budget stays the wiki one.
-        budget = _WIKI_STALL_SECONDS
+        # runtime dir filling up, not bytes; the budget stays the default one.
+        budget = _STALL_SECONDS
         cp, stalled = _run_narrated(
             ctx,
             gitnexus_argv(ctx, "embeddings", "install"),
@@ -385,7 +382,7 @@ def store_inverted(root: Path, base: str) -> bool:
 
     GitNexus keys its default store to the branch a repo was FIRST indexed
     on; analyzes on any other branch land in .gitnexus/branches/<slug>/,
-    which the MCP server, staleness hints, and `wiki` never read. Inverted
+    which the MCP server and staleness hints never read. Inverted
     means: incremental refreshes are being delivered where nothing looks.
     """
     owner = flat_store_branch(root)
@@ -398,7 +395,6 @@ def store_inverted(root: Path, base: str) -> bool:
 # meta.json as a legacy mirror; the fork still writes only meta.json. Read the
 # new name first; when both exist the legacy file is ignored entirely.
 INDEX_META_NAMES = ("gitnexus.json", "meta.json")
-WIKI_META_REL = Path(".gitnexus") / "wiki" / "meta.json"
 
 
 def _read_json_object(path: Path) -> dict | None:
@@ -415,10 +411,6 @@ def read_index_meta(root: Path) -> dict | None:
         if p.is_file():
             return _read_json_object(p)  # unreadable counts as missing, no fallback
     return None
-
-
-def read_wiki_meta(root: Path) -> dict | None:
-    return _read_json_object(Path(root) / WIKI_META_REL)
 
 
 @dataclass(frozen=True)
@@ -449,12 +441,6 @@ class Freshness:
 
     def codes(self) -> list[str]:
         return [r.code for r in self.reasons]
-
-    def index_codes(self) -> list[str]:
-        return [c for c in self.codes() if not c.startswith("wiki-")]
-
-    def wiki_codes(self) -> list[str]:
-        return [c for c in self.codes() if c.startswith("wiki-")]
 
 
 def _git_ok(ctx: ToolContext, root: Path, *args: str) -> bool:
@@ -488,7 +474,6 @@ def snapshot_freshness(
     base: str,
     *,
     ref: str | None = None,
-    documentation: bool = True,
 ) -> Freshness:
     """Is the primary's knowledge snapshot trustworthy? Pure: reads two metadata
     files and asks git; never repairs. Distances are measured against ``ref``
@@ -498,9 +483,7 @@ def snapshot_freshness(
     ``index-unknown`` (a known-JSON-shape check: is ``lastCommit`` an object in
     this clone) does not need ``ref`` to resolve; only ``index-diverged`` and
     ``index-behind`` compare against ``ref`` and are skipped when it is
-    unresolved (spec §1: "the distance codes ... are skipped" lists only
-    those two plus wiki-behind, and wiki-behind compares against the index
-    commit, not ``ref``, so it is unaffected either way).
+    unresolved (spec §1: "the distance codes ... are skipped").
     """
     root = Path(primary_root).resolve()
     ref = ref or f"origin/{base}"
@@ -566,58 +549,13 @@ def snapshot_freshness(
                                 "index-behind", f"index is {n} commits behind {ref}", {"count": n}
                             )
                         )
-        if documentation:
-            wiki = read_wiki_meta(root)
-            if wiki is None:
-                reasons.append(Reason("wiki-missing", "no generated docs yet"))
-            else:
-                fc = wiki.get("fromCommit")
-                if not _is_commit(ctx, root, fc):
-                    reasons.append(
-                        Reason(
-                            "wiki-unknown",
-                            "docs were generated from a commit not in this clone",
-                            {"fromCommit": fc},
-                        )
-                    )
-                elif _is_commit(ctx, root, last) and not _git_ok(
-                    ctx, root, "merge-base", "--is-ancestor", last, fc
-                ):
-                    n = int(_git_out(ctx, root, "rev-list", "--count", f"{fc}..{last}") or 0)
-                    reasons.append(
-                        Reason(
-                            "wiki-behind",
-                            f"docs are {n} commits behind the index",
-                            {"fromCommit": fc, "count": n},
-                        )
-                    )
-
-    codes = [r.code for r in reasons]
-    if not codes:
-        fix = ""
-    elif any(c.startswith("wiki-") for c in codes):
-        fix = "omc watch --once --enable-documentation"
-    else:
-        fix = "omc watch --once"
+    fix = "omc watch --once" if reasons else ""
     return Freshness(
         fresh=not reasons, reasons=tuple(reasons), fix=fix, run_in=str(root), basis=basis
     )
 
 
 # ─── The one repair path (spec §2) ──────────────────────────────────────────
-
-
-def _clear_mirror(root: Path, say) -> bool:
-    try:
-        cleared = clear_docs_mirror(root)
-    except OSError as exc:
-        # rmtree can fail (permissions, racing reader); the index is what we are
-        # here for — warn and continue, the next documentation run re-mirrors.
-        say(f"✗ could not delete the stale docs mirror: {exc}")
-        return False
-    if cleared:
-        say("· stale docs mirror deleted")
-    return cleared
 
 
 def _destroy(ctx: ToolContext, root: Path, say) -> bool:
@@ -637,78 +575,22 @@ def _destroy_and_rebuild(
     *,
     embed: bool = False,
     on_fallback: Callable[[], None] | None = None,
-) -> tuple[bool, bool]:
-    """Destroy the store and index from scratch. Returns (healed, mirror_cleared);
-    the second flag is what a "docs mirror cleared" hint may claim.
+) -> bool:
+    """Destroy the store and index from scratch. Returns whether it healed.
 
     Narrates only FAILURE. Getting the branch stamp right is a necessary step,
     not the goal — the recomputed verdict is the goal, so `✓ index rebuilt` is
     the CALLER's line, printed only once that verdict is clean (spec §2)."""
     _require_base(ctx, root, base)
-    mirror_cleared = _clear_mirror(root, say)
     if not _destroy(ctx, root, say):
-        return False, mirror_cleared
+        return False
     cp = _run_analyze(ctx, root, base, embed=embed, say=say, on_fallback=on_fallback)
     if cp.returncode != 0:
         say(f"✗ full analyze failed: {(cp.stderr or cp.stdout or '').strip()[:400]}")
     if flat_store_branch(root) != base:
         say(f"✗ rebuilt index is not owned by {base!r} — not claiming success")
-        return False, mirror_cleared
-    return True, mirror_cleared
-
-
-def _run_wiki(ctx: ToolContext, cfg: Config, root: Path, base: str, say) -> bool:
-    _require_base(ctx, root, base)
-    # Lazy like docs_llm_for below: a module-level import of omc.cli.* from here
-    # is a cycle (omc.cli → start → gitnexus). wikirun.render() does the same.
-    from .cli.progress_bar import BarThread
-    from .providers.registry import docs_llm_for
-
-    try:
-        run = docs_llm_for(cfg)
-    except OmcError as exc:
-        # ConfigError (no key / alias model) or get_provider's plain OmcError —
-        # reachable only by hand-edited files. Return False like the stall path:
-        # `omc watch`'s loop has no OmcError guard and must never crash.
-        say(f"✗ documentation: {exc}")
         return False
-    say(f"→ regenerating documentation via {run.label}")
-    tracker = PageCountTracker(root / ".gitnexus" / "wiki")
-    gn = GitNexusProgress(fallback=tracker)
-    bar = BarThread(gn)  # TTY-gated: constructing on a piped stderr yields a no-op
-    narrated = ""
-
-    def on_line(line: str) -> None:
-        # Runs on run_supervised's reader thread. Off a TTY the bar is silent,
-        # so narrate GitNexus's phase changes instead (a silent minute is a
-        # bug; depwatch narrates headless runs the same way). Heartbeats repeat
-        # the phase and are not news; an unchanged detail is not either.
-        nonlocal narrated
-        gn.feed(run.redact(line))
-        if bar.enabled or gn.phase in ("", "heartbeat") or gn.detail == narrated:
-            return
-        narrated = gn.detail
-        say(f"· {gn.detail}")
-
-    bar.start()
-    try:
-        cp, stalled = ctx.run_supervised(
-            gitnexus_argv(ctx, *run.wiki_args),
-            cwd=str(root),
-            heartbeat=tracker.beat,
-            stall_after=_WIKI_STALL_SECONDS,
-            poll=_WIKI_POLL_SECONDS,
-            extra_env=run.extra_env,  # the key reaches exactly this node child
-            on_line=on_line,
-        )
-    finally:
-        bar.stop()  # clear the bar line before any ✓/✗ narration
-    if stalled:
-        say(f"✗ wiki stalled — no progress for {int(_WIKI_STALL_SECONDS)}s; killed")
-        return False
-    if cp.returncode != 0:
-        say(f"✗ wiki failed (exit {cp.returncode}): {wiki_failure_excerpt(cp, run.redact)}")
-    return True  # the recomputed verdict, not the exit code, decides
+    return True
 
 
 def refresh_knowledge(
@@ -717,7 +599,6 @@ def refresh_knowledge(
     root: Path | str,
     base: str,
     *,
-    documentation: bool,
     reset: bool,
     ref: str = "HEAD",
     say=_say,
@@ -729,24 +610,12 @@ def refresh_knowledge(
     rootp = Path(root)
 
     def verdict() -> Freshness:
-        return snapshot_freshness(ctx, rootp, base, ref=ref, documentation=documentation)
+        return snapshot_freshness(ctx, rootp, base, ref=ref)
 
     did_anything = False
-    mirror_cleared = False
 
     def finish(v: Freshness) -> Freshness:
-        """EVERY exit goes through here: the docs mirror is cleared before the
-        index work and nothing downstream is guaranteed to run, so the promise
-        "a fresh verdict implies a present mirror" has to be kept on the way
-        out — including from the early aborts."""
-        mirror = rootp / DOCS_MIRROR_REL
-        if v.fresh and not mirror.is_dir() and read_wiki_meta(rootp) is not None:
-            # Surviving readable wiki content is useful even when documentation
-            # freshness is deliberately excluded from this refresh's verdict.
-            if mirror_dir(rootp / ".gitnexus" / "wiki", mirror):
-                say("✓ docs mirror restored")
-        if not documentation and mirror_cleared and not mirror.is_dir():
-            say("· docs mirror cleared — run omc watch --once --enable-documentation to regenerate")
+        """EVERY exit goes through here, including the early aborts."""
         if not did_anything:
             say("✓ knowledge is current")
         return v
@@ -757,7 +626,6 @@ def refresh_knowledge(
             reset_progress.attempted = True
         say("→ resetting the knowledge snapshot (--reset-gitnexus)")
         did_anything = True
-        mirror_cleared = _clear_mirror(rootp, say)
         if not _destroy(ctx, rootp, say):
             return finish(verdict())
 
@@ -774,7 +642,7 @@ def refresh_knowledge(
         embed_failed = True
 
     v = verdict()
-    if v.index_codes():
+    if v.codes():
         had_shared_pointer = (rootp / ".gitnexus" / "store.json").exists()
         if had_shared_pointer:
             say(
@@ -783,13 +651,12 @@ def refresh_knowledge(
             )
         did_anything = True
         rebuilt = False
-        if "store-inverted" in v.index_codes():
+        if "store-inverted" in v.codes():
             owner = flat_store_branch(rootp)
             say(f"✗ GitNexus index is owned by {owner!r}, not {base!r} — destroying and rebuilding")
-            healed, cleared = _destroy_and_rebuild(
+            healed = _destroy_and_rebuild(
                 ctx, rootp, base, say, embed=embed and not embed_failed, on_fallback=fell_back
             )
-            mirror_cleared = mirror_cleared or cleared
             if not healed:
                 return finish(verdict())
             rebuilt = True
@@ -802,19 +669,18 @@ def refresh_knowledge(
             else:
                 say("✓ index refreshed")
             v = verdict()
-            if v.index_codes():
-                codes = ",".join(v.index_codes())
+            if v.codes():
+                codes = ",".join(v.codes())
                 say(f"✗ index still stale after analyze ({codes}) — destroying and rebuilding")
-                healed, cleared = _destroy_and_rebuild(
+                healed = _destroy_and_rebuild(
                     ctx, rootp, base, say, embed=embed and not embed_failed, on_fallback=fell_back
                 )
-                mirror_cleared = mirror_cleared or cleared
                 if not healed:
                     return finish(verdict())
                 rebuilt = True
         v = verdict()
-        if v.index_codes():
-            say(f"✗ index still stale after rebuild: {','.join(v.index_codes())}")
+        if v.codes():
+            say(f"✗ index still stale after rebuild: {','.join(v.codes())}")
             return finish(v)
         if rebuilt:
             # Earned only here: the rebuild's branch stamp was necessary, the
@@ -846,19 +712,6 @@ def refresh_knowledge(
             did_anything = True
             _backfill_embeddings(ctx, rootp, say)
 
-    if not documentation:
-        return finish(v)
-
-    if v.wiki_codes():
-        did_anything = True
-        if not _run_wiki(ctx, cfg, rootp, base, say):
-            return finish(verdict())
-        v = verdict()
-        if v.wiki_codes():
-            say("✗ documentation still behind after regeneration")
-            return finish(v)
-        mirror_dir(rootp / ".gitnexus" / "wiki", rootp / DOCS_MIRROR_REL)
-        say("✓ documentation refreshed → .omc/docs/gitnexus/docs")
     return finish(v)
 
 

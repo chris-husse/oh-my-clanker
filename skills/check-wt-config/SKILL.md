@@ -7,8 +7,7 @@ description: Analyze this project's worktrunk config (.config/wt.toml) against o
 
 omc's worktree model needs `wt` to copy the project's important gitignored
 files into every new worktree (.env, secrets, local caches).
-omc itself copies the primary checkout's `.omc/` (including the `.omc/docs`
-knowledge snapshot) into every cut, adding only what is missing, so the
+omc itself copies the primary checkout's `.omc/` into every cut, adding only what is missing, so the
 config never needs to know about it. The starter excludes `.gitnexus/`
 (omc uses the primary graph) and `target/` (build artifacts). This skill
 judges whether the project's config does that.

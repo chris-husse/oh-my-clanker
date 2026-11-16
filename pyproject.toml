@@ -46,7 +46,7 @@ markers = [
     "e2e: dockerized end-to-end tests (opt-in, slow, real LLMs)",
     "local_iterm2: macOS native tier — launches a private iTerm2 instance and real provider TUIs (just iterm2-tests)",
     "e2e_provider(name): declare provider intent for E2E container prerequisites",
-    "expensive: LLM-heavy E2E (documentation generation) - run only with explicit user agreement",
+    "expensive: LLM-heavy E2E (whole-lifecycle evidence runs) - run only with explicit user agreement",
     "codex_gate: Codex integration cases; serial on the account volume (just codex-gate)",
     "golden: ordered golden-path stage; run with -n 0 (scripts/e2e.sh phase 1)",
     "variation(stage): forks a container from a golden stage snapshot",

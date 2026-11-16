@@ -1,4 +1,5 @@
 import os
+import shlex
 import stat
 import subprocess
 
@@ -8,12 +9,19 @@ from omc.config.schema import Config, GitNexusConfig, GlobalConfig
 from omc.gitnexus import embedding_runtime_dir, ensure_embeddings, ensure_gitnexus, update_gitnexus
 from omc.toolctx import ToolContext
 
+from ._stubs import host_bin
+
+
+def _bin(name):
+    """A real tool by resolved, shell-quoted path: node stubs run on a restricted PATH."""
+    return shlex.quote(host_bin(name))
+
 
 @pytest.fixture(autouse=True)
-def _fast_wiki_poll(monkeypatch):
+def _fast_poll(monkeypatch):
     import omc.gitnexus as gitnexus_mod
 
-    monkeypatch.setattr(gitnexus_mod, "_WIKI_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(gitnexus_mod, "_POLL_SECONDS", 0.05)
 
 
 def _git(*args, cwd):
@@ -371,7 +379,8 @@ def _embedding_stub(tmp_path, calls, *, install_rc=0):
     like npm would (or fails), everything else answers --version. Records env."""
     node = tmp_path / "bin" / "node"
     populate = (
-        '/bin/mkdir -p "$GITNEXUS_EMBEDDING_RUNTIME_DIR/node_modules/@huggingface/transformers" '
+        f"{_bin('mkdir')} -p "
+        '"$GITNEXUS_EMBEDDING_RUNTIME_DIR/node_modules/@huggingface/transformers" '
         '"$GITNEXUS_EMBEDDING_RUNTIME_DIR/node_modules/onnxruntime-node"; '
         ': > "$GITNEXUS_EMBEDDING_RUNTIME_DIR/node_modules/@huggingface/transformers'
         '/package.json"; '
@@ -570,7 +579,7 @@ def _silent_install_stub(tmp_path, calls, *, shell):
     npm would. Everything else answers --version."""
     node = tmp_path / "bin" / "node"
     populate = (
-        '/bin/mkdir -p "$RT/node_modules/@huggingface/transformers" '
+        f'{_bin("mkdir")} -p "$RT/node_modules/@huggingface/transformers" '
         '"$RT/node_modules/onnxruntime-node"; '
         ': > "$RT/node_modules/@huggingface/transformers/package.json"; '
         ': > "$RT/node_modules/onnxruntime-node/package.json"; '
@@ -587,25 +596,25 @@ def _silent_install_stub(tmp_path, calls, *, shell):
 
 
 @pytest.mark.parametrize("writes_runtime", [True, False])
-def test_silent_install_lives_on_runtime_writes_and_dies_on_the_wiki_budget(
+def test_silent_install_lives_on_runtime_writes_and_dies_on_the_stall_budget(
     tmp_path, monkeypatch, writes_runtime
 ):
     """npm may print nothing for minutes while it downloads, so bytes alone would
     kill a healthy install: liveness is the runtime dir changing under the
-    _WIKI_STALL_SECONDS budget. A silent install that keeps writing there
+    _STALL_SECONDS budget. A silent install that keeps writing there
     survives and ends ready; one that writes nothing is reported stalled."""
     import omc.gitnexus as gn
 
-    monkeypatch.setattr(gn, "_WIKI_STALL_SECONDS", 0.5)
+    monkeypatch.setattr(gn, "_STALL_SECONDS", 0.5)
     home = tmp_path / "home"
     home.mkdir()
     ctx, calls = _make_ctx(tmp_path, home)
     if writes_runtime:
         # 1.2 s of silence — past the 0.5 s budget — with a new runtime file every 0.2 s.
-        beats = "; ".join(f'/bin/sleep 0.2; : > "$RT/beat{i}"' for i in range(6))
-        _silent_install_stub(tmp_path, calls, shell=f'/bin/mkdir -p "$RT"; {beats}; ')
+        beats = "; ".join(f'{_bin("sleep")} 0.2; : > "$RT/beat{i}"' for i in range(6))
+        _silent_install_stub(tmp_path, calls, shell=f'{_bin("mkdir")} -p "$RT"; {beats}; ')
     else:
-        _silent_install_stub(tmp_path, calls, shell="/bin/sleep 5; ")
+        _silent_install_stub(tmp_path, calls, shell=f"{_bin('sleep')} 5; ")
     said = []
     ready = ensure_embeddings(ctx, _on(), say=said.append)
     assert len(_install_calls(calls)) == 1

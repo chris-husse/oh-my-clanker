@@ -49,6 +49,7 @@ def test_starter_blocks_on_ordered_setup_and_excludes_large_caches():
     )
     assert data["step"]["copy-ignored"]["exclude"] == [".gitnexus/", "target/"]
     assert "post-start" not in data
+    assert ".omc/docs" not in WT_TEMPLATE
     repo_config = Path(__file__).resolve().parents[2] / ".config" / "wt.toml"
     assert repo_config.read_text() == WT_TEMPLATE
 

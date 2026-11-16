@@ -37,11 +37,9 @@ repo). In any other repository, ignore everything in this section.
   Agreement or `ok` is none of these invocations. Stop
   for required answers or genuine blockers. A pending async question is not an
   answer.
-- **Worktrees are snapshots of main** — code and generated knowledge docs
-  (`.omc/docs/`). The `.gitnexus/` graph stays in the primary checkout, where
-  `/omc:explain` queries it. Refresh a worktree with `/omc:rebase-main` (it is
-  also `/omc:finish`'s first step). Never hand-copy or hand-delete `.omc/docs/`;
-  its deterministic mirror lives in `omc internal rebase-main`. Existing
+- **Worktrees are snapshots of main** — its code. The `.gitnexus/` graph stays
+  in the primary checkout, where `/omc:explain` queries it. Refresh a worktree
+  with `/omc:rebase-main` (it is also `/omc:finish`'s first step). Existing
   worktree `.gitnexus/` content is left untouched.
 - **Publish through `/omc:finish`** — squash, rebase, project stage gates
   (`/omc:check` → `/omc:build` → `/omc:verify` → `/omc:review` → final
@@ -88,7 +86,7 @@ repo). In any other repository, ignore everything in this section.
   A required answer resumes the remaining phases under the same authorization;
   in a headless run, make the question the final output.
 - **Ask the graph, not grep**: `/omc:explain <question>` answers from the
-  project's GitNexus knowledge graph and docs.
+  project's GitNexus knowledge graph.
 - **Model selection**: the main session runs the configured Orchestrator
   model from `omc configure` — never second-guess it. Run `omc internal models`
   and read its single `OMC_MODELS` verdict before dispatching lifecycle

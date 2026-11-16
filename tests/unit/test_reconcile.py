@@ -10,23 +10,20 @@ import yaml
 
 from omc import reconcile as under_test
 from omc.config import store
-from omc.config.schema import Config, GlobalConfig, LLMConfig, ProviderConfig, SecretsConfig
+from omc.config.schema import Config, GlobalConfig, LLMConfig, ProviderConfig
 from omc.errors import ConfigError, OmcError
-from omc.providers.registry import docs_llm_for
 from omc.reconcile import StaleLeaf, build_remap_prompt, parse_remap_output
 from omc.taskmodels import CatalogModel
 from omc.toolctx import ToolContext
 
-REVIEW = StaleLeaf("tasks.review", "codex", "sol:high", "Review", "high", "cli")
-MODEL = StaleLeaf("model", "codex", "astra", "Orchestrator", "", "cli")
-DOCS = StaleLeaf("docs_model", "claude", "sonnet", "Documentation model", "", "api")
+REVIEW = StaleLeaf("tasks.review", "codex", "sol:high", "Review", "high")
+MODEL = StaleLeaf("model", "codex", "astra", "Orchestrator", "")
 CODEX_OFFERED = {
     "tasks.review": [CatalogModel("gpt-6-sol", "sol", ("medium", "high"))],
     "model": [CatalogModel("gpt-6-astra", "astra", ("high", "xhigh"))],
 }
+API_ORCHESTRATOR = StaleLeaf("model", "claude", "claude-opus-4-1:max", "Orchestrator", "max")
 # GET /v1/models lists IDs but no effort data: efforts are unknown (None).
-DOCS_OFFERED = {"docs_model": [CatalogModel("claude-sonnet-5-5", "sonnet", None)]}
-API_ORCHESTRATOR = StaleLeaf("model", "claude", "claude-opus-4-1:max", "Orchestrator", "max", "cli")
 API_OFFERED = {"model": [CatalogModel("claude-opus-5-5", "opus", None)]}
 
 
@@ -47,14 +44,11 @@ def test_prompt_names_each_same_provider_leaf_and_its_own_catalog_without_secret
     assert "api_key" not in prompt and "secret" not in prompt.lower()
 
 
-def test_docs_prompt_excludes_effort_even_when_catalog_lists_it():
-    leaf = StaleLeaf("docs_model", "claude", "claude-sonnet-4-1", "Documentation model", "", "cli")
-    offered = {"docs_model": [CatalogModel("claude-sonnet-5-5", "sonnet", ("high",))]}
+def test_prompt_has_no_docs_clause_or_source_fragment():
+    prompt = build_remap_prompt([REVIEW, MODEL], CODEX_OFFERED)
 
-    prompt = build_remap_prompt([leaf], offered)
-
-    assert '"docs_model"' in prompt
-    assert "no :effort" in prompt
+    assert "Task leaves may append :effort only when supported." in prompt
+    assert "docs_model" not in prompt and "source:" not in prompt
 
 
 def test_prompt_marks_unknown_efforts_distinctly_from_none_supported():
@@ -143,26 +137,6 @@ def test_wrong_leaf_catalog_id_error_offers_only_that_leafs_ids():
     assert message.partition("offered IDs: ")[2] == "gpt-6-sol"
 
 
-@pytest.mark.parametrize("answer", ["claude-sonnet-4-0", "claude-haiku-5-5"])
-def test_parser_rejects_unlisted_docs_id(answer):
-    with pytest.raises(ConfigError) as caught:
-        parse_remap_output(json.dumps({"docs_model": answer}), [DOCS], DOCS_OFFERED)
-
-    message = str(caught.value)
-    assert "docs_model" in message and answer in message and "claude-sonnet-5-5" in message
-
-
-def test_parser_rejects_malformed_docs_id_even_when_listed():
-    offered = {"docs_model": [CatalogModel("bad/id", "", ())]}
-
-    with pytest.raises(ConfigError) as caught:
-        parse_remap_output('{"docs_model": "bad/id"}', [DOCS], offered)
-
-    message = str(caught.value)
-    assert "docs_model" in message and "invalid model id 'bad/id'" in message
-    assert "offered IDs: bad/id" in message
-
-
 def test_parser_does_not_return_valid_leaf_when_another_is_bad():
     with pytest.raises(ConfigError):
         parse_remap_output(
@@ -183,39 +157,21 @@ def test_parser_rejects_cheap_id_even_if_it_is_accidentally_offered():
 
 
 def test_parser_rejects_more_than_one_json_object():
-    output = '{"docs_model": "claude-sonnet-5-5"}\n{"docs_model": "claude-sonnet-5-5"}'
-    with pytest.raises(ConfigError, match="docs_model"):
-        parse_remap_output(output, [DOCS], DOCS_OFFERED)
-
-
-def test_docs_effort_must_be_supported_by_the_listed_model():
-    with pytest.raises(ConfigError) as caught:
-        parse_remap_output('{"docs_model": "claude-sonnet-5-5:high"}', [DOCS], DOCS_OFFERED)
-    assert "docs_model" in str(caught.value) and "claude-sonnet-5-5:high" in str(caught.value)
-
-
-def test_docs_remap_rejects_effort_even_when_catalog_supports_it():
-    leaf = StaleLeaf("docs_model", "claude", "claude-sonnet-4-1", "Documentation model", "", "cli")
-    offered = {"docs_model": [CatalogModel("claude-sonnet-5-5", "sonnet", ("high",))]}
-
-    with pytest.raises(ConfigError) as caught:
-        parse_remap_output('{"docs_model": "claude-sonnet-5-5:high"}', [leaf], offered)
-
-    message = str(caught.value)
-    assert "docs_model" in message and "claude-sonnet-5-5:high" in message
-    assert "effort" in message and "claude-sonnet-5-5" in message
+    output = '{"model": "gpt-6-astra"}\n{"model": "gpt-6-astra"}'
+    with pytest.raises(ConfigError, match="invalid remap for model:"):
+        parse_remap_output(output, [MODEL], CODEX_OFFERED)
 
 
 @pytest.mark.parametrize(
     "output",
     [
-        '{"docs_model": "claude-sonnet-5-5", "docs_model": "claude-sonnet-5-5"}',
-        '{"docs_model": "claude-sonnet-5-5"} trailing garbage',
+        '{"model": "gpt-6-astra", "model": "gpt-6-astra"}',
+        '{"model": "gpt-6-astra"} trailing garbage',
     ],
 )
 def test_parser_rejects_ambiguous_or_trailing_json_content(output):
-    with pytest.raises(ConfigError, match="docs_model"):
-        parse_remap_output(output, [DOCS], DOCS_OFFERED)
+    with pytest.raises(ConfigError, match="invalid remap for model:"):
+        parse_remap_output(output, [MODEL], CODEX_OFFERED)
 
 
 def _context(tmp_path: Path) -> ToolContext:
@@ -430,6 +386,13 @@ def test_empty_groups_do_not_read_provider_state_or_global_config(tmp_path, monk
     assert not ctx.home.exists()
 
 
+def test_docs_group_is_unknown(tmp_path):
+    ctx = _context(tmp_path)
+
+    with pytest.raises(ValueError, match="unknown reconciliation groups: docs"):
+        under_test.reconcile(ctx, Config(), {"docs"}, say=lambda _: None, dry_run=False)
+
+
 def test_old_blank_session_config_is_current_without_turn_or_write(tmp_path):
     ctx = _context(tmp_path)
     ctx.home.mkdir()
@@ -633,63 +596,6 @@ def test_suppression_keeps_codex_remap_narration(tmp_path):
     assert len(calls[1]) == 3 and '"model"' in calls[1][2]
 
 
-def test_suppression_omits_current_provider_during_other_provider_remap(tmp_path):
-    for report_current in (False, True):
-        home = tmp_path / ("suppressed" if not report_current else "default")
-        home.mkdir()
-        ctx = _context(home)
-        cfg = _config(ctx, model="gpt-5-sol")
-        cfg.llm.docs.provider = "claude"
-        cfg.llm.providers["claude"] = ProviderConfig(docs_model="claude-sonnet-5-5")
-        store.save_global(ctx.home, GlobalConfig(llm=cfg.llm))
-        _codex_catalog(ctx, CODEX_CURRENT)
-        _claude_catalog(ctx)
-        codex_log = _cli_stub(ctx, "codex", remap_output='{"model": "gpt-6-sol"}')
-        claude_log = _cli_stub(ctx, "claude")
-        lines = []
-
-        kwargs = {} if report_current else {"report_current": False}
-        under_test.reconcile(
-            ctx, cfg, {"orchestrator", "docs"}, say=lines.append, dry_run=False, **kwargs
-        )
-
-        assert len([line for line in lines if line.startswith("→ model:")]) == 1
-        assert any("config updated" in line for line in lines)
-        saved = store.load_global(ctx.home)
-        assert saved is not None
-        assert saved.llm.providers["codex"].model == "gpt-6-sol"
-        assert len(_headless(_calls(codex_log))) == 1
-        assert _headless(_calls(claude_log)) == []
-        if report_current:
-            assert "✓ claude models current (3 listed)" in lines
-        else:
-            assert not any("models current" in line for line in lines)
-
-
-def test_failed_mixed_provider_remap_does_not_report_current(tmp_path):
-    ctx = _context(tmp_path)
-    cfg = _config(ctx, model="gpt-5-sol")
-    cfg.llm.docs.provider = "claude"
-    cfg.llm.providers["claude"] = ProviderConfig(docs_model="claude-sonnet-5-5")
-    store.save_global(ctx.home, GlobalConfig(llm=cfg.llm))
-    before = (ctx.home / "config.yaml").read_bytes()
-    _codex_catalog(ctx, CODEX_CURRENT)
-    _claude_catalog(ctx)
-    codex_log = _cli_stub(ctx, "codex", remap_output="remap rejected", remap_rc=7)
-    claude_log = _cli_stub(ctx, "claude")
-    lines = []
-
-    with pytest.raises(OmcError, match="remap rejected"):
-        under_test.reconcile(ctx, cfg, {"orchestrator", "docs"}, say=lines.append, dry_run=False)
-
-    assert not any("refreshing codex model list" in line for line in lines)
-    assert not any("models current" in line for line in lines)
-    assert (ctx.home / "config.yaml").read_bytes() == before
-    assert cfg.llm.providers["codex"].model == "gpt-5-sol"
-    assert len(_headless(_calls(codex_log))) == 1
-    assert _headless(_calls(claude_log)) == []
-
-
 def test_two_claude_leaves_share_one_default_remap_turn(tmp_path):
     ctx = _context(tmp_path)
     cfg = _config(ctx, "claude", model="claude-opus-4-1", tasks_review="claude-fable-4-1")
@@ -776,152 +682,6 @@ def test_api_key_stale_id_remaps_to_listed_id_keeping_effort(tmp_path):
 
     assert (ctx.home / "config.yaml").read_bytes() == written
     assert len(_headless(_calls(log))) == 1
-
-
-def test_cli_docs_model_remaps_and_keeps_other_provider_leaves(tmp_path):
-    ctx = _context(tmp_path)
-    cfg = _config(ctx, "claude", docs_model="claude-sonnet-4-1", tasks_review="opus")
-    _claude_catalog(ctx)
-    log = _cli_stub(ctx, "claude", remap_output='{"docs_model": "claude-sonnet-5-5"}')
-
-    under_test.reconcile(ctx, cfg, {"docs"}, say=lambda _: None, dry_run=False)
-
-    persisted = store.load_global(ctx.home)
-    assert persisted is not None
-    assert persisted.llm.providers["claude"].docs_model == "claude-sonnet-5-5"
-    assert persisted.llm.providers["claude"].tasks.review == "opus"
-    assert cfg.llm.providers["claude"].docs_model == "claude-sonnet-5-5"
-    assert len(_headless(_calls(log))) == 1
-
-
-@pytest.mark.parametrize("backend", ["cli", "api"])
-def test_saved_docs_effort_remaps_to_full_id_without_effort(tmp_path, monkeypatch, backend):
-    ctx = _context(tmp_path)
-    cfg = _config(ctx, "claude", docs_model="claude-sonnet-5-5:high")
-    cfg.llm.docs.backend = backend
-    store.save_global(ctx.home, GlobalConfig(llm=cfg.llm))
-    if backend == "api":
-        cfg.secrets = SecretsConfig(api_keys={"claude": "secret-token-1234"})
-        monkeypatch.setattr(
-            ctx,
-            "http_get",
-            lambda url, *, headers, timeout=30: (
-                200,
-                '{"data": [{"id": "claude-sonnet-5-5"}]}',
-            ),
-        )
-    else:
-        _claude_catalog(ctx)
-    log = _cli_stub(ctx, "claude", remap_output='{"docs_model": "claude-sonnet-5-5"}')
-    lines = []
-
-    returned = under_test.reconcile(ctx, cfg, {"docs"}, say=lines.append, dry_run=False)
-
-    persisted = store.load_global(ctx.home)
-    assert persisted is not None
-    assert persisted.llm.providers["claude"].docs_model == "claude-sonnet-5-5"
-    assert returned is cfg and cfg.llm.providers["claude"].docs_model == "claude-sonnet-5-5"
-    docs_run = docs_llm_for(cfg)
-    assert docs_run.model == "claude-sonnet-5-5"
-    assert docs_run.wiki_args[docs_run.wiki_args.index("--model") + 1] == "claude-sonnet-5-5"
-    assert len(_headless(_calls(log))) == 1
-    assert len([line for line in lines if "docs_model" in line and "config updated" in line]) == 1
-
-
-def test_api_docs_and_cli_session_use_separate_catalogs_but_one_remap_turn(tmp_path, monkeypatch):
-    ctx = _context(tmp_path)
-    cfg = _config(ctx, "claude", model="claude-opus-4-1", docs_model="claude-sonnet-4-1")
-    cfg.llm.docs.backend = "api"
-    store.save_global(ctx.home, GlobalConfig(llm=cfg.llm))
-    cfg.secrets = SecretsConfig(api_keys={"claude": "secret-token-1234"})
-    _claude_catalog(ctx)
-    log = _cli_stub(
-        ctx,
-        "claude",
-        remap_output='{"model": "claude-opus-5-5", "docs_model": "claude-sonnet-5-5"}',
-    )
-    gets = []
-
-    def http_get(url, *, headers, timeout=30):
-        gets.append((url, headers))
-        return 200, json.dumps({"data": [{"id": "claude-opus-5-5"}, {"id": "claude-sonnet-5-5"}]})
-
-    monkeypatch.setattr(ctx, "http_get", http_get)
-    lines = []
-
-    under_test.reconcile(ctx, cfg, {"session", "docs"}, say=lines.append, dry_run=False)
-
-    assert len(gets) == 1 and gets[0][0] == "https://api.anthropic.com/v1/models?limit=1000"
-    assert gets[0][1]["x-api-key"] == "secret-token-1234"
-    calls = _headless(_calls(log))
-    assert len(calls) == 1  # fresh CLI catalog: no refresh; API docs: no refresh; one remap
-    assert calls[0][:1] == ["-p"] and calls[0][2:] == ["--output-format", "text"]
-    assert '"model"' in calls[0][1] and '"docs_model"' in calls[0][1]
-    assert all("--model" not in call and "-m" not in call for call in calls)
-    persisted = store.load_global(ctx.home)
-    assert persisted is not None
-    assert persisted.llm.providers["claude"].model == "claude-opus-5-5"
-    assert persisted.llm.providers["claude"].docs_model == "claude-sonnet-5-5"
-    assert cfg.llm.providers["claude"].model == "claude-opus-5-5"
-    assert cfg.llm.providers["claude"].docs_model == "claude-sonnet-5-5"
-    assert len([line for line in lines if "config updated" in line]) == 2
-
-
-def test_api_docs_only_gets_list_and_remaps_without_refresh(tmp_path, monkeypatch):
-    ctx = _context(tmp_path)
-    cfg = _config(ctx, "claude", docs_model="claude-sonnet-4-1")
-    cfg.llm.docs.backend = "api"
-    store.save_global(ctx.home, GlobalConfig(llm=cfg.llm))
-    cfg.secrets = SecretsConfig(api_keys={"claude": "secret-token-1234"})
-    log = _cli_stub(ctx, "claude", remap_output='{"docs_model": "claude-sonnet-5-5"}')
-    gets = []
-    monkeypatch.setattr(
-        ctx,
-        "http_get",
-        lambda url, *, headers, timeout=30: (
-            gets.append(url) or 200,
-            '{"data": [{"id": "claude-sonnet-5-5"}]}',
-        ),
-    )
-
-    under_test.reconcile(ctx, cfg, {"docs"}, say=lambda _: None, dry_run=False)
-
-    assert gets == ["https://api.anthropic.com/v1/models?limit=1000"]
-    calls = _headless(_calls(log))
-    assert len(calls) == 1 and calls[0][:1] == ["-p"]
-    assert calls[0][2:] == ["--output-format", "text"]
-    assert "Reply with exactly OK." not in calls[0]
-
-
-@pytest.mark.parametrize("configured", ["", "sonnet"])
-def test_api_docs_family_default_remaps_to_launchable_full_id(tmp_path, monkeypatch, configured):
-    ctx = _context(tmp_path)
-    cfg = _config(ctx, "claude", docs_model=configured)
-    cfg.llm.docs.backend = "api"
-    store.save_global(ctx.home, GlobalConfig(llm=cfg.llm))
-    cfg.secrets = SecretsConfig(api_keys={"claude": "secret-token-1234"})
-    log = _cli_stub(ctx, "claude", remap_output='{"docs_model": "claude-sonnet-5-5"}')
-    gets = []
-
-    def http_get(url, *, headers, timeout=30):
-        gets.append(url)
-        return 200, '{"data": [{"id": "claude-sonnet-5-5"}]}'
-
-    monkeypatch.setattr(ctx, "http_get", http_get)
-
-    returned = under_test.reconcile(ctx, cfg, {"docs"}, say=lambda _: None, dry_run=False)
-
-    assert returned is cfg
-    assert gets == ["https://api.anthropic.com/v1/models?limit=1000"]
-    calls = _headless(_calls(log))
-    assert len(calls) == 1 and calls[0][:1] == ["-p"]
-    assert calls[0][2:] == ["--output-format", "text"]
-    assert "Reply with exactly OK." not in calls[0]
-    persisted = store.load_global(ctx.home)
-    assert persisted is not None
-    assert persisted.llm.providers["claude"].docs_model == "claude-sonnet-5-5"
-    assert cfg.llm.providers["claude"].docs_model == "claude-sonnet-5-5"
-    assert docs_llm_for(cfg).model == "claude-sonnet-5-5"
 
 
 @pytest.mark.parametrize(

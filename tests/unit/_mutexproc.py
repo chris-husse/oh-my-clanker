@@ -10,6 +10,8 @@ import subprocess
 import sys
 import time
 
+from ._stubs import host_bin
+
 _WATCH_DRIVER = (
     "import sys\n"
     "from omc.config.schema import Config\n"
@@ -56,7 +58,7 @@ def install_slow_hook(repo, marker, sleep_s):
     keeps the watch BUSY deterministically after an action tick."""
     hook = repo / ".omc" / "hooks" / "post-watch.sh"
     hook.parent.mkdir(parents=True, exist_ok=True)
-    hook.write_text(f"#!/bin/bash\ntouch {marker}\nsleep {sleep_s}\n")
+    hook.write_text(f"#!{host_bin('bash')}\ntouch {marker}\nsleep {sleep_s}\n")
 
 
 def wait_for(pred, timeout=15.0):

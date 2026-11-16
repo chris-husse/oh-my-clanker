@@ -380,7 +380,7 @@ def test_claude_selection_asks_for_exact_id_once_without_storing_it(tmp_path, mo
         calls.append((args, kwargs))
         return True, "claude-fable-5-1"
 
-    monkeypatch.setattr("omc.docsllm.cli_model_probe", probe)
+    monkeypatch.setattr("omc.modelprobe.cli_model_probe", probe)
     said = []
     assert validate_selection(
         ctx, "claude", "fable", task="design", say=said.append
@@ -393,7 +393,7 @@ def test_claude_selection_asks_for_exact_id_once_without_storing_it(tmp_path, mo
 def test_codex_selection_requires_catalog_and_supported_effort(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     monkeypatch.setattr(
-        "omc.docsllm.cli_model_probe", lambda *a, **kw: (True, "default model works")
+        "omc.modelprobe.cli_model_probe", lambda *a, **kw: (True, "default model works")
     )
     with pytest.raises(ConfigError, match="codex debug models"):
         validate_selection(ctx, "codex", "sol", task="simple", say=lambda _: None)
@@ -405,7 +405,7 @@ def test_codex_selection_requires_catalog_and_supported_effort(tmp_path, monkeyp
 def test_codex_selection_reuses_catalog_and_full_id_probes_itself(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        "omc.docsllm.cli_model_probe", lambda *a, **kw: (calls.append((a[2:], kw)) or True, "OK")
+        "omc.modelprobe.cli_model_probe", lambda *a, **kw: (calls.append((a[2:], kw)) or True, "OK")
     )
     ctx = _ctx(tmp_path)
     # A full id never touches the list: probed directly, with its effort.
@@ -446,7 +446,7 @@ def test_default_clear_resolves_effective_value(tmp_path, monkeypatch):
     _codex_stub(tmp_path, [_model("gpt-6-sol", "GPT-6-Sol", 1)])
     calls = []
     monkeypatch.setattr(
-        "omc.docsllm.cli_model_probe", lambda *a, **kw: (calls.append((a, kw)) or True, "OK")
+        "omc.modelprobe.cli_model_probe", lambda *a, **kw: (calls.append((a, kw)) or True, "OK")
     )
     assert validate_selection(
         _ctx(tmp_path), "codex", "", task="medium", say=lambda _: None
@@ -1038,6 +1038,104 @@ def test_claude_api_key_auth_uses_live_models_when_org_and_cache_are_absent(tmp_
     ]
 
 
+def test_claude_oauth_token_auth_lists_live_models_with_the_bearer_token(tmp_path):
+    """CLAUDE_CODE_OAUTH_TOKEN auth omits orgId, and Claude Code 2.1.325 writes no CLI catalog."""
+    bindir = tmp_path / "bin"
+    make_stub(
+        bindir,
+        "claude",
+        stdout=json.dumps(
+            {
+                "loggedIn": True,
+                "authMethod": "oauth_token",
+                "apiProvider": "firstParty",
+                "configDirectory": str(tmp_path / "claude-config"),
+                "loginExpiresAt": None,
+            }
+        ),
+    )
+    ctx = ToolContext.from_env(stub_env(bindir, CLAUDE_CODE_OAUTH_TOKEN="private-token"))
+    seen = []
+
+    def fake_http_get(url, *, headers=None, timeout=30.0):
+        seen.append((url, dict(headers or {})))
+        return 200, json.dumps(
+            {"data": [{"id": "claude-opus-5-5", "created_at": "2026-05-01T00:00:00Z"}]}
+        )
+
+    ctx.http_get = fake_http_get
+    ctx.now_ms = lambda: pytest.fail("a live listing has no file and no age to judge")
+
+    read = taskmodels.claude_catalog(ctx)
+
+    assert [model.id for model in read.models] == ["claude-opus-5-5"]
+    assert (read.fresh, read.overdue_minutes) == (True, None)
+    assert seen == [
+        (
+            "https://api.anthropic.com/v1/models?limit=1000",
+            {"Authorization": "Bearer private-token", "anthropic-version": "2023-06-01"},
+        )
+    ]
+
+
+def test_claude_oauth_token_auth_without_the_token_env_names_it(tmp_path):
+    bindir = tmp_path / "bin"
+    make_stub(
+        bindir,
+        "claude",
+        stdout=json.dumps(
+            {
+                "loggedIn": True,
+                "authMethod": "oauth_token",
+                "configDirectory": str(tmp_path / "claude-config"),
+            }
+        ),
+    )
+    ctx = ToolContext.from_env(stub_env(bindir))
+    ctx.http_get = lambda url, *, headers=None, timeout=30.0: pytest.fail("no token to send")
+    with pytest.raises(ConfigError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        taskmodels.claude_catalog(ctx)
+
+
+def test_api_catalog_bearer_failure_keeps_token_redacted(tmp_path):
+    token = "sk-ant-oat01-SECRETTOKENabcdefghijklmnop1234"
+    ctx = _ctx(tmp_path)
+    ctx.http_get = lambda url, *, headers=None, timeout=30.0: (0, f"transport echoed {token}")
+    with pytest.raises(ConfigError, match="could not reach api.anthropic.com") as exc:
+        taskmodels._api_catalog(ctx, "claude", token, bearer=True)
+    assert token not in str(exc.value)
+    assert "******" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("auth_method", "env_name", "header", "sent"),
+    [
+        ("api_key", "ANTHROPIC_API_KEY", "x-api-key", "private-key"),
+        ("oauth_token", "CLAUDE_CODE_OAUTH_TOKEN", "Authorization", "Bearer private-key"),
+    ],
+)
+def test_claude_live_catalog_strips_crlf_from_the_env_credential(
+    tmp_path, auth_method, env_name, header, sent
+):
+    """A CRLF `.env` leaves "\\r\\n" on the value; the header carries the bare credential."""
+    bindir = tmp_path / "bin"
+    make_stub(
+        bindir,
+        "claude",
+        stdout=json.dumps({"loggedIn": True, "authMethod": auth_method}),
+    )
+    ctx = ToolContext.from_env(stub_env(bindir, **{env_name: " private-key\r\n"}))
+    seen = []
+
+    def fake_http_get(url, *, headers=None, timeout=30.0):
+        seen.append(dict(headers or {}))
+        return 200, json.dumps({"data": [{"id": "claude-opus-5-5", "created_at": ""}]})
+
+    ctx.http_get = fake_http_get
+    taskmodels.claude_catalog(ctx)
+    assert [h[header] for h in seen] == [sent]
+
+
 def test_api_catalog_reuses_http_probe_filters_haiku_and_orders_newest(tmp_path):
     ctx = _ctx(tmp_path)
     seen = []
@@ -1058,7 +1156,7 @@ def test_api_catalog_reuses_http_probe_filters_haiku_and_orders_newest(tmp_path)
         )
 
     ctx.http_get = fake_http_get
-    listed = taskmodels.catalog(ctx, "claude", docs_api_key="private-key")
+    listed = taskmodels._api_catalog(ctx, "claude", "private-key")
     assert listed == [
         taskmodels.CatalogModel("claude-nova-5-5", "", None),
         taskmodels.CatalogModel("foreign-model", "", None),
@@ -1081,6 +1179,6 @@ def test_api_catalog_failure_keeps_key_redacted(tmp_path):
     key = "sk-ant-api03-SECRETKEYabcdefghijklmnop1234"
     ctx.http_get = lambda url, *, headers=None, timeout=30.0: (0, f"transport echoed {key}")
     with pytest.raises(ConfigError, match="could not reach api.anthropic.com") as exc:
-        taskmodels.catalog(ctx, "claude", docs_api_key=key)
+        taskmodels._api_catalog(ctx, "claude", key)
     assert key not in str(exc.value)
     assert "******" in str(exc.value)

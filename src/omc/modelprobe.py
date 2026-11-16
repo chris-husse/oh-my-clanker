@@ -1,14 +1,14 @@
-"""Configure-time validation of the documentation LLM backend (spec
-2026-10-01 §3.2). Two probes per backend, each returning ``(ok, detail)`` like
-``toolctx.tool_version`` — never raising from the subprocess/HTTP layer. All
-I/O goes through ToolContext; this module does no subprocess or network calls
-itself. It also OWNS key redaction: ToolContext never knows the key.
+"""Model probes used by model reconciliation and the task-model pickers: the
+provider CLI's login state, one headless model turn, and the HTTP model listing
+for API-key and OAuth-token auth. Probes return ``(ok, detail)`` like
+``toolctx.tool_version`` — never raising from the subprocess/HTTP layer. All I/O goes through
+ToolContext; this module does no subprocess or network calls itself. It also
+OWNS key redaction: ToolContext never knows the key.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -22,39 +22,30 @@ HEADLESS_PROBE_PROMPT = "Reply with exactly OK."
 HEADLESS_PROBE_TIMEOUT = 120.0
 AUTH_STATUS_TIMEOUT = 30.0
 MASK = "******"
-# A model id goes into the per-id URL path verbatim (no urllib here: ToolContext
-# is the only network boundary), so anything outside this set is refused.
-_MODEL_ID = re.compile(r"[A-Za-z0-9._:-]+")
 
 
 class ProbeFailed(OmcError):
-    """A documentation probe failed. The message is ALREADY redacted — cli.main
+    """A model probe failed. The message is ALREADY redacted — cli.main
     prints it verbatim as `error: …` (rc 1)."""
 
 
-def mask_key(key: str) -> str:
-    """`******` + the last four characters; all asterisks under eight."""
-    return f"{MASK}{key[-4:]}" if len(key) >= 8 else "********"
-
-
 def redact(text: str, key: str) -> str:
-    """Exact-substring replacement — sufficient given the key rules (printable
-    ASCII, no whitespace). Callers redact BEFORE truncating."""
-    return text.replace(key, MASK) if key else text
+    """Replace the key and its repr-escaped forms. A key with a control character
+    (a trailing \\r from a CRLF `.env`) reaches the text escaped: http.client's
+    "Invalid header value b'Bearer …\\\\r'" carries the bytes repr, not the
+    key. Callers redact BEFORE truncating."""
+    if not key:
+        return text
+    forms = {key, repr(key)[1:-1], repr(key.encode("utf-8", "backslashreplace"))[2:-1]}
+    for form in sorted(forms, key=len, reverse=True):
+        text = text.replace(form, MASK)
+    return text
 
 
 @dataclass(frozen=True)
 class ModelInfo:
     id: str
     created_at: str
-
-
-@dataclass(frozen=True)
-class DocsSelection:
-    provider: str
-    backend: str  # "cli" | "api"
-    model: str  # cli: alias or id or ""; api: alias or full id or ""
-    key: str  # "" on cli
 
 
 Say = Callable[[str], object]
@@ -69,10 +60,12 @@ def _host(base: str) -> str:
 
 
 def _models_url(base: str) -> str:
-    return base.rstrip("/") + "/models"  # never "//models": GitNexus-style join
+    return base.rstrip("/") + "/models"  # strip a trailing slash: never "//models"
 
 
-def _headers(key: str) -> dict[str, str]:
+def _headers(key: str, *, bearer: bool = False) -> dict[str, str]:
+    if bearer:
+        return {"Authorization": f"Bearer {key}", "anthropic-version": ANTHROPIC_VERSION}
     return {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION}
 
 
@@ -86,13 +79,16 @@ def _error_message(body: str, key: str) -> str:
 
 
 def api_connection_probe(
-    ctx: ToolContext, provider: str, key: str
+    ctx: ToolContext, provider: str, key: str, *, bearer: bool = False
 ) -> tuple[bool, str, list[ModelInfo]]:
-    """GET /models proves the key and yields the picker's list."""
+    """GET /models proves the key and yields the API catalog's list.
+
+    ``bearer`` sends ``key`` as an OAuth bearer token instead of ``x-api-key``.
+    """
     base = _base(provider)
     host = _host(base)
     status, body = ctx.http_get(
-        f"{_models_url(base)}?limit={MODELS_PAGE_LIMIT}", headers=_headers(key)
+        f"{_models_url(base)}?limit={MODELS_PAGE_LIMIT}", headers=_headers(key, bearer=bearer)
     )
     if status in (401, 403):
         return False, f"key rejected by {host} (HTTP {status})", []
@@ -114,56 +110,8 @@ def api_connection_probe(
     return True, f"key accepted ({len(models)} models)", models
 
 
-def _newest_first(models: list[ModelInfo]) -> list[ModelInfo]:
-    return sorted(models, key=lambda m: m.created_at, reverse=True)
-
-
-def model_choices(models: list[ModelInfo]) -> list[str]:
-    """Picker entries: claude-* only, Haiku dropped (the cheap tier is never
-    used — AGENTS.md tier policy), newest first."""
-    picked = [m for m in models if m.id.startswith("claude-") and "haiku" not in m.id]
-    return [m.id for m in _newest_first(picked)]
-
-
-def check_model_id(model: str) -> str:
-    """Refuse an id that is unsafe in the per-id URL path (`?`, `/`, `#`, …)."""
-    if not _MODEL_ID.fullmatch(model):
-        raise ProbeFailed(f"invalid model id {model!r}")
-    return model
-
-
-def resolve_model(provider: str, model: str, models: list[ModelInfo]) -> str:
-    """A family alias → the newest fetched id with that family's prefix (so the
-    persisted docs_model is a full id and nothing rots); a full id passes through."""
-    prefix = get_provider(provider).api_model_family(model)
-    if not prefix:
-        return check_model_id(model)
-    family = [m for m in models if m.id.startswith(prefix) and "haiku" not in m.id]
-    if not family:
-        raise ProbeFailed(f"no {model} models available to this key")
-    return _newest_first(family)[0].id
-
-
-def api_model_probe(ctx: ToolContext, provider: str, key: str, model_id: str) -> tuple[bool, str]:
-    """Always the per-id GET, never list membership (pagination-proof). The id
-    is re-checked here: configure's typed "Other" id never passes resolve_model."""
-    try:
-        check_model_id(model_id)
-    except ProbeFailed as exc:
-        return False, str(exc)
-    base = _base(provider)
-    status, body = ctx.http_get(f"{_models_url(base)}/{model_id}", headers=_headers(key))
-    if 200 <= status < 300:
-        return True, f"{model_id} works"
-    if status == 404:
-        return False, f"model {model_id!r} is not available to this key"
-    if status == 0:
-        return False, redact(f"could not reach {_host(base)}: {body}", key)
-    return False, f"{_host(base)} answered HTTP {status}: {_error_message(body, key)}"
-
-
 def _auth_status_result(ctx: ToolContext, provider: str) -> tuple[bool, str, dict[str, object]]:
-    """Parse the CLI's login JSON once for the connection probe and catalog."""
+    """Parse the CLI's login JSON once for `auth_status`."""
     argv = get_provider(provider).auth_status_argv()
     if not argv:
         return True, f"no login check for {provider}", {}  # codex: model probe checks login
@@ -191,13 +139,6 @@ def auth_status(ctx: ToolContext, provider: str) -> dict[str, object]:
     if not ok:
         raise ProbeFailed(detail)
     return status
-
-
-def cli_connection_probe(ctx: ToolContext, provider: str) -> tuple[bool, str]:
-    """`claude auth status` → JSON with loggedIn. Lowercase "not logged in" on
-    purpose: the E2E harness fails any output containing `Not logged in`."""
-    ok, detail, _ = _auth_status_result(ctx, provider)
-    return ok, detail
 
 
 def cli_model_probe(
@@ -241,36 +182,7 @@ def cli_model_probe(
     return True, cp.stdout.strip() if return_output else f"{shown} works"
 
 
-def _step(say: Say, ok: bool, detail: str) -> None:
+def step(say: Say, ok: bool, detail: str) -> None:
     say(("✓ " if ok else "✗ ") + detail)
     if not ok:
         raise ProbeFailed(detail)
-
-
-def validate_key_only(ctx: ToolContext, provider: str, key: str, *, say: Say) -> None:
-    """The key changed while the backend is not `api`: prove the key anyway."""
-    say(f"→ checking the key against {_host(_base(provider))}")
-    ok, detail, _ = api_connection_probe(ctx, provider, key)
-    _step(say, ok, detail)
-
-
-def validate_selection(ctx: ToolContext, sel: DocsSelection, *, say: Say) -> str:
-    """Both probes for the selection. Returns the model to PERSIST: on api the
-    resolved full id (alias → newest family member), on cli sel.model as is."""
-    if sel.backend == "api":
-        say(f"→ checking the key against {_host(_base(sel.provider))}")
-        ok, detail, models = api_connection_probe(ctx, sel.provider, sel.key)
-        _step(say, ok, detail)
-        wanted = sel.model or get_provider(sel.provider).docs_model_default()
-        model = resolve_model(sel.provider, wanted, models)
-        say(f"→ validating {model} via api")
-        ok, detail = api_model_probe(ctx, sel.provider, sel.key, model)
-        _step(say, ok, detail)
-        return model
-    say(f"→ checking {sel.provider} login")
-    ok, detail = cli_connection_probe(ctx, sel.provider)
-    _step(say, ok, detail)
-    say(f"→ validating {sel.model or 'default model'} via cli")
-    ok, detail = cli_model_probe(ctx, sel.provider, sel.model)
-    _step(say, ok, detail)
-    return sel.model

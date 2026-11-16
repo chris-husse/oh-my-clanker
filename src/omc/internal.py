@@ -24,7 +24,6 @@ from .gitnexus import (
     refresh_knowledge,
     snapshot_freshness,
 )
-from .mirror import mirror_snapshot
 from .taskmodels import TASKS, task_choice
 from .toolctx import ToolContext
 from .watchlock import acquire_busy_narrated, busy_lock
@@ -40,9 +39,8 @@ from .wtconfig import (
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] [--squash] | wt-template | design-record"
     " | models | global-instructions PROVIDER"
-    " | gitnexus [--git REF] <ensure|status|refresh [--enable-documentation]"
-    "|query|context|impact|cypher> [args…]"
-    " | dependency <ensure|document|list> [args…]"
+    " | gitnexus [--git REF] <ensure|status|refresh|query|context|impact|cypher> [args…]"
+    " | dependency <ensure|list> [args…]"
     " | skills list NAME"
     " | build-progress LOGFILE | herdr-cwd}"
 )
@@ -87,11 +85,7 @@ def _knowledge_refresh(ctx: ToolContext, rest: list[str]) -> int:
     """Repair the primary's knowledge snapshot in place (spec §4). Never fetches
     and never takes the INSTANCE lock: the verdict is measured against HEAD, so
     a primary nobody syncs can still become fresh; `omc watch` owns syncing."""
-    parser = argparse.ArgumentParser(prog="omc internal gitnexus refresh", add_help=False)
-    parser.add_argument("--enable-documentation", action="store_true")
-    try:
-        args = parser.parse_args(rest)
-    except SystemExit:
+    if rest:  # refresh takes no arguments; argparse would echo the rejected one
         print(_USAGE, file=sys.stderr)
         return 2
     try:
@@ -119,7 +113,7 @@ def _knowledge_refresh(ctx: ToolContext, rest: list[str]) -> int:
         return 1
     lock = busy_lock(ctx, cwd=primary)
     # Held for the WHOLE repair so `omc design` never snapshots a half-written
-    # index/wiki; the context manager releases it on exceptions too.
+    # index; the context manager releases it on exceptions too.
     try:
         with acquire_busy_narrated(lock, _say) if lock is not None else nullcontext():
             v = refresh_knowledge(
@@ -127,7 +121,6 @@ def _knowledge_refresh(ctx: ToolContext, rest: list[str]) -> int:
                 cfg,
                 primary,
                 base,
-                documentation=args.enable_documentation,
                 reset=False,
                 say=_say,
             )
@@ -170,7 +163,7 @@ def _squash(ctx: ToolContext, root: str, base: str, old: str) -> int | None:
         return None
     dirty = bool((status.stdout or "").strip())
     if dirty:
-        # Untracked files fold too; ignored ones (.omc/docs, .gitnexus) never do.
+        # Untracked files fold too; ignored ones (.gitnexus) never do.
         _say("→ folding uncommitted changes into the squash")
         add = ctx.run([git, "add", "-A"])
         if add.returncode != 0:
@@ -239,8 +232,6 @@ def _rebase_main(ctx: ToolContext, base_arg: str | None, squash: bool) -> int:
             {
                 "ok": True,
                 "rebased": "",
-                "synced": [],
-                "shared": [],
                 "note": "primary checkout — nothing to rebase",
                 # No fetch on this path (and none is added for a verdict) — `basis`
                 # names the local ref it was measured against.
@@ -301,23 +292,13 @@ def _rebase_main(ctx: ToolContext, base_arg: str | None, squash: bool) -> int:
         return 3
 
     new = (ctx.run([ctx.git_bin, "rev-parse", "--short", "HEAD"]).stdout or "").strip()
-    synced: list[str] = []
-    shared: list[str] = []
-    if not in_primary:  # the primary IS the snapshot's source: nothing to mirror
-        result = mirror_snapshot(Path(primary), Path(root))
-        synced, shared = result.synced, result.shared
     # Deliberately NO gitnexus invocation here — indexing is `omc watch`'s
     # exclusive feature. Registering the copied snapshot (`gitnexus index` in
     # the worktree, removed 2026-08-03) minted a same-named registry entry
     # frozen at cut time per worktree, never unregistered; stale-entry lookups
     # then reported "N commits behind" while the primary index was current.
     # Worktree queries don't need registration: the proxy pins --repo <primary>.
-    payload = {
-        "ok": True,
-        "rebased": f"{old}..{new}",
-        "synced": synced,
-        "shared": shared,
-    }
+    payload = {"ok": True, "rebased": f"{old}..{new}"}
     if squashed is not None:
         payload["squashed"] = squashed  # only with --squash; finish reports it as N→1
     payload["knowledge"] = knowledge
@@ -564,7 +545,7 @@ def run_internal(argv: list[str]) -> int:
             return 2
         return _skills_list(ToolContext.from_env(), rest[1])
     if cmd == "dependency":
-        from .dependency import run_document, run_ensure, run_list
+        from .dependency import run_ensure, run_list
 
         if not rest:
             print(_USAGE, file=sys.stderr)
@@ -572,20 +553,16 @@ def run_internal(argv: list[str]) -> int:
         sub, *dep_rest = rest
         if sub == "list" and not dep_rest:
             return run_list(ToolContext.from_env().home)
-        if sub in ("ensure", "document"):
-            parser = argparse.ArgumentParser(prog=f"omc internal dependency {sub}", add_help=False)
+        if sub == "ensure":
+            parser = argparse.ArgumentParser(prog="omc internal dependency ensure", add_help=False)
             parser.add_argument("--git", required=True)
-            if sub == "ensure":
-                parser.add_argument("--commit", default=None)
+            parser.add_argument("--commit", default=None)
             try:
                 args = parser.parse_args(dep_rest)
             except SystemExit:
                 print(_USAGE, file=sys.stderr)
                 return 2
-            ctx = ToolContext.from_env()
-            if sub == "ensure":
-                return run_ensure(ctx, args.git, args.commit)
-            return run_document(ctx, args.git)
+            return run_ensure(ToolContext.from_env(), args.git, args.commit)
         print(_USAGE, file=sys.stderr)
         return 2
     if cmd == "build-progress":

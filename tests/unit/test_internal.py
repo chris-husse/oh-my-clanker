@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 
@@ -9,6 +10,8 @@ import pytest
 from omc.internal import run_internal
 from omc.toolctx import ToolContext
 from omc.wtconfig import rebase_in_progress
+
+from ._stubs import host_bin
 
 
 def test_global_instructions_dispatch_writes_each_provider_from_installed_package(
@@ -362,17 +365,17 @@ def test_rebase_main_in_primary_is_noop(tmp_path, capsys):
     rc, verdict, _ = _run(["rebase-main", "--base", "main"], primary, tmp_path, capsys)
     assert rc == 0
     assert verdict["ok"] is True and "primary" in verdict["note"]
-    assert verdict["synced"] == [] and verdict["shared"] == []
+    assert set(verdict) == {"ok", "rebased", "note", "knowledge"}
 
 
-def test_rebase_main_rebases_and_mirrors_snapshot(tmp_path, capsys):
+def test_rebase_main_rebases_without_mirroring(tmp_path, capsys):
     _, primary = _setup_primary_with_origin(tmp_path)
     wt = _add_worktree(primary, tmp_path)
     (wt / "mine.txt").write_text("work\n")
     _git("add", ".", cwd=wt)
     _git("commit", "-qm", "my work", cwd=wt)
     _advance_main(primary)
-    # primary carries fresher docs than the worktree
+    # a leftover primary .omc/docs is no longer mirrored into the worktree
     (primary / ".gitnexus").mkdir()
     (primary / ".gitnexus" / "graph.db").write_text("fresh")
     (primary / ".omc" / "docs").mkdir(parents=True)
@@ -384,31 +387,13 @@ def test_rebase_main_rebases_and_mirrors_snapshot(tmp_path, capsys):
     rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
 
     assert rc == 0 and verdict["ok"] is True
-    assert verdict["synced"] == [".omc/docs"]
-    assert verdict["shared"] == []  # stable schema: key present even when empty
+    assert set(verdict) == {"ok", "rebased", "knowledge"}
     assert verdict["rebased"]  # old..new range recorded
     assert (wt / "f2.txt").exists()  # main's commit arrived under our work
     assert (wt / "mine.txt").exists()
-    assert (wt / ".omc" / "docs" / "page.md").read_text() == "fresh docs"
+    assert not (wt / ".omc" / "docs" / "page.md").exists()
     assert (wt / ".gitnexus" / "graph.db").read_text() == "stale"
     assert (wt / ".gitnexus" / "extraneous").read_text() == "x"
-
-
-def test_rebase_main_reports_shared_omc_docs(tmp_path, capsys):
-    _, primary = _setup_primary_with_origin(tmp_path)
-    wt = _add_worktree(primary, tmp_path)
-    shared = tmp_path / "shared-omc"
-    (shared / "docs").mkdir(parents=True)
-    (shared / "docs" / "page.md").write_text("docs")
-    os.symlink(shared, primary / ".omc")
-    os.symlink(shared, wt / ".omc")
-
-    rc, verdict, _ = _run(["rebase-main", "--base", "main"], wt, tmp_path, capsys)
-
-    assert rc == 0 and verdict["ok"] is True
-    assert verdict["shared"] == [".omc/docs"]
-    assert verdict["synced"] == []
-    assert (shared / "docs" / "page.md").read_text() == "docs"  # nothing destroyed
 
 
 def test_rebase_main_never_runs_gitnexus_index(tmp_path, capsys):
@@ -447,8 +432,8 @@ def test_rebase_main_never_runs_gitnexus_index(tmp_path, capsys):
         os.environ["PATH"] = old_path
 
     assert rc == 0 and verdict["ok"] is True
-    assert verdict["synced"] == [".omc/docs"]
-    assert (wt / ".omc" / "docs" / "page.md").read_text() == "docs"
+    assert "synced" not in verdict and "shared" not in verdict
+    assert not (wt / ".omc" / "docs" / "page.md").exists()  # nothing is mirrored either
     assert not (wt / ".gitnexus").exists()
     assert not calls.exists()  # registration goes: node never invoked
 
@@ -684,6 +669,9 @@ def test_dependency_usage_errors(capsys):
     assert run_internal(["dependency", "ensure"]) == 2  # --git is required
     assert run_internal(["dependency", "document"]) == 2
     assert "usage:" in capsys.readouterr().err
+    # documentation is gone: `document` is an unknown verb like any other
+    assert run_internal(["dependency", "document", "--git", "github.com/foo/bar"]) == 2
+    assert "dependency <ensure|list>" in capsys.readouterr().err
 
 
 def test_dependency_list_dispatches(tmp_path, monkeypatch, capsys):
@@ -704,9 +692,7 @@ def _seed_dep(home, commit="c" * 40):
         "commits": {
             commit: {
                 "checkout": str(dest),
-                "docs": str(home / "gitnexus" / "github.com" / "foo" / "bar" / commit / "docs"),
                 "indexed": True,
-                "documented": False,
                 "created": "2026-07-22T00:00:00+00:00",
             }
         },
@@ -761,9 +747,7 @@ def test_gitnexus_proxy_git_empty_checkout_hints_ensure(tmp_path, capsys, monkey
         "commits": {
             "c" * 40: {
                 "checkout": "",
-                "docs": "",
                 "indexed": True,
-                "documented": False,
                 "created": "2026-07-22T00:00:00+00:00",
             }
         },
@@ -813,13 +797,19 @@ _HEALING_NODE = (
     "#!/bin/sh\n"
     'echo "$@" >> "{calls}"\n'
     'case "$*" in\n'
-    '  *" clean --force") /bin/rm -rf .gitnexus ;;\n'
-    '  *" analyze --skip-agents-md --skip-skills"*) /bin/mkdir -p .gitnexus; '
+    '  *" clean --force") {rm} -rf .gitnexus ;;\n'
+    '  *" analyze --skip-agents-md --skip-skills"*) {mkdir} -p .gitnexus; '
     'printf \'{{"branch":"main","lastCommit":"%s","repoPath":"%s"}}\' '
-    '"$(/usr/bin/git rev-parse HEAD)" "$PWD" > .gitnexus/meta.json ;;\n'
+    '"$({git} rev-parse HEAD)" "$PWD" > .gitnexus/meta.json ;;\n'
     "esac\n"
     "echo ok\nexit 0\n"  # unconditional ok: ensure_gitnexus's --version probe must pass
 )
+
+
+def _node_script(body, calls):
+    """Fill a node stub template: restricted PATH, so real tools by resolved path."""
+    tools = {t: shlex.quote(host_bin(t)) for t in ("git", "mkdir", "rm")}
+    return body.format(calls=calls, **tools)
 
 
 def _gitnexus_env_with_config(tmp_path, monkeypatch, *, node_body=_HEALING_NODE):
@@ -834,10 +824,11 @@ def _gitnexus_env_with_config(tmp_path, monkeypatch, *, node_body=_HEALING_NODE)
     home = tmp_path / "omc-home"
     store.save_global(home, GlobalConfig())
     node = tmp_path / "bin" / "node"
-    node.write_text(node_body.format(calls=calls))
+    node.write_text(_node_script(node_body, calls))
     gitlog = tmp_path / "bin" / "git.calls"
     git = tmp_path / "bin" / "git"
-    git.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{gitlog}"\nexec /usr/bin/git "$@"\n')
+    real_git = shlex.quote(host_bin("git"))
+    git.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{gitlog}"\nexec {real_git} "$@"\n')
     git.chmod(git.stat().st_mode | stat.S_IXUSR)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -914,6 +905,14 @@ def test_refresh_unconfigured_exits_2(tmp_path, capsys, monkeypatch):
     assert rc == 2 and "omc configure" in capsys.readouterr().err
 
 
+def test_refresh_rejects_enable_documentation(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert run_internal(["gitnexus", "refresh", "--enable-documentation"]) == 2
+    err = capsys.readouterr().err
+    assert "usage: omc internal" in err and "--enable-documentation" not in err
+
+
 def test_refresh_waits_for_busy_lock_holder(tmp_path, capsys, monkeypatch):
     from omc import internal
     from omc.toolctx import ToolContext
@@ -956,7 +955,7 @@ def test_refresh_hints_when_primary_is_behind_origin(tmp_path, capsys, monkeypat
     bindir.mkdir()
     calls = bindir / "node.calls"
     node = bindir / "node"
-    node.write_text(_HEALING_NODE.format(calls=calls))
+    node.write_text(_node_script(_HEALING_NODE, calls))
     node.chmod(node.stat().st_mode | stat.S_IXUSR)
     cli = home / "dependencies" / "gitnexus" / "gitnexus" / "dist" / "cli" / "index.js"
     cli.parent.mkdir(parents=True)
@@ -992,12 +991,8 @@ def test_proxy_prints_stale_verdict_on_stderr_only_when_stale(tmp_path, capsys, 
         captured = capsys.readouterr()
         assert captured.err.splitlines()[0].startswith("OMC_KNOWLEDGE ")
         assert "OMC_KNOWLEDGE" not in captured.out
-        _seed_fresh_index(repo)
-        (repo / ".gitnexus" / "wiki").mkdir()
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
-        ).stdout.strip()
-        (repo / ".gitnexus" / "wiki" / "meta.json").write_text(json.dumps({"fromCommit": head}))
+        _seed_fresh_index(repo)  # indexed, no .gitnexus/wiki: fresh without any wiki
+        assert not (repo / ".gitnexus" / "wiki").exists()
         assert run_internal(["gitnexus", "query", "x"]) == 0
         assert "OMC_KNOWLEDGE" not in capsys.readouterr().err
     finally:
@@ -1209,7 +1204,7 @@ def test_rebase_main_squash_does_not_revert_main(tmp_path, capsys):
     )
 
     assert rc == 0 and verdict["ok"] is True and verdict["squashed"] == 2
-    assert list(verdict) == ["ok", "rebased", "synced", "shared", "squashed", "knowledge"]
+    assert list(verdict) == ["ok", "rebased", "squashed", "knowledge"]
     assert verdict["rebased"].startswith(f"{old}..")
     assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=wt) == "1"
     assert (wt / "f2.txt").exists()  # nothing of main is reverted
@@ -1293,7 +1288,7 @@ def test_rebase_main_without_squash_keeps_history(tmp_path, capsys):
     assert _git_out("rev-list", "--count", "origin/main..HEAD", cwd=wt) == "2"
 
 
-_PRIMARY_NOOP_KEYS = ["ok", "rebased", "synced", "shared", "note", "knowledge"]
+_PRIMARY_NOOP_KEYS = ["ok", "rebased", "note", "knowledge"]
 
 
 def test_rebase_main_in_primary_on_base_is_noop_with_squash(tmp_path, capsys):
@@ -1306,7 +1301,7 @@ def test_rebase_main_in_primary_on_base_is_noop_with_squash(tmp_path, capsys):
 
     assert rc == 0 and list(verdict) == _PRIMARY_NOOP_KEYS
     assert verdict["ok"] is True and verdict["note"] == "primary checkout — nothing to rebase"
-    assert verdict["rebased"] == "" and verdict["synced"] == [] and verdict["shared"] == []
+    assert verdict["rebased"] == "" and "synced" not in verdict and "shared" not in verdict
     assert _git_out("rev-parse", "HEAD", cwd=primary) == head
     assert _git_out("status", "--porcelain", cwd=primary) == "M f.txt"
 
@@ -1331,8 +1326,8 @@ def test_rebase_main_in_primary_squashes_a_feature_branch(tmp_path, capsys):
     )
 
     assert rc == 0 and verdict["ok"] is True and verdict["squashed"] == 2
-    assert list(verdict) == ["ok", "rebased", "synced", "shared", "squashed", "knowledge"]
-    assert verdict["synced"] == [] and verdict["shared"] == []  # the primary mirrors nothing
+    assert list(verdict) == ["ok", "rebased", "squashed", "knowledge"]
+    assert "synced" not in verdict and "shared" not in verdict
     assert verdict["rebased"].startswith(f"{old}..")
     assert f"pre-squash tip {old} (undo: git reset --hard {old})" in err
     assert _git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=primary) == "feature/x"

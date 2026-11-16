@@ -263,9 +263,13 @@ def test_readme_documents_every_watch_option():
         for option in action.option_strings
     }
     assert options
+    import re
+
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
-    for option in sorted(options):
-        assert any(line.startswith(f"| `{option}`") for line in readme.splitlines()), option
+    watch = readme.split("## Keep knowledge fresh with `omc watch`", 1)[1].split("\n## ", 1)[0]
+    rows = {m.group(1) for line in watch.splitlines() if (m := re.match(r"\| `(--[a-z-]+)`", line))}
+    # exact: every parser option has a row, and no row names a removed option
+    assert rows == options
 
 
 def test_readme_starts_with_regeneration_banner():
@@ -465,10 +469,54 @@ def test_readme_recipe_knowledge_flow_keeps_graph_primary():
     recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
     knowledge_flow = recipe.split("2. Knowledge flowchart:", 1)[1].split("3. Sequence", 1)[0]
     assert "primary `.gitnexus/`" in knowledge_flow
-    assert "worktree `.omc/docs/`" in knowledge_flow
+    assert ".omc/docs" not in knowledge_flow
     assert "no copied graph" in knowledge_flow
     assert "internal proxy" in knowledge_flow
     assert "rebase-main" in knowledge_flow
+
+
+def test_readme_documents_documentation_removal():
+    root = Path(__file__).resolve().parents[2]
+    recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
+    readme = (root / "README.md").read_text()
+    readme_head, readme_tail = readme.split("## Update", 1)
+    readme_update, _, readme_rest = readme_tail.partition("\n## ")
+    recipe_head, recipe_tail = recipe.split("#### `## Update`", 1)
+    recipe_update, _, recipe_rest = recipe_tail.partition("\n#### ")
+    removed = (
+        "--enable-documentation",
+        "omc:document",
+        "Documentation provider",
+        "docs_model",
+        "llm.docs",
+    )
+    for text, name in (
+        (readme_head + readme_rest, "README outside Update"),
+        (recipe_head + recipe_rest, "recipe outside the Update slot"),
+    ):
+        for needle in removed:
+            assert needle not in text, f"{name} still says {needle!r}"
+    # D4/D7: the upgrade note names the leftovers, the notice and the one-shot fix
+    for needle in (
+        ".gitnexus/wiki/",
+        ".omc/docs/",
+        "~/.omc/secrets.yaml",
+        "may be deleted",
+        "ignoring unknown key(s)",
+        "omc configure --set llm.default=",
+        # the store reset (`gitnexus clean --force`) takes a leftover wiki with it
+        "--reset-gitnexus",
+        "destroy and rebuild",
+    ):
+        assert needle in readme_update, f"README Update section missing {needle!r}"
+    for needle in (
+        "upgrade",
+        "secrets.yaml",
+        "ignoring unknown key(s)",
+        "--reset-gitnexus",
+        "destroy and rebuild",
+    ):
+        assert needle in recipe_update, f"recipe Update slot missing {needle!r}"
 
 
 def test_readme_headings_match_regeneration_skill():
@@ -534,16 +582,15 @@ def test_provider_flags_come_from_the_registry_and_exclude_each_other(capsys):
 
 def test_with_provider_is_a_process_local_copy():
     from omc.cli import _with_provider
-    from omc.config.schema import Config, SecretsConfig
+    from omc.config.schema import Config
 
-    cfg = Config(secrets=SecretsConfig(api_keys={"claude": "k"}))
+    cfg = Config()
     same = _with_provider(cfg, None)
     assert same is cfg
     over = _with_provider(cfg, "codex")
     assert over.llm.default == "codex" and cfg.llm.default == "claude"
     assert over.llm.providers is cfg.llm.providers  # shallow: nothing on this path mutates it
-    assert over.secrets.api_keys == {"claude": "k"}
-    assert "api_keys" not in repr(over)  # SecretsConfig repr=False survives the copy
+    assert over.gitnexus is cfg.gitnexus and over.worktree is cfg.worktree
 
 
 def test_design_dispatch_applies_the_override(monkeypatch):
@@ -643,7 +690,6 @@ def test_review_without_config_bails(tmp_path, capsys, monkeypatch):
         (["start", "PROJ-1", "--claude", "--dry-run"], "codex", "claude", {"session"}, True),
         (["implement", "--codex", "--dry-run"], "claude", "codex", {"session"}, True),
         (["review", "--claude"], "codex", "claude", {"session"}, False),
-        (["dependency", "watch", "--once"], "claude", "codex", {"docs"}, False),
     ],
 )
 def test_provider_command_reconciles_before_worker(
@@ -654,7 +700,6 @@ def test_provider_command_reconciles_before_worker(
 
     original = Config()
     original.llm.default = saved_provider
-    original.llm.docs.provider = "codex"
     remapped = Config()
     events = []
     monkeypatch.setattr(cli, "_load_cfg_or_bail", lambda ctx: events.append("load") or original)
@@ -672,11 +717,7 @@ def test_provider_command_reconciles_before_worker(
         assert leaves == groups
         assert dry_run is ("--dry-run" in argv)
         assert callable(say)
-        assert cfg.llm.default == (effective_provider if groups == {"session"} else saved_provider)
-        if groups == {"session"}:
-            assert [cfg.llm.default] == [effective_provider]
-        else:
-            assert cfg.llm.docs.provider == effective_provider
+        assert cfg.llm.default == effective_provider
         return remapped
 
     monkeypatch.setattr(cli, "reconcile", fake_reconcile, raising=False)
@@ -691,36 +732,35 @@ def test_provider_command_reconciles_before_worker(
         monkeypatch.setattr(cli, "run_start", session_worker)
     elif argv[0] == "implement":
         monkeypatch.setattr("omc.implement.run_implement", session_worker)
-    elif argv[0] == "review":
-        monkeypatch.setattr("omc.review.run_review", session_worker)
     else:
-
-        def dependency_worker(ctx, *, interval, once):
-            events.append("worker")
-            assert once and interval == 30
-            return 23
-
-        monkeypatch.setattr("omc.depwatch.run_dependency_watch", dependency_worker)
+        monkeypatch.setattr("omc.review.run_review", session_worker)
 
     assert cli.main(argv) == 23
-    assert events == (
-        ["load", "override", "reconcile", "worker"]
-        if groups == {"session"}
-        else ["load", "reconcile", "worker"]
-    )
+    assert events == ["load", "override", "reconcile", "worker"]
     assert original.llm.default == saved_provider
 
 
 @pytest.mark.parametrize(
-    "argv", [["dependency", "list"], ["configure", "--defaults"], ["internal", "models"]]
+    "argv",
+    [
+        ["dependency", "list"],
+        ["dependency", "watch", "--once"],
+        ["configure", "--defaults"],
+        ["internal", "models"],
+    ],
 )
-def test_non_launch_commands_do_not_reconcile(monkeypatch, argv):
+def test_non_launch_commands_do_not_reconcile(tmp_path, monkeypatch, argv):
     import omc.cli as cli
 
+    # A hermetic home with no config: `dependency watch` indexes without an LLM
+    # and must neither read the config nor reconcile a model.
+    monkeypatch.setenv("OMC_HOME", str(tmp_path / "empty"))
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
         cli, "reconcile", lambda *a, **kw: pytest.fail("unexpected reconcile"), raising=False
     )
     monkeypatch.setattr("omc.depwatch.run_dependency_list", lambda home: 0)
+    monkeypatch.setattr("omc.depwatch.run_dependency_watch", lambda ctx, *, interval, once: 0)
     monkeypatch.setattr("omc.configure.run_configure", lambda ctx, *, defaults, sets: 0)
     monkeypatch.setattr("omc.internal.run_internal", lambda args: 0)
     assert cli.main(argv) == 0
@@ -736,7 +776,7 @@ def test_stale_session_dry_run_reports_all_leaves_without_launch(monkeypatch, ca
     writes = []
     turns = []
     monkeypatch.setattr("omc.config.store.save_global", lambda *a, **kw: writes.append(True))
-    monkeypatch.setattr("omc.docsllm.cli_model_probe", lambda *a, **kw: turns.append(True))
+    monkeypatch.setattr("omc.modelprobe.cli_model_probe", lambda *a, **kw: turns.append(True))
 
     def stale(ctx, cfg, groups, *, say, dry_run):
         assert groups == {"session"} and dry_run
