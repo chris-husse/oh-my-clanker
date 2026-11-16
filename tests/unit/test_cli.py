@@ -308,15 +308,48 @@ def test_readme_documents_human_review():
         assert "fix" in important and "waiver" in important
 
 
-def test_readme_documents_gitnexus_embeddings():
+def test_readme_documents_always_on_embeddings():
     root = Path(__file__).resolve().parents[2]
     recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
     readme = (root / "README.md").read_text()
     for text, name in ((recipe, "recipe"), (readme, "README")):
-        assert "gitnexus.embeddings" in text, f"{name} does not mention gitnexus.embeddings"
+        assert "gitnexus.embeddings" not in text, f"{name} still names the retired option"
         assert "gitnexus-embeddings" in text, f"{name} does not name the runtime layout"
-    assert "--set gitnexus.embeddings=true" in readme
-    assert "off by default" in readme.lower() or "default off" in readme.lower()
+        assert "keyword-only" in text, f"{name} lost the fallback"
+
+
+def test_readme_drops_the_dependency_subsystem():
+    root = Path(__file__).resolve().parents[2]
+    for rel in (".claude/skills/regenerate-readme/SKILL.md", "README.md"):
+        text = (root / rel).read_text()
+        for gone in ("omc dependency", "dependency watch", "explain-dependency"):
+            assert gone not in text, f"{rel} still names {gone!r}"
+
+
+def test_readme_documents_gitnexus_ignore_and_sibling_repos():
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    for needle in ("`.gitnexusignore`", "gitnexus-ignore-context", "sibling"):
+        assert needle in readme, needle
+
+
+def test_readme_documents_the_python_requirement():
+    from omc import installer
+
+    root = Path(__file__).resolve().parents[2]
+    recipe = (root / ".claude/skills/regenerate-readme/SKILL.md").read_text()
+    readme = (root / "README.md").read_text()
+    required = installer.REQUIRED_PYTHON
+    install = (
+        f"uv tool install --python '{required}' git+https://github.com/chris-husse/oh-my-clanker"
+    )
+    upgrade = f"uv tool upgrade --python '{required}' omc"
+    for text, name in ((recipe, "recipe"), (readme, "README")):
+        assert install in text, f"{name} lacks the install command with {required}"
+        assert upgrade in text, f"{name} lacks the one-time upgrade of an older tool venv"
+    update = readme.split("## Update", 1)[1].split("\n## ", 1)[0]
+    prerequisites = readme.split("## Prerequisites", 1)[1].split("\n## ", 1)[0]
+    assert upgrade in update
+    assert "Python 3.14" in prerequisites
 
 
 def test_readme_documents_provider_selection_per_step():
@@ -628,7 +661,7 @@ def test_with_provider_is_a_process_local_copy():
     over = _with_provider(cfg, "codex")
     assert over.llm.default == "codex" and cfg.llm.default == "claude"
     assert over.llm.providers is cfg.llm.providers  # shallow: nothing on this path mutates it
-    assert over.gitnexus is cfg.gitnexus and over.worktree is cfg.worktree
+    assert over.worktree is cfg.worktree
 
 
 def test_design_dispatch_applies_the_override(monkeypatch):
@@ -778,30 +811,27 @@ def test_provider_command_reconciles_before_worker(
     assert original.llm.default == saved_provider
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["dependency", "list"],
-        ["dependency", "watch", "--once"],
-        ["configure", "--defaults"],
-        ["internal", "models"],
-    ],
-)
+@pytest.mark.parametrize("argv", [["configure", "--defaults"], ["internal", "models"]])
 def test_non_launch_commands_do_not_reconcile(tmp_path, monkeypatch, argv):
     import omc.cli as cli
 
-    # A hermetic home with no config: `dependency watch` indexes without an LLM
-    # and must neither read the config nor reconcile a model.
+    # A hermetic home with no config: these commands must neither read the
+    # config nor reconcile a model.
     monkeypatch.setenv("OMC_HOME", str(tmp_path / "empty"))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
         cli, "reconcile", lambda *a, **kw: pytest.fail("unexpected reconcile"), raising=False
     )
-    monkeypatch.setattr("omc.depwatch.run_dependency_list", lambda home: 0)
-    monkeypatch.setattr("omc.depwatch.run_dependency_watch", lambda ctx, *, interval, once: 0)
     monkeypatch.setattr("omc.configure.run_configure", lambda ctx, *, defaults, sets: 0)
     monkeypatch.setattr("omc.internal.run_internal", lambda args: 0)
     assert cli.main(argv) == 0
+
+
+@pytest.mark.parametrize("argv", [["dependency", "list"], ["dependency", "watch", "--once"]])
+def test_dependency_command_is_gone(argv):
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2  # argparse: invalid choice
 
 
 @pytest.mark.parametrize("argv", [["design", "PROJ-1"], ["implement"], ["review"]])

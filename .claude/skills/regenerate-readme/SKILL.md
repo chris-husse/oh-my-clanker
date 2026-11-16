@@ -17,10 +17,10 @@ CLI authority: a worktree's copied `.venv` may render help from the primary.
 
 | README sections | Required sources |
 |---|---|
-| Install, Update, Configure | `src/omc/cli/__init__.py`, `src/omc/config/schema.py`, `src/omc/installer.py`, `src/omc/reconcile.py`, `src/omc/configure.py`, `src/omc/config/store.py` (`_hydrate`'s unknown-key notice); frozen help for configure/install/update/uninstall |
+| Install, Update, Configure | `pyproject.toml` (`requires-python`), `src/omc/cli/__init__.py`, `src/omc/config/schema.py`, `src/omc/installer.py`, `src/omc/reconcile.py`, `src/omc/configure.py`, `src/omc/config/store.py` (`_hydrate`'s unknown-key notice); frozen help for configure/install/update/uninstall |
 | Keep knowledge fresh with `omc watch` | The watch parser, module docstring and tick/hook behavior in `src/omc/watch.py`, `.config/wt.toml`; frozen watch help |
-| Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/write-plan/SKILL.md`, `skills/implement/SKILL.md`, `skills/audit/SKILL.md`, `skills/finish/SKILL.md`, `skills/create-mr/SKILL.md`, `skills/hook/SKILL.md`, `skills/rebase-main/SKILL.md`, `skills/design/SKILL.md`, `skills/verify/SKILL.md`, `skills/review/SKILL.md` for authority, stage and hook semantics |
-| How omc is put together | `src/omc/distribution/AGENTS.md`, `src/omc/toolctx.py`, `src/omc/gate.py`, `src/omc/gitnexus.py` (embeddings: ensure_embeddings, the sync backfill), `src/omc/providers/base.py`, `src/omc/internal.py`; `skills/gitnexus-explain/SKILL.md` for query routing; verdict contracts in the relevant skills |
+| Lifecycle | `src/omc/start.py`, `src/omc/implement.py`, `src/omc/review.py`; frontmatter of every `skills/*/SKILL.md`; lifecycle help; `skills/start/SKILL.md`, `skills/plan/SKILL.md`, `skills/write-plan/SKILL.md`, `skills/implement/SKILL.md`, `skills/audit/SKILL.md`, `skills/finish/SKILL.md`, `skills/create-mr/SKILL.md`, `skills/hook/SKILL.md`, `skills/rebase-main/SKILL.md`, `skills/design/SKILL.md`, `skills/verify/SKILL.md`, `skills/review/SKILL.md`, `skills/gitnexus-ignore/SKILL.md`, `skills/integrate/SKILL.md` for authority, stage and hook semantics |
+| How omc is put together | `src/omc/distribution/AGENTS.md`, `src/omc/toolctx.py`, `src/omc/gate.py`, `src/omc/gitnexus.py` (embeddings: ensure_embeddings, the sync backfill), `src/omc/providers/base.py`, `src/omc/internal.py`; `skills/gitnexus-explain/SKILL.md` for query routing; `skills/explain/SKILL.md` for the sibling-repo lookup; verdict contracts in the relevant skills |
 | Development | `.omc/config.yaml`, `.config/wt.toml`, `.omc/config/AGENTS.md`, every `.omc/skills/*/SKILL.md`, every `.omc/hooks/*/SKILL.md`, `.gitignore` |
 | Prerequisites, Other commands, Notifications, Security note, License | Existing README; parser/help; `src/omc/notify.py`, `src/omc/slug.py`, `src/omc/providers/claude.py`, `src/omc/providers/codex.py`, `LICENSE` |
 | Links and retained details | `docs/shell-integration.md`, relevant marketplace/E2E sections of `docker/PLUGIN-NOTES.md`; config validation/store/UI and plugin code when checking their behavior |
@@ -30,7 +30,7 @@ CLI authority: a worktree's copied `.venv` may render help from the primary.
 1. Read the sources above and inventory the existing facts against the carryover
    slots below. Resolve discrepancies from source, recording factual corrections.
 2. Render help only, using `uv run --frozen omc <cmd> --help` for every command
-   described (including `dependency watch`/`list`, `title`, and `shell-integration`).
+   described (including `title` and `shell-integration`).
    `--frozen` avoids rewriting `uv.lock`. Installation examples are output text,
    not commands to execute while generating documentation.
 3. Write `README.md` in full using the fixed outline below. The opening four
@@ -72,7 +72,9 @@ The literal `##` headings below are the README's ordered headings.
 #### `## Install` — target 25 lines
 
 Three numbered steps: CLI installation, `omc configure`, plugin installation.
-Use `uv tool install git+https://github.com/chris-husse/oh-my-clanker` verbatim.
+Use `uv tool install --python '>=3.14' git+https://github.com/chris-husse/oh-my-clanker`
+verbatim: omc requires Python 3.14 or newer (`requires-python`, `installer.REQUIRED_PYTHON`),
+and uv downloads a managed interpreter when the host has none.
 Provide the two-row harness table: Claude marketplace add + plugin install;
 Codex marketplace add + `/plugins`. Claude users may skip manual installation:
 configure/update/design/implement/review install, repair and refresh the plugin.
@@ -80,15 +82,23 @@ Explain dry-run's stale/missing-plugin report without implying it changes the pl
 Superpowers is required: automatic for Claude Code, user-installed for Codex.
 Link the marketplace dependency pitfall in `docker/PLUGIN-NOTES.md` and
 `obra/superpowers`. Introduce `/omc:integrate`, including reruns after updates,
-for check/build/verify/review/explain-context/investigation-context integration
-and the five optional project hooks.
+for check/build/verify/review/explain-context/investigation-context integration,
+the five optional project hooks, and the `gitnexus-ignore-context` skill and a
+first `.gitnexusignore`, which it builds before offering the first index.
 One sentence links macOS fish/iTerm2 branch titles and the herdr sidebar's worktree folder and branch to `docs/shell-integration.md`.
 
 #### `## Update` — target 10 lines
 
-Show `omc update` and five effects: uv upgrade from the install source,
-managed GitNexus update, refreshed global behavior layer, harness plugin
-refresh/repair (in-app when no scriptable updater), and macOS fish hook reconcile.
+Show `omc update` and six effects: uv upgrade from the install source (with
+`--python '>=3.14'`), managed GitNexus update (the embedding runtime and model
+install once, then stay), removal of the retired dependency cache
+(`~/.omc/dependencies.json` and its lock, entries under `~/.omc/dependencies/` other
+than `gitnexus` and `gitnexus-embeddings`, and `~/.omc/gitnexus/`; it runs one update
+after the update that delivers it, narrated and never fatal), refreshed global
+behavior layer, harness plugin refresh/repair (in-app when no scriptable updater),
+and macOS fish hook reconcile. uv keeps a tool venv's interpreter on upgrade, so an
+omc installed on Python 3.13 or older needs one manual
+`uv tool upgrade --python '>=3.14' omc`; later `omc update` runs pass it themselves.
 Include `omc version` (version, provenance, source), `omc install <path>`
 (developer checkout; re-roots future updates), and `omc uninstall` (binary,
 managed data/guidance/hook; plugin removal via harness).
@@ -117,10 +127,11 @@ such as `sol:high`, blank follows the provider default; take the per-provider
 defaults table from `default_task_model` in `src/omc/providers/*.py`; plan
 tasks carry a `Complexity:` label, missing means medium); Native notifications;
 Branch prefix; Base branch.
-GitNexus → Embeddings (`gitnexus.embeddings`, off by default; also `--set gitnexus.embeddings=true`):
-omc installs GitNexus's local embedding runtime under `~/.omc`, embeds on every
-refresh, backfills an existing index once, and falls back to keyword-only indexing
-when the runtime or a download fails — never failing update, watch or refresh.
+Embeddings are always on, with no setting: omc installs GitNexus's local embedding
+runtime and downloads its model under `~/.omc` once, embeds on every refresh,
+backfills each existing index once, and falls back to keyword-only indexing when
+the runtime or a download fails — never failing update, watch or refresh. A stale
+`gitnexus` section from an older config loads silently and is dropped on the next save.
 LLM → Provider Selection Per Step (`llm.provider_selection_per_step`, off by default;
 also `--set llm.provider_selection_per_step=true`): off means `/omc:design` runs
 through implement, audit, finish and the push in one session, with one notice line
@@ -175,7 +186,6 @@ ticks, with `OMC_WATCH_OUTCOME`; pure knowledge healing fires no hook. Failures
 or hung hooks warn and link logs without stopping loop. Hook log path is printed
 up front; build streams live with progress/elapsed time, `tail -f` and
 `omc internal build-progress <logfile>`, no build timeout, absent build skips.
-End with external `omc dependency watch` (indexes cached checkouts, announces completion).
 
 #### `` ## The lifecycle: `omc design`, `omc implement`, `omc review` `` — target 55 lines
 
@@ -235,13 +245,16 @@ Shared flags table: provider overrides (`--claude`/`--codex`, no saved change),
 a stale configured model is reported as a would-be remap and the run stops),
 `--headless`, design-only `--no-mutex`. Codex direct syntax is `$omc:…`, not
 `/omc:…`; Claude resumes by name, repeated launch needs id; Codex lacks names.
-Nine one-line in-session skills: explain, index, explain-dependency,
+Eight one-line in-session skills: explain, index,
 investigate (env-locked read-only evidence; investigation-context is required and
 its `envs/<env>.md` briefings define the environments), rebase-main,
 check-wt-config, finish, integrate, and `/omc:mr-review <mr-link>` (review a
 colleague's GitLab MR or GitHub PR against the intent its author linked, post the
 comments that survive reconciliation unattended with an automated-review footer,
 and keep the full review trail on disk).
+One sentence: `/omc:explain` reaches sibling omc repos (primary checkouts in the
+parent directory of this repo's primary checkout that carry `.omc/` and whose
+`.git` is a directory, this repo excluded) through their own graphs and never clones.
 The rebase-main row and finish prose say rebase-main rebases code only, while
 explain queries the primary graph; the row says audit and finish run it with
 `--squash` and that it runs the project's `post_rebase` hook when the base moved.
@@ -256,7 +269,10 @@ check → review → verify**: the review runs conformance first against the
 record, then the project stage and both lenses, and is recorded; verify runs
 after it and is recorded on green (a tree the review's fixes changed is built
 and checked again before the verify, in audit and in the MR gate alike);
-verify findings and fixes never trigger a review. Then audit invokes finish. Finish squashes, rebases (a
+verify findings and fixes never trigger a review. Review also keeps
+`.gitnexusignore` current through the internal `gitnexus-ignore` flow, guided by the
+`gitnexus-ignore-context` skill: it never gates, and the first review in a repo
+without the file surveys the whole tree. Then audit invokes finish. Finish squashes, rebases (a
 conflict with the base stops the rebase at most once; the session resolves that
 conflict itself, as `/omc:rebase-main` does, before the stage gates, rather than
 handing it back), then runs build → check (both skipped when the tree is the
@@ -304,11 +320,12 @@ Exactly three Mermaid diagrams, each with a short explanatory paragraph:
    it a worktree snapshot. Mention
    GitNexus approved-source install under `~/.omc/dependencies/gitnexus`; the
    checkout tracks upstream `main` (no version pin), so never cite a GitNexus version.
-   When `gitnexus.embeddings` is on, the embedding runtime and model cache live beside
+   The embedding runtime and model cache live beside
    the clone under `~/.omc/dependencies/gitnexus-embeddings/{runtime,hf}`
    (`GITNEXUS_EMBEDDING_RUNTIME_DIR`, `HF_HOME` from `gitnexus_env`), so an update of
-   the clone never touches them; `/omc:explain` queries become semantic and the
-   keyword-only warning disappears.
+   the clone never touches them. Once the runtime is installed and the index is
+   embedded, `/omc:explain` queries are semantic and the keyword-only warning
+   disappears.
 3. Sequence for a real internal contract (e.g. design-record): skill → internal
    command → single prefixed JSON verdict → caller continues. List exactly
    OMC_KNOWLEDGE, OMC_DESIGN_RECORD, OMC_STAGE, OMC_REBASE_MAIN,
@@ -329,13 +346,14 @@ claim that all skills spawn only through internal. Link Development as example.
 
 #### `## Prerequisites` — target 10 lines
 
-Retain git, Worktrunk/wt, uv, at least one provider CLI, superpowers. Explain
+Retain git, Worktrunk/wt, uv, Python 3.14 or newer (uv provides it), at least one
+provider CLI, superpowers. Explain
 real probes stop with install hints (exit 1, not a refusal) and which commands run them. Keep existing project links.
 
 #### `## Other commands` — target 12 lines
 
 One-line rows for version, print-install-path, install, update, uninstall,
-dependency watch, dependency list, shell-integration, title, aws-credential-process. Lifecycle
+shell-integration, title, aws-credential-process. Lifecycle
 and watch sections are their references. Verify parser for auxiliary commands.
 
 #### `## Notifications` — target 15 lines

@@ -12,7 +12,6 @@ from ..errors import ConfigError
 from ..providers.registry import get_provider, provider_names
 from .schema import (
     Config,
-    GitNexusConfig,
     GlobalConfig,
     LLMConfig,
     ProjectConfig,
@@ -224,13 +223,6 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
             raise ConfigError(f"unknown config key: worktree.{head}")
         setattr(cfg, head, validate_worktree_value(head, value))
         return
-    if isinstance(cfg, GitNexusConfig):
-        if tail or head != "embeddings":
-            raise ConfigError(f"unknown config key: gitnexus.{dotted}")
-        if value not in ("true", "false"):
-            raise ConfigError("gitnexus.embeddings expects true or false")
-        cfg.embeddings = value == "true"
-        return
     field_names = {f.name for f in fields(cfg)}  # type: ignore[arg-type]
     if head not in field_names:
         raise ConfigError(f"unknown config key: {head}")
@@ -249,6 +241,10 @@ def set_key(cfg: object, dotted: str, value: str) -> None:
     setattr(cfg, head, value)
 
 
+# Spec 2026-11-16 §5.1: saves since 2026-10-27 carry it; no general mechanism until a 2nd.
+_RETIRED_GLOBAL_KEY = "gitnexus"
+
+
 def _hydrate(cls: type, data: dict, path: str, unknown: list[str] | None = None, prefix: str = ""):
     outermost = unknown is None
     if unknown is None:
@@ -256,6 +252,8 @@ def _hydrate(cls: type, data: dict, path: str, unknown: list[str] | None = None,
     field_map = {f.name: f for f in fields(cls)}
     kwargs = {}
     for name, value in data.items():
+        if outermost and cls is GlobalConfig and name == _RETIRED_GLOBAL_KEY:
+            continue
         if name not in field_map:
             unknown.append(f"{prefix}{name}")
             continue
@@ -304,8 +302,6 @@ def _hydrate(cls: type, data: dict, path: str, unknown: list[str] | None = None,
                 validate_worktree_value(fname, getattr(obj, fname))
             except ConfigError as exc:
                 raise ConfigError(f"{exc} in {path}") from exc
-    if cls is GitNexusConfig and not isinstance(obj.embeddings, bool):
-        raise ConfigError(f"invalid gitnexus.embeddings in {path}: expected true/false")
     if outermost and unknown:
         print(
             f"· config: ignoring unknown key(s) {sorted(unknown)} in {path}",

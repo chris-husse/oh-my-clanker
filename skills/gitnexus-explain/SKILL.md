@@ -36,11 +36,10 @@ The proxy exits 1 with an install hint when GitNexus is missing — relay that
 hint ("run `/omc:index` first") and stop; never index implicitly.
 
 Queries are semantic when the index carries vectors. GitNexus's stderr line
-"This index has no embedding vectors — results are keyword-only" means the user
-has not enabled `gitnexus.embeddings` (`omc configure` → GitNexus → Embeddings,
-or `--set gitnexus.embeddings=true`), or the runtime is missing, or the one-time
-backfill has not run yet. In that case relay that as a hint in your findings;
-never try to enable it from here.
+"This index has no embedding vectors — results are keyword-only" means the
+embedding runtime is missing or the one-time backfill has not run yet; the
+next refresh (`omc watch`, `/omc:index`) repairs it. In that case
+relay that as a hint in your findings; never run the fix from here.
 
 The proxy prints `OMC_KNOWLEDGE {…}` on **stderr** (matched by prefix, not
 position — GitNexus's own warnings land there too) when the snapshot is

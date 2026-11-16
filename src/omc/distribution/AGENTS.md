@@ -104,7 +104,8 @@ repo). In any other repository, ignore everything in this section.
   A required answer resumes the remaining phases under the same authorization;
   in a headless run, make the question the final output.
 - **Ask the graph, not grep**: `/omc:explain <question>` answers from the
-  project's GitNexus knowledge graph.
+  project's GitNexus knowledge graph, including sibling omc repos —
+  `/omc:explain` reaches them.
 - **Model selection**: the main session runs the configured Orchestrator
   model from `omc configure` — never second-guess it. Run `omc internal models`
   and read its single `OMC_MODELS` verdict before dispatching lifecycle

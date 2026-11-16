@@ -205,7 +205,9 @@ def _e2e_model_id(container, provider: str) -> str:
     return model
 
 
-def configure_omc(container, provider: str) -> str:
+def configure_omc(container, provider: str, *, timeout: int = 600) -> str:
+    """Install the provider's plugins and configure omc for it; `timeout` bounds each
+    of the two `omc configure` runs (the alias probe keeps its own 120 s)."""
     setup = container.get_wrapped_container().exec_run(
         ["bash", "/repo/docker/setup-plugins.sh", provider]
     )
@@ -238,6 +240,7 @@ def configure_omc(container, provider: str) -> str:
             "--set",
             "llm.provider_selection_per_step=true",
         ],
+        timeout=timeout,
     )
     assert rc == 0, f"omc configure failed in container:\n{out}"
     if provider == "codex":
@@ -252,12 +255,12 @@ def configure_omc(container, provider: str) -> str:
         for leaf in _TASK_MODEL_LEAVES
         for arg in ("--set", f"llm.providers.{provider}.{leaf}={model}")
     ]
-    rc, out = run_in(container, ["omc", "configure", *pins])
+    rc, out = run_in(container, ["omc", "configure", *pins], timeout=timeout)
     assert rc == 0, f"omc E2E model pin failed:\n{out}"
     return model
 
 
-def make_work_repo(container, path="/work/repo") -> str:
+def make_work_repo(container, path="/work/repo", *, timeout: int = 600) -> str:
     """A throwaway git repo with an `origin` so wt + `git fetch origin` work.
 
     `.claude/settings.local.json` is ignored as in a real checkout: it is Claude
@@ -269,7 +272,7 @@ def make_work_repo(container, path="/work/repo") -> str:
         "echo hi > README.md && echo .claude/settings.local.json > .gitignore && "
         "git add . && git commit -qm init && git push -q origin main"
     )
-    rc, out = run_in(container, ["bash", "-c", script])
+    rc, out = run_in(container, ["bash", "-c", script], timeout=timeout)
     assert rc == 0, f"work repo setup failed:\n{out}"
     return path
 

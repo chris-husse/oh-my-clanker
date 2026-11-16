@@ -139,17 +139,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    p_dep = sub.add_parser(
-        "dependency", help="External dependency knowledge cache (~/.omc): watch, list"
-    )
-    dep_sub = p_dep.add_subparsers(dest="dep_command")
-    p_depw = dep_sub.add_parser("watch", help="Keep dependency checkouts indexed")
-    p_depw.add_argument("--interval", type=int, default=30, help="Seconds between ticks")
-    p_depw.add_argument(
-        "--once", action="store_true", help="Reconcile everything once, announce, exit"
-    )
-    dep_sub.add_parser("list", help="Show cached dependencies: repo, commit, index status")
-
     p_awscp = sub.add_parser(
         "aws-credential-process",
         help="AWS credential_process provider: assume a role with a 1Password-served"
@@ -346,17 +335,6 @@ def _dispatch(ctx: ToolContext, args: argparse.Namespace) -> int:
             clear_mutex=args.clear_mutex,
             reset_gitnexus=args.reset_gitnexus,
         )
-    if args.command == "dependency":
-        if args.dep_command == "watch":
-            from ..depwatch import run_dependency_watch
-
-            return run_dependency_watch(ctx, interval=args.interval, once=args.once)
-        if args.dep_command == "list":
-            from ..depwatch import run_dependency_list
-
-            return run_dependency_list(ctx.home)
-        print("usage: omc dependency {watch|list}", file=sys.stderr)
-        return 2
     if args.command == "configure":
         from ..configure import run_configure
 

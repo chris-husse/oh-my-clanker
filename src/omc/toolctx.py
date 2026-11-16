@@ -17,8 +17,8 @@ from pathlib import Path
 def gitnexus_env(home: Path) -> dict[str, str]:
     """Where every omc child finds GitNexus's storage and embedding runtime.
 
-    Unconditional: these say WHERE GitNexus would look, never WHETHER to embed
-    (that is `gitnexus.embeddings`, read only by gitnexus.ensure_embeddings).
+    Unconditional: these say WHERE GitNexus would look, never WHETHER: embedding
+    is always attempted (gitnexus.ensure_embeddings).
     Local storage overrides inherited sharing; GITNEXUS_STORAGE_PATH / _ROOT
     are unsupported and left untouched. The runtime dir and the Hugging Face
     cache live beside, not inside, the GitNexus clone so `omc update`'s

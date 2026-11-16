@@ -111,7 +111,10 @@ rules.
   --amend --no-edit`) — only what remains once known tool drift is
   restored. Files those fixes created (a new test from a conformance fix,
   say) are staged by path first, as above; leave the untracked artifacts a
-  stage itself leaves behind (reports, caches, build output) alone.
+  stage itself leaves behind (reports, caches, build output) alone. A stage
+  that staged a new file (e.g. `.gitnexusignore` from a review's index hygiene)
+  changed the tree too: that staged file is not an untracked artifact and goes
+  into the same amend.
 - **A review that changed the tree.** Wherever a review runs (audit's
   fixed review, the MR gate's review question), note
   `git rev-parse HEAD^{tree}` before each review run. When the tree after

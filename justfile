@@ -62,4 +62,4 @@ expensive-e2e-tests *args:
 
 # Install omc from this checkout (dev snapshot). Re-run after edits.
 install:
-    uv tool install --reinstall .
+    uv tool install --reinstall --python '>=3.14' .

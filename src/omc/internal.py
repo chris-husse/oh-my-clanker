@@ -39,8 +39,7 @@ from .wtconfig import (
 _USAGE = (
     "usage: omc internal {rebase-main [--base BRANCH] [--squash] | wt-template | design-record"
     " | gate [record] review|verify | models | global-instructions PROVIDER"
-    " | gitnexus [--git REF] <ensure|status|refresh|query|context|impact|cypher> [args…]"
-    " | dependency <ensure|list> [args…]"
+    " | gitnexus <ensure|status|refresh|query|context|impact|cypher> [args…]"
     " | skills list NAME"
     " | build-progress LOGFILE | herdr-cwd}"
 )
@@ -324,25 +323,15 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
     overriding inherited sharing so .gitnexus/ remains a local snapshot.
     GITNEXUS_STORAGE_PATH and GITNEXUS_STORAGE_ROOT overrides are unsupported
     with omc and remain untouched — reverify storage routing on upgrades too.
-
-    With --git REF (a URL or manifest key, optional @<hash>), queries scope to
-    that dependency checkout pinned to omc-pin — READ-ONLY: unknown/unindexed
-    refs error with the ensure hint, never clone.
     """
     if rest == ["ensure"]:
         return ensure_gitnexus(ctx)
-    # Before the --git parse AND the CLI-presence guard: status needs no CLI,
-    # refresh installs one itself via ensure_gitnexus.
+    # Before the CLI-presence guard: status needs no CLI, refresh installs one
+    # itself via ensure_gitnexus.
     if rest == ["status"]:
         return _knowledge_status(ctx)
     if rest[:1] == ["refresh"]:
         return _knowledge_refresh(ctx, rest[1:])
-    dep_ref: str | None = None
-    if rest[:1] == ["--git"]:
-        if len(rest) < 2:
-            print(_USAGE, file=sys.stderr)
-            return 2
-        dep_ref, rest = rest[1], rest[2:]
     if not rest or rest[0] not in _GITNEXUS_VERBS:
         print(_USAGE, file=sys.stderr)
         return 2
@@ -353,33 +342,6 @@ def _gitnexus(ctx: ToolContext, rest: list[str]) -> int:
             file=sys.stderr,
         )
         return 1
-    if dep_ref is not None:
-        from .dependency import PIN_BRANCH, resolve_ref
-
-        try:
-            key, commit, entry = resolve_ref(ctx.home, dep_ref)
-        except OmcError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        # A falsy checkout must be treated as not-indexed BEFORE building a Path:
-        # Path("") is Path("."), and "./.git" would spuriously pass the guard
-        # whenever cwd happens to be a git repo (wrong-repo answers).
-        checkout_str = entry.get("checkout")
-        if (
-            not entry.get("indexed")
-            or not checkout_str
-            or not (Path(checkout_str) / ".git").exists()
-        ):
-            print(
-                f"error: {key}@{commit[:7]} is not indexed — "
-                "run `omc internal dependency ensure --git <url>` first",
-                file=sys.stderr,
-            )
-            return 1
-        checkout = Path(checkout_str)
-        argv = gitnexus_argv(ctx, *rest, "--repo", str(checkout), "--branch", PIN_BRANCH)
-        cp = ctx.run(argv, cwd=checkout, capture=False)
-        return cp.returncode
     primary = primary_root(ctx)
     if primary is None:
         print("error: not inside a git repository", file=sys.stderr)
@@ -433,7 +395,7 @@ def _skills_list(ctx: ToolContext, name: str) -> int:
     def add(candidate: Path, skills_root: Path) -> None:
         try:
             resolved = candidate.resolve(strict=True)
-        except (OSError, RuntimeError):
+        except OSError:
             return
         if not resolved.is_file() or not resolved.is_relative_to(skills_root):
             return
@@ -444,7 +406,7 @@ def _skills_list(ctx: ToolContext, name: str) -> int:
     for base in bases:
         try:
             skills_root = base.resolve()
-        except (OSError, RuntimeError):
+        except OSError:
             continue
         if name != "explain-source":
             add(skills_root / name / "SKILL.md", skills_root)
@@ -455,7 +417,7 @@ def _skills_list(ctx: ToolContext, name: str) -> int:
             if not resolved_family.is_dir() or not resolved_family.is_relative_to(skills_root):
                 continue
             children = sorted(resolved_family.iterdir(), key=lambda path: path.name)
-        except (OSError, RuntimeError):
+        except OSError:
             continue
         for child in children:
             if child.name != ".git":
@@ -553,27 +515,6 @@ def run_internal(argv: list[str]) -> int:
             print(_USAGE, file=sys.stderr)
             return 2
         return _skills_list(ToolContext.from_env(), rest[1])
-    if cmd == "dependency":
-        from .dependency import run_ensure, run_list
-
-        if not rest:
-            print(_USAGE, file=sys.stderr)
-            return 2
-        sub, *dep_rest = rest
-        if sub == "list" and not dep_rest:
-            return run_list(ToolContext.from_env().home)
-        if sub == "ensure":
-            parser = argparse.ArgumentParser(prog="omc internal dependency ensure", add_help=False)
-            parser.add_argument("--git", required=True)
-            parser.add_argument("--commit", default=None)
-            try:
-                args = parser.parse_args(dep_rest)
-            except SystemExit:
-                print(_USAGE, file=sys.stderr)
-                return 2
-            return run_ensure(ToolContext.from_env(), args.git, args.commit)
-        print(_USAGE, file=sys.stderr)
-        return 2
     if cmd == "build-progress":
         parser = argparse.ArgumentParser(prog="omc internal build-progress", add_help=False)
         parser.add_argument("logfile")

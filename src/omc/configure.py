@@ -355,7 +355,6 @@ def _compose_menu(
         except OmcError as exc:
             return str(exc)
         gcfg.llm = candidate_g.llm
-        gcfg.gitnexus = candidate_g.gitnexus
         pcfg.worktree = candidate_p.worktree
         session.flags = tuple(a or b for a, b in zip(session.flags, flags, strict=True))
         # mininterface revalidates every tag on level submit. A probe can
@@ -467,11 +466,6 @@ def _compose_menu(
     for config_field in fields(gcfg):
         if config_field.name == "llm":
             session.root[config_field.metadata["label"]] = llm
-        elif config_field.name == "gitnexus":
-            session.root[config_field.metadata["label"]] = {
-                f.metadata["label"]: leaf(gcfg.gitnexus, f.name, f"gitnexus.{f.name}")
-                for f in fields(gcfg.gitnexus)
-            }
     if root is not None:
         worktree_field = next(f for f in fields(pcfg) if f.name == "worktree")
         session.root[f"{worktree_field.metadata['label']} (project)"] = {
